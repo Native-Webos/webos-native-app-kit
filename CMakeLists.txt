@@ -42,6 +42,7 @@ add_subdirectory(platform)
 add_subdirectory(input)
 add_subdirectory(focus)
 add_subdirectory(render)
+add_subdirectory(storage)
 
 if (WNK_BUILD_EXAMPLES)
     include(WebOSPackage)

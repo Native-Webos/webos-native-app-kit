@@ -7,6 +7,7 @@
 | webosbrew firmware symbol inventory ([dev-toolbox-cli](https://github.com/webosbrew/dev-toolbox-cli)) | read locally by `tools/fw-check.py`, `tools/fw-lib-matrix.py`; **not redistributed** | Apache-2.0 (tools); data describes LG firmware | Offline loadability checks |
 | [stb_truetype](https://github.com/nothings/stb) v1.26, commit `2c980bb59875b0d32144a71867fbdebb2f77cd20` | `third_party/stb/stb_truetype.h` (+ `LICENSE`) | MIT or public domain (choice) | Glyph rasterisation in `render/` |
 | [Atkinson Hyperlegible](https://brailleinstitute.org/freefont) Regular and Bold, © 2020 Braille Institute of America; from google/fonts commit `bd8f81ddb5c74d5c8897b36ad88b440266245103` | `assets/fonts/` (+ `OFL.txt`), shipped in packages under `fonts/` | SIL Open Font License 1.1 | UI text |
+| [nlohmann/json](https://github.com/nlohmann/json) v3.11.3 (`json.hpp` sha256 `9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6`) | `third_party/nlohmann/` (+ `LICENSE.MIT`) | MIT | JSON for DB8 calls and tests |
 | GNU GPL v3 text | `LICENSE` | — | Licence of this kit |
 
 LG firmware libraries (EGL/GLES, Wayland, libhelpers, NDL, Starfish, …) are resolved on the TV at

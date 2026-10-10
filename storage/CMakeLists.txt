@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+add_library(wnk_storage STATIC src/kv.cpp)
+target_include_directories(wnk_storage PUBLIC include)
+target_include_directories(wnk_storage SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
+target_link_libraries(wnk_storage PUBLIC wnk_platform)

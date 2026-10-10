@@ -22,7 +22,7 @@
 #include "wnk/input/input.hpp"
 #include "wnk/input/sdl_input.hpp"
 #include "wnk/log.hpp"
-#include "wnk/platform/luna.hpp"
+#include "wnk/storage/kv.hpp"
 #include "wnk/platform/probe.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/render/gles2_renderer.hpp"
@@ -194,50 +194,38 @@ class Script {
     std::string shot_;
 };
 
-// Experiment: can the app itself persist data in DB8 (webOS's built-in JSON store) over Luna?
-// Writes one record of its own kind with a launch counter; a value that survives relaunch and reboot
-// shows DB8 works for app data on this firmware. Returns a one-line summary for the screen.
-std::string db8_experiment(const std::string &app_id) {
-    if (!wnk::platform::kIsWebOS) return "DB8: not on webOS";
-    const std::string kind = app_id + ".wnk:1";
-    // DB8 rejected a 33-character _id ("db: Invalid _id length", OLED65C1PTB webOS 6.5.3); PlxNative's ids
-    // are at most 15 characters. Keep record ids short.
-    const std::string id = "wnkhello.state";
-    for (const char *service : {"luna://com.palm.db", "luna://com.webos.service.db"}) {
-        auto call = [&](const char *method, const std::string &payload) {
-            auto r = wnk::platform::luna_call_sync(std::string(service) + "/" + method, payload, 3000);
-            WNK_LOGI("db8", "%s/%s %s -> %s %s", service, method, payload.c_str(),
-                     wnk::platform::luna_status_name(r.status), r.status == wnk::platform::LunaStatus::Ok
-                                                                       ? r.payload.c_str()
-                                                                       : r.detail.c_str());
-            return r;
-        };
-        auto ok = [](const wnk::platform::LunaReply &r) {
-            return r.status == wnk::platform::LunaStatus::Ok &&
-                   r.payload.find("\"returnValue\":true") != std::string::npos;
-        };
-        auto kind_reply = call("putKind", "{\"id\":\"" + kind + "\",\"owner\":\"" + app_id + "\",\"indexes\":[]}");
-        if (!ok(kind_reply)) continue;
-        auto got = call("get", "{\"ids\":[\"" + id + "\"]}");
-        long previous = 0;
-        std::string rev_field;  // updating an existing object requires its current _rev (optimistic concurrency)
-        const size_t pos = got.payload.find("\"counter\":");
-        if (ok(got) && pos != std::string::npos) previous = std::strtol(got.payload.c_str() + pos + 10, nullptr, 10);
-        const size_t rev = got.payload.find("\"_rev\":");
-        if (ok(got) && rev != std::string::npos) {
-            rev_field = ",\"_rev\":" + std::to_string(std::strtoll(got.payload.c_str() + rev + 7, nullptr, 10));
-        }
-        const long next = previous + 1;
-        auto put = call("put", "{\"objects\":[{\"_id\":\"" + id + "\",\"_kind\":\"" + kind + "\"" + rev_field + ",\"" +
-                                   "counter\":" + std::to_string(next) + ",\"written\":" +
-                                   std::to_string(static_cast<long long>(time(nullptr))) + "}]}");
-        char line[160];
-        std::snprintf(line, sizeof line, "DB8 via %s: launch #%ld (previous value %ld), write %s", service + 7, next,
-                      previous, ok(put) ? "ok" : "FAILED");
-        WNK_LOGI("db8", "%s", line);
-        return line;
+// App state kept in the platform key/value store (DB8 on the TV, files on the host): a launch counter
+// and the last focused tile, restored on the next launch.
+struct SavedState {
+    long launches = 0;
+    int focus_tile = 0;
+    std::string note;  // one line for the screen
+};
+
+long read_long(wnk::storage::KeyValueStore &kv, const char *key, long fallback) {
+    wnk::storage::Entry e;
+    if (kv.get(key, &e) != wnk::storage::Status::Ok) return fallback;
+    char *end = nullptr;
+    const long v = std::strtol(e.value.c_str(), &end, 10);
+    return (end != nullptr && *end == '\0' && !e.value.empty()) ? v : fallback;
+}
+
+SavedState load_state(wnk::storage::KeyValueStore *kv, const std::string &open_error) {
+    SavedState st;
+    if (kv == nullptr) {
+        st.note = "Storage unavailable: " + open_error;
+        WNK_LOGW("storage", "%s", st.note.c_str());
+        return st;
     }
-    return "DB8: putKind refused on both service names (see log)";
+    st.launches = read_long(*kv, "launch.count", 0) + 1;
+    st.focus_tile = static_cast<int>(read_long(*kv, "focus.tile", 0));
+    const auto put = kv->put("launch.count", std::to_string(st.launches));
+    char line[160];
+    std::snprintf(line, sizeof line, "Storage (%s): launch #%ld, restored focus to tile %d, save %s",
+                  kv->backend_name(), st.launches, st.focus_tile, wnk::storage::status_name(put.status));
+    st.note = line;
+    WNK_LOGI("storage", "%s", line);
+    return st;
 }
 
 struct KeyLogLine {
@@ -247,7 +235,8 @@ struct KeyLogLine {
 
 class Demo {
  public:
-    Demo(wnk::render::Renderer &r, wnk::render::FontId regular, wnk::render::FontId bold, std::string storage_note)
+    Demo(wnk::render::Renderer &r, wnk::render::FontId regular, wnk::render::FontId bold, std::string storage_note,
+         int initial_tile)
         : r_(r), regular_(regular), bold_(bold), mapper_(wnk::input::default_keymap()),
           storage_note_(std::move(storage_note)) {
         fm_.add_scope({kGridScope, wnk::focus::kRootScope, false, true});
@@ -260,8 +249,16 @@ class Demo {
             fm_.upsert(n);
         }
         fm_.set_listener([this](NodeId from, NodeId to) { WNK_LOGD("focus", "%u -> %u", from, to); });
-        fm_.enter_scope(kGridScope);
+        if (initial_tile < 0 || initial_tile >= kCols * kRows || !fm_.focus(kTileBase + static_cast<NodeId>(initial_tile))) {
+            fm_.enter_scope(kGridScope);
+        }
         ring_ = target_ring();
+    }
+
+    // The focused grid tile (the dialog's buttons are not remembered).
+    int focused_tile() const {
+        const NodeId f = fm_.remembered(kGridScope);
+        return f >= kTileBase && f < kTileBase + kCols * kRows ? static_cast<int>(f - kTileBase) : 0;
     }
 
     bool running() const { return running_; }
@@ -594,7 +591,10 @@ int main(int argc, char **argv) {
                 WNK_LOGE("text", "font load failed: %s", err.c_str());
                 exit_code = 1;
             } else {
-                Demo demo(*renderer, regular, bold, db8_experiment(launch.app_id));
+                std::string store_error;
+                auto store = wnk::storage::open_default_store(launch.app_id, &store_error);
+                const SavedState saved = load_state(store.get(), store_error);
+                Demo demo(*renderer, regular, bold, saved.note, saved.focus_tile);
                 Script script;
                 const double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
                 Uint64 prev = SDL_GetPerformanceCounter();
@@ -671,6 +671,11 @@ int main(int argc, char **argv) {
                     }
                 }
                 WNK_LOGI(kCat, "shutting down after %llu frames", static_cast<unsigned long long>(frames));
+                if (store) {
+                    const auto r = store->put("focus.tile", std::to_string(demo.focused_tile()));
+                    WNK_LOGI("storage", "saved focus.tile=%d: %s", demo.focused_tile(),
+                             wnk::storage::status_name(r.status));
+                }
             }
         }
         // The renderer (GL objects) is destroyed here, while the context is still current.

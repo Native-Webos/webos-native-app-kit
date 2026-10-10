@@ -33,10 +33,11 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 | Path | Contents |
 |---|---|
 | `logging/` | Thread-safe structured logger, secret redaction, safe log files (0640, no symlinks) |
-| `platform/` | Process setup, launch params, app/runtime paths, device and storage probe |
+| `platform/` | Process setup, launch params, app/runtime paths, device and storage probe, Luna calls |
 | `core/` | Shared geometry (logical 1920x1080 units) |
 | `input/` | Raw key → semantic `Action` mapping with per-entry provenance; SDL adapter in `input/sdl` |
 | `focus/` | Focus manager: directional navigation, explicit neighbours, scopes, modal trapping, history |
+| `storage/` | Key/value store with revisions: DB8 on the TV, atomic files on the host |
 | `render/` | Renderer interface, fonts/UTF-8/atlas packing (CPU), GLES2 backend in `render/gles2` |
 | `applications/examples/hello/` | Example A: tile grid with focus ring, modal dialog, key log, device probe |
 | `cmake/` | Target detection, SDL-webOS build, `wnk_add_webos_package()` |

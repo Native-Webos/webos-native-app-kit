@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font)
+foreach (t log platform input focus font storage)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -9,6 +9,8 @@ target_link_libraries(test_platform PRIVATE wnk_platform)
 target_link_libraries(test_input PRIVATE wnk_input)
 target_link_libraries(test_focus PRIVATE wnk_focus)
 target_link_libraries(test_font PRIVATE wnk_render)
+target_link_libraries(test_storage PRIVATE wnk_storage)
+target_include_directories(test_storage SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_compile_definitions(test_font PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
 
 # Renderer pixel tests need a GLES2 context (SDL offscreen driver on Mesa); they SKIP without one.
@@ -32,21 +34,29 @@ set(WNK_SANITIZER_FAIL "ERROR: AddressSanitizer|ERROR: LeakSanitizer|runtime err
 # End-to-end smoke tests of Example A on the host: real SDL events → ActionMapper → FocusManager →
 # renderer, driven by the app's scripted-key mode (offscreen video driver, Mesa GLES2).
 if (TARGET wnk-hello)
+    # Each run gets an empty data directory so saved state (focus.tile, launch.count) from a previous
+    # run or from the developer's own profile cannot change the starting focus.
+    set(WNK_E2E_DATA "${CMAKE_CURRENT_BINARY_DIR}/e2e-data")
+    add_test(NAME e2e.hello.reset_state COMMAND "${CMAKE_COMMAND}" -E rm -rf "${WNK_E2E_DATA}")
+    set_tests_properties(e2e.hello.reset_state PROPERTIES FIXTURES_SETUP hello_state)
     add_test(NAME e2e.hello.dialog_focus_restore COMMAND wnk-hello)
     set_tests_properties(e2e.hello.dialog_focus_restore PROPERTIES
-            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_HELLO_KEYS=Down,Right,Return,Right,Escape"
+            FIXTURES_REQUIRED hello_state RESOURCE_LOCK hello_state
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_DATA_HOME=${WNK_E2E_DATA}/dialog_focus_restore;WNK_HELLO_KEYS=Down,Right,Return,Right,Escape"
             PASS_REGULAR_EXPRESSION "dialog closed, focus restored to 105"
             FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
             TIMEOUT 30)
     add_test(NAME e2e.hello.double_back_exits COMMAND wnk-hello)
     set_tests_properties(e2e.hello.double_back_exits PROPERTIES
-            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_HELLO_KEYS=Escape,Escape"
+            FIXTURES_REQUIRED hello_state RESOURCE_LOCK hello_state
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_DATA_HOME=${WNK_E2E_DATA}/double_back_exits;WNK_HELLO_KEYS=Escape,Escape"
             PASS_REGULAR_EXPRESSION "Back twice at root: quitting"
             FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
             TIMEOUT 30)
     add_test(NAME e2e.hello.unmapped_keys_have_no_effect COMMAND wnk-hello)
     set_tests_properties(e2e.hello.unmapped_keys_have_no_effect PROPERTIES
-            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_HELLO_KEYS=A,B,Z,Right"
+            FIXTURES_REQUIRED hello_state RESOURCE_LOCK hello_state
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_DATA_HOME=${WNK_E2E_DATA}/unmapped_keys_have_no_effect;WNK_HELLO_KEYS=A,B,Z,Right"
             PASS_REGULAR_EXPRESSION "focus\\] \\([0-9]+\\) 100 -> 101"
             FAIL_REGULAR_EXPRESSION "dialog opened|quitting|${WNK_SANITIZER_FAIL}"
             TIMEOUT 30)

@@ -10,7 +10,7 @@ level stated. Device items stay open until run on a TV.
 | 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
 | 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
 | 4 | UI and navigation | ⬜ |
-| 5 | Platform services | ⬜ |
+| 5 | Platform services | 🟡 key/value storage done (TV-verified); async, HTTP, images pending |
 | 6 | Lifecycle and diagnostics | ⬜ |
 | 7 | Media foundation | ⬜ |
 | 8 | Reference applications | ⬜ |
@@ -120,6 +120,14 @@ clock. Example B.
 WorkerPool, MainDispatcher, CancellationToken, timeouts; `HttpClient` + dlopen curl backend (needs
 curl headers on the host: vendor them or install `libcurl4-openssl-dev`); JSON; PathProvider probe;
 atomic files; prefs; bounded disk cache; ImageService. Example C.
+
+### M5 status (2026-10-11)
+
+Done: `storage/` `KeyValueStore` with revisions and compare-and-set; `Db8Store` (TV) and `FileStore` (host
+and caches); one contract suite runs on both, DB8 against a fake built from the errors measured on the TV.
+On an OLED65C1PTB (webOS 6.5.3) the demo's launch counter and remembered focus persist through DB8.
+Pending: worker pool / main-thread dispatcher, HTTP client, JSON helpers for apps, image service, secret
+storage (keymanager) and cache eviction.
 
 ## M6 — Lifecycle and diagnostics
 

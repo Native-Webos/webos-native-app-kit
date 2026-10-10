@@ -206,6 +206,15 @@
       "method": "put of an existing _id without _rev",
       "evidence": "errorCode -3960 \"db: _rev must be specified for existing objects\"; succeeds with the _rev from get",
       "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "storage.kv_db8_store",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "wnk::storage Db8Store (kind <app_id>.kv:1 owned by the app, index on key, find/put/del) in hello 0.4.0",
+      "evidence": "launch.count 1 -> 5 across relaunches; focus.tile saved on exit by the owner's session (7 = Downloads) and restored on the next launch (focus 0 -> 107); an earlier owner session restored tile 3",
+      "limitations": "one firmware; uninstall behaviour and value-size limits not measured"
     }
   ]
 }

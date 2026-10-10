@@ -30,7 +30,7 @@
   lists what was added; a verification paragraph at the evidence level actually reached.
 - Never mention milestones/phases ("M3", "milestone") in commit messages.
 - Never add `Co-Authored-By:`, tool attribution or session-id lines to commits.
-- Commit only when the owner asks.
+- Commit as soon as a task is complete, before starting the next task.
 
 ## Where things are
 - Research and decisions: `docs/research/` (ARCHITECTURE-DECISIONS.md, PACKAGING-AND-FIRMWARE.md).

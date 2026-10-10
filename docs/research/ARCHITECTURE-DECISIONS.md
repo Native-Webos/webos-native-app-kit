@@ -106,6 +106,8 @@ change it. Status: **Proposed** until the owner accepts or the milestone that im
 - **Decision:** the webOS `KeyValueStore` backend is DB8, called from the app (no separate service unless
   a firmware proves it necessary; PlxNative needed one on webOS 4). Files remain for disposable cache in
   `/tmp/<id>` and for the host backend. Atomic multi-key updates use `_rev` for optimistic concurrency.
+- **Implemented** as `storage/` (`open_default_store`): kind `<app_id>.kv:1` with an index on `key`, so DB8
+  assigns `_id`s and keys can be up to 64 characters. Verified on the same TV (records.json).
 - **Open:** other firmware versions, Homebrew Channel (non-Dev-Mode) installs, behaviour on uninstall,
   record size limits, secrets (keymanager) — see NETWORKING-AND-STORAGE.md.
 

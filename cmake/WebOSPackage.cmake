@@ -12,6 +12,7 @@
 #     [MIN_RELEASE <x.y.z>]              lowest webOS release fw-check grades (default 5.3.1)
 #     [EXTRA_FILES <file>...]            copied next to the executable
 #     [EXTRA_DIRS <dir>...]              copied next to the executable as <basename>/ (e.g. fonts)
+#     [REQUIRED_PERMISSIONS <acg>...]    appinfo.json requiredPermissions (e.g. database.operation)
 # )
 #
 # Adds, for webOS builds only:
@@ -29,7 +30,7 @@ set(WNK_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}/../tools")
 
 function(wnk_add_webos_package)
     cmake_parse_arguments(P "" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE"
-            "EXTRA_FILES;EXTRA_DIRS" ${ARGN})
+            "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS" ${ARGN})
     foreach (req TARGET APPID TITLE VERSION VENDOR ICON LARGE_ICON)
         if (NOT P_${req})
             message(FATAL_ERROR "wnk_add_webos_package: ${req} is required")
@@ -61,6 +62,13 @@ function(wnk_add_webos_package)
     set(APPINFO_VENDOR "${P_VENDOR}")
     set(APPINFO_TITLE "${P_TITLE}")
     set(APPINFO_ICON_COLOR "${P_ICON_COLOR}")
+    set(APPINFO_EXTRA "")
+    if (P_REQUIRED_PERMISSIONS)
+        list(TRANSFORM P_REQUIRED_PERMISSIONS PREPEND "\"" OUTPUT_VARIABLE _perms)
+        list(TRANSFORM _perms APPEND "\"")
+        list(JOIN _perms ", " _perms)
+        set(APPINFO_EXTRA ",\n    \"requiredPermissions\": [${_perms}]")
+    endif ()
     configure_file("${WNK_PACKAGE_MODULE_DIR}/appinfo.json.in" "${_appinfo}.in" @ONLY)
     file(GENERATE OUTPUT "${_appinfo}" INPUT "${_appinfo}.in"
             TARGET ${P_TARGET})

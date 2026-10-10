@@ -22,6 +22,7 @@
 #include "wnk/input/input.hpp"
 #include "wnk/input/sdl_input.hpp"
 #include "wnk/log.hpp"
+#include "wnk/platform/luna.hpp"
 #include "wnk/platform/probe.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/render/gles2_renderer.hpp"
@@ -32,6 +33,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <memory>
 #include <string>
@@ -191,6 +194,52 @@ class Script {
     std::string shot_;
 };
 
+// Experiment: can the app itself persist data in DB8 (webOS's built-in JSON store) over Luna?
+// Writes one record of its own kind with a launch counter; a value that survives relaunch and reboot
+// shows DB8 works for app data on this firmware. Returns a one-line summary for the screen.
+std::string db8_experiment(const std::string &app_id) {
+    if (!wnk::platform::kIsWebOS) return "DB8: not on webOS";
+    const std::string kind = app_id + ".wnk:1";
+    // DB8 rejected a 33-character _id ("db: Invalid _id length", OLED65C1PTB webOS 6.5.3); PlxNative's ids
+    // are at most 15 characters. Keep record ids short.
+    const std::string id = "wnkhello.state";
+    for (const char *service : {"luna://com.palm.db", "luna://com.webos.service.db"}) {
+        auto call = [&](const char *method, const std::string &payload) {
+            auto r = wnk::platform::luna_call_sync(std::string(service) + "/" + method, payload, 3000);
+            WNK_LOGI("db8", "%s/%s %s -> %s %s", service, method, payload.c_str(),
+                     wnk::platform::luna_status_name(r.status), r.status == wnk::platform::LunaStatus::Ok
+                                                                       ? r.payload.c_str()
+                                                                       : r.detail.c_str());
+            return r;
+        };
+        auto ok = [](const wnk::platform::LunaReply &r) {
+            return r.status == wnk::platform::LunaStatus::Ok &&
+                   r.payload.find("\"returnValue\":true") != std::string::npos;
+        };
+        auto kind_reply = call("putKind", "{\"id\":\"" + kind + "\",\"owner\":\"" + app_id + "\",\"indexes\":[]}");
+        if (!ok(kind_reply)) continue;
+        auto got = call("get", "{\"ids\":[\"" + id + "\"]}");
+        long previous = 0;
+        std::string rev_field;  // updating an existing object requires its current _rev (optimistic concurrency)
+        const size_t pos = got.payload.find("\"counter\":");
+        if (ok(got) && pos != std::string::npos) previous = std::strtol(got.payload.c_str() + pos + 10, nullptr, 10);
+        const size_t rev = got.payload.find("\"_rev\":");
+        if (ok(got) && rev != std::string::npos) {
+            rev_field = ",\"_rev\":" + std::to_string(std::strtoll(got.payload.c_str() + rev + 7, nullptr, 10));
+        }
+        const long next = previous + 1;
+        auto put = call("put", "{\"objects\":[{\"_id\":\"" + id + "\",\"_kind\":\"" + kind + "\"" + rev_field + ",\"" +
+                                   "counter\":" + std::to_string(next) + ",\"written\":" +
+                                   std::to_string(static_cast<long long>(time(nullptr))) + "}]}");
+        char line[160];
+        std::snprintf(line, sizeof line, "DB8 via %s: launch #%ld (previous value %ld), write %s", service + 7, next,
+                      previous, ok(put) ? "ok" : "FAILED");
+        WNK_LOGI("db8", "%s", line);
+        return line;
+    }
+    return "DB8: putKind refused on both service names (see log)";
+}
+
 struct KeyLogLine {
     std::string text;
     Color color;
@@ -198,8 +247,9 @@ struct KeyLogLine {
 
 class Demo {
  public:
-    Demo(wnk::render::Renderer &r, wnk::render::FontId regular, wnk::render::FontId bold)
-        : r_(r), regular_(regular), bold_(bold), mapper_(wnk::input::default_keymap()) {
+    Demo(wnk::render::Renderer &r, wnk::render::FontId regular, wnk::render::FontId bold, std::string storage_note)
+        : r_(r), regular_(regular), bold_(bold), mapper_(wnk::input::default_keymap()),
+          storage_note_(std::move(storage_note)) {
         fm_.add_scope({kGridScope, wnk::focus::kRootScope, false, true});
         fm_.add_scope({kDialogScope, wnk::focus::kRootScope, true, true});
         for (int i = 0; i < kCols * kRows; ++i) {
@@ -384,6 +434,7 @@ class Demo {
         std::snprintf(line, sizeof line, "%.0f fps   draw calls %u   quads %u   glyphs %u   atlas resets %u   focus %u",
                       fps, s.draw_calls, s.quads, s.glyphs_cached, s.atlas_resets, fm_.focused());
         r_.draw_text({regular_, 22, theme::kMuted}, {80, 1020}, line);
+        r_.draw_text({regular_, 22, theme::kAccent}, {80, 1055}, storage_note_);
     }
 
     void draw_dialog() {
@@ -426,6 +477,7 @@ class Demo {
     wnk::render::Renderer &r_;
     wnk::render::FontId regular_, bold_;
     wnk::input::ActionMapper mapper_;
+    std::string storage_note_;
     FocusManager fm_;
     Rect ring_;
     std::deque<KeyLogLine> key_log_;
@@ -542,7 +594,7 @@ int main(int argc, char **argv) {
                 WNK_LOGE("text", "font load failed: %s", err.c_str());
                 exit_code = 1;
             } else {
-                Demo demo(*renderer, regular, bold);
+                Demo demo(*renderer, regular, bold, db8_experiment(launch.app_id));
                 Script script;
                 const double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
                 Uint64 prev = SDL_GetPerformanceCounter();

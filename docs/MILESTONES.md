@@ -10,7 +10,7 @@ level stated. Device items stay open until run on a TV.
 | 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
 | 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
 | 4 | UI and navigation | ⬜ |
-| 5 | Platform services | 🟡 storage, background work and HTTP done (TV-verified); images, secrets, cache pending |
+| 5 | Platform services | 🟡 storage, background work, HTTP and images done (TV-verified); secrets, WebSocket pending |
 | 6 | Lifecycle and diagnostics | ⬜ |
 | 7 | Media foundation | ⬜ |
 | 8 | Reference applications | ⬜ |
@@ -133,7 +133,14 @@ On an OLED65C1PTB (webOS 6.5.3) the demo's launch counter and remembered focus p
 ≤50 ms cancellation, TLS verification always on, size/time limits, http/https only), `RetryPolicy`,
 `HttpClient` delivering on the main thread. 8 unit tests + 9 tests against a local HTTP/HTTPS server.
 On the TV (libcurl 7.61.0, OpenSSL 1.1.1t) HTTPS works from the app and an expired certificate is refused.
-Pending: JSON helpers for apps, image service, secret storage (keymanager), cache eviction, WebSocket.
+`image/`: PNG/JPEG decoding with header-based size limits enforced before stb runs, area-averaging
+downscale, LRU memory cache, size-bounded disk cache (URL-verified entries, atomic writes, corrupt-entry
+recovery), request coalescing, per-ticket cancellation that stops unwanted downloads, prefetch, file://
+URLs; `ImageTextures` uploads through the renderer within a byte budget. 15 tests. On the TV: bundled and
+LAN-served thumbnails load; a relaunch is served from the disk cache with zero downloads.
+Known cost: each image is its own texture, so tiles break draw-call batching (27 calls for 12 tiles);
+an image atlas would reduce this if profiling on the TV shows it matters.
+Pending: secret storage (keymanager), WebSocket, JSON helpers for apps.
 
 ## M6 — Lifecycle and diagnostics
 

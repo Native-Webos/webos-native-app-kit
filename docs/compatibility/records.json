@@ -251,6 +251,33 @@
       "method": "tools/device-test.sh test_http test_async",
       "evidence": "8/8 and 16/16",
       "limitations": "curl integration tests need a local server and run on the host only"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "image.service_file_urls",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "examples/hello 0.6.0: 12 bundled PNG thumbnails via file://, decoded and downscaled on workers, uploaded as textures",
+      "evidence": "requests 12, failures 0, 12 images (2.6 MB) in memory cache, 12 textures, exit 0",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "image.service_http_and_disk_cache",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "launch params {\"imageBase\":\"http://<pc on LAN>:8765\"}; two launches",
+      "evidence": "launch 1: 12 downloads, 12 files in /tmp/<id>/images; launch 2: 12 disk hits, 0 downloads; the PC's server logged exactly 12 requests from the TV",
+      "limitations": "disk cache lives in /tmp (no durable writable filesystem in the Developer Mode jail), so it is cleared on reboot"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "launch.params_custom_keys",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "ares-launch --params with a custom key",
+      "evidence": "argv[1] = {\"@system_native_app\":true,\"imageBase\":\"...\",\"nid\":\"org.wnk.examples.hello\"}",
+      "limitations": ""
     }
   ]
 }

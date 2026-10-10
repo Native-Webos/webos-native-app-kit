@@ -1,0 +1,184 @@
+{
+  "schema": "wnk-compat/1",
+  "notes": "One record per device + feature observation. result is supported | unsupported | unknown. Only hardware runs belong here; host and firmware-inventory results live in docs/MILESTONES.md.",
+  "devices": {
+    "lg-oled65c1ptb-6.5.3": {
+      "model": "OLED65C1PTB",
+      "year": 2021,
+      "board": "O20_DVB",
+      "machine_name": "o20n",
+      "hardware_id": "HE_DTV_W21O_AFABATAA",
+      "webos_release": "6.5.3",
+      "webos_codename": "kisscurl-koli",
+      "firmware": "03.53.45",
+      "kernel": "4.4.84-229.kcl4tv.6 aarch64 (32-bit userland)",
+      "ram": "3 GB",
+      "gpu": "ARM Mali-G51, OpenGL ES 3.2 v1.r9p0",
+      "install_mode": "Developer Mode (unrooted), ares-cli-rs 0.7.0"
+    }
+  },
+  "records": [
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "package.install.wnk-mkipk",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "ares-install of org.wnk.examples.hello_0.2.0_arm.ipk built by tools/mkipk.py",
+      "evidence": "\"Installed package org.wnk.examples.hello!\"",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "app.launch.sam",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "ares-launch",
+      "evidence": "first frame 364 ms after process start; launch params {\"@system_native_app\":true,\"nid\":...}",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "sdl.bundled.sdl-webos-2.30.12",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "events.log",
+      "evidence": "linked 2.30.12 revision SDL-release-2.30.12-webos.6, video driver wayland, loaded from lib/ via RPATH",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "display.drawable",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "events.log",
+      "evidence": "display mode and drawable 1920x1080; SDL_webOSGetPanelResolution 3840x2160; SDL_webOSGetRefreshRate 120",
+      "limitations": "UI plane is 1080p on this 4K panel; mode refresh_rate reported 0"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "gles2.renderer",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example A run, 151 s",
+      "evidence": "9039 frames ≈ 60 fps; fragment highp available; GL_MAX_TEXTURE_SIZE 8192",
+      "limitations": "visual output confirmed by the owner looking at the TV, not by capture"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.keys.dpad_ok",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example A key log, Magic Remote",
+      "evidence": "Right 79, Left 80, Down 81, Up 82, OK 40 (keycode 13)",
+      "limitations": "auto-repeat not observed in this session"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.keys.back",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example A key log with SDL_WEBOS_ACCESS_POLICY_KEYS_BACK=true",
+      "evidence": "scancode 482, keycode 0x200003",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.keys.colour",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example A key log",
+      "evidence": "Red 486, Green 487, Yellow 488, Blue 489 (keycodes 0x200011-0x200014)",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.keys.channel",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example A key log",
+      "evidence": "CH+ 480 (0x200021), CH- 481 (0x200022)",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.keys.transport_numbers_volume",
+      "result": "unknown",
+      "date": "2026-10-11",
+      "method": "Example A key log",
+      "evidence": "no events; the owner confirmed every key they pressed appeared in the key log, so these keys were not pressed in this session",
+      "limitations": "still unknown whether they are delivered; needs a remote that has them"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "focus.modal_restore",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example A: OK opens dialog, Back closes it",
+      "evidence": "focus 100 -> 200, then restored to 100",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "lifecycle.clean_exit_double_back",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Back twice at root",
+      "evidence": "\"shutdown complete (exit 0)\"",
+      "limitations": "SIGTERM / Home / Exit key paths not yet exercised on the TV"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "lifecycle.foreground_events",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "events.log",
+      "evidence": "APP_WILLENTERFOREGROUND, APP_DIDENTERFOREGROUND after first frame",
+      "limitations": "background events not yet exercised"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "logs.readable_by_devmode_user",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "ares-pull /tmp/<id>/events.log (mode 0640)",
+      "evidence": "file fetched without root",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "storage.durable_write",
+      "result": "unsupported",
+      "date": "2026-10-11",
+      "method": "platform probe incl. every rw mount from /proc/self/mounts (hello 0.2.1)",
+      "evidence": "app uid 6617/gid 5000 in the Developer Mode jail: /media/developer (ext4, rw mount) EACCES; /media/internal EROFS; app dir EACCES; only tmpfs /tmp and /dev/shm writable. A vendor partition (/mnt/lg/ciplus/authcxt) and a USB stick were also writable and are now excluded from probing; neither may be used for app data.",
+      "limitations": "filesystem only. Luna DB8 (com.webos.service.db) via a packaged service, as PlxNative does, is untested here"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "lifecycle.close_via_sam",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "ares-launch --close",
+      "evidence": "SDL_QUIT received, \"shutdown complete (exit 0)\"",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "release.info_source",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "probe",
+      "evidence": "/etc/starfish-release absent; /var/run/nyx/os_info.json readable (webos_release 6.5.3, codename kisscurl-koli); /var/run/nyx/device_info.json readable (product_id, board, ram)",
+      "limitations": "webosbrew repo requirements.webosRelease documents /etc/starfish-release; that file does not exist inside this app's jail"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.keys.home",
+      "result": "unsupported",
+      "date": "2026-10-11",
+      "method": "owner pressed Home while the app ran (KEYS_HOME not requested)",
+      "evidence": "owner report: the app left the screen and the TV showed its home screen, like other apps; no Home key event reached the app",
+      "limitations": "whether the process was terminated or only backgrounded was not logged; re-test with lifecycle logging"
+    }
+  ]
+}

@@ -8,7 +8,7 @@ level stated. Device items stay open until run on a TV.
 | 0 | Repository and environment audit | ✅ (see research/TOOLCHAIN-AND-BUILD.md) |
 | 1 | Research and architecture | ✅ documents written; ADRs await owner acceptance |
 | 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
-| 3 | Rendering and input | ⬜ |
+| 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
 | 4 | UI and navigation | ⬜ |
 | 5 | Platform services | ⬜ |
 | 6 | Lifecycle and diagnostics | ⬜ |
@@ -71,6 +71,43 @@ The firmware inventory (v20260731, 14 images) has one image per release line.
 GLES2 renderer (rect, rounded rect, image, text atlas, clip, transform), logical 1920×1080 canvas,
 GL capability logging, input adapter + action mapping, key-capture diagnostic screen, focus manager
 core (directional, explicit neighbours, scopes). Host golden-image tests on Mesa; mapping/focus unit tests.
+
+### M3 status (2026-10-11)
+
+Implemented: `core/` geometry; `input/` (keymaps with provenance, `ActionMapper` with press/repeat/release,
+unpaired-key and unknown-key suppression, `release_all` on focus loss, SDL adapter with static checks of
+every hard-coded scancode); `focus/` (Android-style directional search with in-beam preference, explicit
+neighbours and `kBlocked`, containing scopes, per-scope memory, modal stack with restore, recovery when the
+focused node disappears); `render/` (stb_truetype fonts, UTF-8, shelf-packed glyph atlas with reset,
+`Gles2Renderer`: batched SDF rounded rects and borders, RGBA images, glyphs, nested scissor clips,
+translation, letterboxed 1920x1080 canvas, destination alpha preserved for video punch-through, GPU info).
+Example A is now a tile grid + modal dialog + on-screen key log.
+
+| Item | Evidence |
+|---|---|
+| 10 input, 15 focus, 8 font/canvas unit tests | `[TEST]` |
+| 11 renderer pixel tests on a real GLES2 context (Mesa, SDL offscreen) | `[TEST]` |
+| 3 end-to-end tests of Example A through real SDL events (focus restore after dialog, double Back exits, unmapped keys inert) | `[TEST]` |
+| All of the above clean under ASan/UBSan | `[TEST]` `host-asan` |
+| Screenshots of the demo at 1280x720 reviewed (grid, focus ring, dialog, toast, key log) | manual, host |
+| ARM build: `DT_NEEDED` reviewed (adds `libm.so.6`), `GLIBC_2.4` only, package `0.2.0` passes `check-package` | `[BUILD]` `[TEST]` |
+| Loadable on 5.3.1–11.2.0 incl. SDL's dlopen'd libraries | `[FWDB]` |
+
+On hardware (LG OLED65C1PTB, webOS 6.5.3, Developer Mode, 2026-10-11; details in
+`docs/compatibility/records.json`): our ipk installs and launches; bundled SDL 2.30.12 loads (Wayland);
+drawable 1920x1080 on a 3840x2160 @120 Hz panel; Mali-G51 with fragment highp; ~60 fps; D-pad/OK/Back/
+colour/CH keys arrive with exactly the SDL-webOS source codes (now marked `Measured`); dialog focus restore,
+double-Back exit and SAM close all end in exit 0; the Dev Mode user can pull the 0640 log from /tmp.
+
+Found on hardware: **no durable app-writable filesystem location** in the Developer Mode jail (only tmpfs).
+Persistence needs another mechanism (next candidate: Luna DB8 through a packaged native service, as
+PlxNative does; unproven). Still unverified: key repeat, transport/number/volume/Home keys, Magic Remote
+pointer, background/foreground switching, text quality judged up close.
+
+Simplifications, deliberate for M3: transforms are translation only (no scale/rotation); text is a
+single line, left-to-right, no shaping (Latin/Cyrillic/Greek fine; complex scripts need HarfBuzz later);
+glyph atlas eviction is "clear all when full"; pixel tests probe specific pixels rather than comparing
+whole golden images.
 
 ## M4 — UI and navigation
 

@@ -36,8 +36,12 @@ else ()
     target_link_libraries(wnk_sdl2 INTERFACE SDL2::SDL2)
 endif ()
 
+add_subdirectory(core)
 add_subdirectory(logging)
 add_subdirectory(platform)
+add_subdirectory(input)
+add_subdirectory(focus)
+add_subdirectory(render)
 
 if (WNK_BUILD_EXAMPLES)
     include(WebOSPackage)

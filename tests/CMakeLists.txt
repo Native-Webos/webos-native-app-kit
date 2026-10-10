@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async)
+foreach (t log platform input focus font storage async http)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -11,6 +11,12 @@ target_link_libraries(test_focus PRIVATE wnk_focus)
 target_link_libraries(test_font PRIVATE wnk_render)
 target_link_libraries(test_storage PRIVATE wnk_storage)
 target_link_libraries(test_async PRIVATE wnk_async)
+target_link_libraries(test_http PRIVATE wnk_net)
+
+# curl transport against a local HTTP/HTTPS server started by http_server.py (needs python3 + openssl).
+add_executable(test_http_curl integration/test_http_curl.cpp)
+target_include_directories(test_http_curl PRIVATE unit)
+target_link_libraries(test_http_curl PRIVATE wnk_net)
 target_include_directories(test_storage SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_compile_definitions(test_font PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
 
@@ -25,6 +31,9 @@ set_tests_properties(integration.renderer_gl PROPERTIES ENVIRONMENT "SDL_VIDEODR
 
 find_package(Python3 3.8 COMPONENTS Interpreter)
 if (Python3_FOUND)
+    add_test(NAME integration.http_curl
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                    "$<TARGET_FILE:test_http_curl>")
     add_test(NAME tools.packaging
             COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/tools" -v)
 endif ()

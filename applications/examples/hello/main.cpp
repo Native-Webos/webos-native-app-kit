@@ -23,6 +23,8 @@
 #include "wnk/input/sdl_input.hpp"
 #include "wnk/log.hpp"
 #include "wnk/storage/kv.hpp"
+#include "wnk/async/async.hpp"
+#include "wnk/net/http.hpp"
 #include "wnk/platform/probe.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/render/gles2_renderer.hpp"
@@ -226,6 +228,37 @@ SavedState load_state(wnk::storage::KeyValueStore *kv, const std::string &open_e
     st.note = line;
     WNK_LOGI("storage", "%s", line);
     return st;
+}
+
+// Network check, run on a worker thread at startup: is HTTPS usable from inside the app, does the
+// device trust common certificate authorities, and is verification really enforced? Returns one line
+// for the screen; details go to the log.
+std::string network_check(wnk::net::HttpTransport &t, const wnk::async::CancellationToken &token) {
+    struct Probe {
+        const char *name;
+        const char *url;
+        bool expect_ok;
+    };
+    static const Probe kProbes[] = {
+        {"example.com", "https://example.com/", true},
+        {"letsencrypt", "https://letsencrypt.org/", true},
+        {"expired-cert", "https://expired.badssl.com/", false},  // must be rejected
+    };
+    std::string line = "Network (" + t.describe() + "):";
+    WNK_LOGI("net", "transport %s", t.describe().c_str());
+    for (const auto &p : kProbes) {
+        wnk::net::HttpRequest req;
+        req.url = p.url;
+        req.timeout_ms = 8000;
+        req.max_response_bytes = 2u << 20;
+        const auto r = t.perform(req, token);
+        const bool tls_rejected = r.error == wnk::net::NetError::Tls;
+        const bool pass = p.expect_ok ? (r.error == wnk::net::NetError::None && r.status < 400) : tls_rejected;
+        WNK_LOGI("net", "%s %s -> %s status=%ld %.0f ms %s [%s]", p.name, p.url, wnk::net::error_name(r.error),
+                 r.status, r.total_seconds * 1000, r.detail.c_str(), pass ? "as expected" : "UNEXPECTED");
+        line += std::string("  ") + p.name + " " + (pass ? "ok" : "FAIL(" + std::string(wnk::net::error_name(r.error)) + ")");
+    }
+    return line;
 }
 
 struct KeyLogLine {
@@ -432,7 +465,13 @@ class Demo {
                       fps, s.draw_calls, s.quads, s.glyphs_cached, s.atlas_resets, fm_.focused());
         r_.draw_text({regular_, 22, theme::kMuted}, {80, 1020}, line);
         r_.draw_text({regular_, 22, theme::kAccent}, {80, 1055}, storage_note_);
+        r_.draw_text({regular_, 22, theme::kAccent}, {1000, 1055}, network_note_);
     }
+
+ public:
+    void set_network_note(std::string note) { network_note_ = std::move(note); }
+
+ private:
 
     void draw_dialog() {
         const float t = dialog_t_;
@@ -475,6 +514,7 @@ class Demo {
     wnk::render::FontId regular_, bold_;
     wnk::input::ActionMapper mapper_;
     std::string storage_note_;
+    std::string network_note_ = "Network: checking...";
     FocusManager fm_;
     Rect ring_;
     std::deque<KeyLogLine> key_log_;
@@ -595,6 +635,20 @@ int main(int argc, char **argv) {
                 auto store = wnk::storage::open_default_store(launch.app_id, &store_error);
                 const SavedState saved = load_state(store.get(), store_error);
                 Demo demo(*renderer, regular, bold, saved.note, saved.focus_tile);
+                wnk::async::MainDispatcher dispatcher;
+                wnk::async::WorkerPool pool(2);
+                wnk::async::Lifetime demo_lifetime;
+                std::string net_error;
+                std::shared_ptr<wnk::net::HttpTransport> transport = wnk::net::make_curl_transport({}, &net_error);
+                if (transport) {
+                    wnk::async::run_then_post<std::string>(
+                        pool, dispatcher, demo_lifetime.weak(), {},
+                        [transport](const wnk::async::CancellationToken &t) { return network_check(*transport, t); },
+                        [&demo](std::string note) { demo.set_network_note(std::move(note)); });
+                } else {
+                    demo.set_network_note("Network unavailable: " + net_error);
+                    WNK_LOGW("net", "no HTTP transport: %s", net_error.c_str());
+                }
                 Script script;
                 const double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
                 Uint64 prev = SDL_GetPerformanceCounter();
@@ -644,6 +698,8 @@ int main(int argc, char **argv) {
                         fps_frames = 0;
                     }
 
+                    dispatcher.drain(16, std::chrono::milliseconds(4));  // worker results, bounded per frame
+
                     int dw = 0, dh = 0;
                     SDL_GL_GetDrawableSize(window, &dw, &dh);
                     renderer->begin_frame(dw, dh);
@@ -671,6 +727,11 @@ int main(int argc, char **argv) {
                     }
                 }
                 WNK_LOGI(kCat, "shutting down after %llu frames", static_cast<unsigned long long>(frames));
+                // Shutdown order: stop accepting results, cancel and join workers, then tear down UI.
+                dispatcher.close();
+                if (!pool.shutdown(std::chrono::milliseconds(2000))) {
+                    WNK_LOGW(kCat, "a worker ignored cancellation; detached");
+                }
                 if (store) {
                     const auto r = store->put("focus.tile", std::to_string(demo.focused_tile()));
                     WNK_LOGI("storage", "saved focus.tile=%d: %s", demo.focused_tile(),

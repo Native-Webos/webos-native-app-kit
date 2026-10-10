@@ -1,0 +1,11 @@
+# LeakSanitizer suppressions for HOST runs of apps under the host-asan preset.
+# Use: LSAN_OPTIONS=suppressions=tests/lsan-host.supp build/host-asan/applications/examples/hello/wnk-hello
+#
+# The host's Mesa EGL/GL driver (reached through the system SDL's SDL_CreateWindow / GL context
+# creation, e.g. libdrm drmGetDevices2) keeps allocations alive until process exit. Observed
+# 2026-10-11 on Ubuntu 24.04, Mesa 25.2.8, SDL 2.30.0: 3 reports, none with a frame in kit code.
+# The system SDL and driver libraries are stripped, so suppression is by module.
+leak:libSDL2-2.0.so.0
+leak:libdrm.so.2
+leak:libEGL_mesa.so.0
+leak:libgallium

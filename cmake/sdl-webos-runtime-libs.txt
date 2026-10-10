@@ -1,0 +1,17 @@
+# Libraries the bundled SDL-webOS 2.30.12 (WEBOS=ON, our CMake flags) loads with dlopen() at runtime.
+# They never appear in DT_NEEDED, so tools/fw-check.py --runtime-libs checks that each exists on the
+# firmware. Source: build/<preset>/third_party/sdl-webos-build/.../SDL_config.h (*_DYNAMIC) and
+# src/core/webos/SDL_webos_libs.c, src/core/webos/SDL_webos_png.c, src/video/SDL_egl.c.
+# Re-derive this list whenever WNK_SDL_WEBOS_TAG or the SDL configure flags change.
+libwayland-client.so.0
+libwayland-cursor.so.0
+libwayland-egl.so        # SDL asks for the unversioned name
+libxkbcommon.so.0
+libEGL.so.1
+libGLESv2.so.2
+libhelpers.so.2          # SAM registration (SDL_webOSRegisterApp)
+libpbnjson_c.so.2
+libpng16.so.16           # SDL_webos_png (cursor images)
+libasound.so.2           # ALSA audio driver
+libpulse.so.0            # PulseAudio driver
+libudev.so.1             # input hotplug; absent before 4.4.2, optional for SDL

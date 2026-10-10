@@ -1,0 +1,49 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "host-debug",
+      "displayName": "Host (debug, tests)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/host-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "WNK_BUILD_TESTS": "ON" }
+    },
+    {
+      "name": "host-asan",
+      "displayName": "Host (ASan + UBSan, tests)",
+      "inherits": "host-debug",
+      "binaryDir": "${sourceDir}/build/host-asan",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "webos-release",
+      "displayName": "webOS TV (ARM, release)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/webos-release",
+      "toolchainFile": "$env{WEBOS_NDK}/share/buildroot/toolchainfile.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "WNK_BUILD_TESTS": "OFF" }
+    },
+    {
+      "name": "webos-debug",
+      "displayName": "webOS TV (ARM, debug info)",
+      "inherits": "webos-release",
+      "binaryDir": "${sourceDir}/build/webos-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "host-debug", "configurePreset": "host-debug" },
+    { "name": "host-asan", "configurePreset": "host-asan" },
+    { "name": "webos-release", "configurePreset": "webos-release" },
+    { "name": "webos-debug", "configurePreset": "webos-debug" }
+  ],
+  "testPresets": [
+    { "name": "host-debug", "configurePreset": "host-debug", "output": { "outputOnFailure": true } },
+    { "name": "host-asan", "configurePreset": "host-asan", "output": { "outputOnFailure": true } }
+  ]
+}

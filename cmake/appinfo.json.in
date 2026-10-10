@@ -1,0 +1,11 @@
+{
+    "id": "@APPINFO_ID@",
+    "version": "@APPINFO_VERSION@",
+    "vendor": "@APPINFO_VENDOR@",
+    "type": "native",
+    "main": "$<TARGET_FILE_NAME:@P_TARGET@>",
+    "title": "@APPINFO_TITLE@",
+    "icon": "icon.png",
+    "largeIcon": "largeIcon.png",
+    "iconColor": "@APPINFO_ICON_COLOR@"
+}

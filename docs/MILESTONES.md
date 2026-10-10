@@ -1,0 +1,108 @@
+# Milestone plan
+
+Status legend: ✅ done · 🟡 in progress · ⬜ not started. "Done" means built and tested at the
+level stated. Device items stay open until run on a TV.
+
+| # | Milestone | Status |
+|---|---|---|
+| 0 | Repository and environment audit | ✅ (see research/TOOLCHAIN-AND-BUILD.md) |
+| 1 | Research and architecture | ✅ documents written; ADRs await owner acceptance |
+| 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
+| 3 | Rendering and input | ⬜ |
+| 4 | UI and navigation | ⬜ |
+| 5 | Platform services | ⬜ |
+| 6 | Lifecycle and diagnostics | ⬜ |
+| 7 | Media foundation | ⬜ |
+| 8 | Reference applications | ⬜ |
+| 9 | Optional Jellyfin client | ⬜ |
+| 10 | Compatibility and release | ⬜ |
+
+## M2 — Native runtime (next)
+
+Packaging and firmware tooling follow the plan in `research/PACKAGING-AND-FIRMWARE.md` Part D.
+
+Goal: a minimal app that builds on the host and for webOS, packages into an `.ipk`, passes import
+verification, and (if a TV is available) installs and launches.
+
+1. `CMakeLists.txt`, `CMakePresets.json` (host-debug, host-asan, webos-debug, webos-release).
+2. `third_party/sdl-webos`: fetch the pinned tag `release-2.30.12-webos.6` and build it with the NDK
+   (standard ABI); stage `libSDL2-2.0.so.0`. **Risk:** first build with this NDK.
+3. `platform/` minimal: env setup (`EGL_PLATFORM`, `XDG_RUNTIME_DIR`), SIGPIPE ignore, SIGTERM →
+   atomic flag, launch-params JSON from `argv[1]`, log file in the runtime dir.
+4. `logging/` minimal structured logger (level, category, monotonic time, thread id; secret redaction hook).
+5. `applications/examples/hello`: window, clear to a colour, quit on Back/Exit/close.
+6. `tools/`: `doctor.sh` (checks NDK, cmake, ares-cli, inventory), `build-host.sh`, `build-webos.sh`,
+   `package.sh` (stage + `ares-package`; fails clearly if ares-cli is missing), `verify.sh` (imports
+   vs firmware inventory), `install.sh`/`launch.sh`/`logs.sh` (ares-cli, honour `ARES_DEVICE`).
+7. Tests: logger and launch-param parsing unit tests (host).
+
+Exit criteria: host build + tests pass; webOS build produces an ARM binary + bundled SDL whose imports
+verify against 5.3.1–11.2 in the inventory; `.ipk` produced if ares-cli is installed. Device launch
+only if hardware is available, recorded with model and firmware.
+
+### M2 status (2026-10-11)
+
+Verified here:
+
+| Item | Evidence |
+|---|---|
+| Host build (GCC 13, system SDL 2.30, Mesa GLES2) with no compiler warnings | `[BUILD]` `tools/build-host.sh` |
+| C++ unit tests: logging (11) and platform (8); Python packaging tests (12) | `[TEST]` `ctest --preset host-debug`, also clean under ASan/UBSan (`host-asan`) |
+| `wnk-hello` on the host (offscreen driver): window, GLES context, probe, SIGTERM → SDL_QUIT → exit 0, log file 0640 | `[TEST]` manual run 2026-10-11 |
+| SDL-webOS `release-2.30.12-webos.6` builds with our NDK, standard ABI; needs only libc/libm/libdl/libpthread/librt ≤ GLIBC_2.9 | `[BUILD]` |
+| `wnk-hello` ARM build: `DT_NEEDED` = reviewed list, only `GLIBC_2.4`, RPATH `$ORIGIN/lib`, libstdc++ static | `[BUILD]` |
+| `org.wnk.examples.hello_0.1.0_arm.ipk` passes `check-package.py` and is byte-reproducible (same sha256 twice) | `[TEST]` |
+| Loadable on all 7 inventoried releases 5.3.1–11.2.0, including the 12 libraries SDL loads with dlopen | `[FWDB]` `tools/fw-check.py`; negative test (system SDL + `SDL_RenderGeometry`) fails as expected |
+
+Not verified (needs the Developer Mode TV):
+
+- install through `ares-install`, launch through `ares-launch`, and whether our own ipk writer's output
+  installs (PlxNative reports it does with the same format);
+- bundled SDL actually loading through RPATH inside the jail; window, GL strings, panel resolution;
+- remote key codes (the app logs every key), Back/Exit delivery, background/foreground events;
+- which storage candidates are writable, and whether the `prisoner` user can read `/tmp/<id>/events.log`;
+- `ares-cli-rs` installed and configured on this machine (not yet).
+
+Known limitations: `webosbrew-ipk-verify` is not installed, so only one loadability checker runs.
+The firmware inventory (v20260731, 14 images) has one image per release line.
+
+## M3 — Rendering and input
+
+GLES2 renderer (rect, rounded rect, image, text atlas, clip, transform), logical 1920×1080 canvas,
+GL capability logging, input adapter + action mapping, key-capture diagnostic screen, focus manager
+core (directional, explicit neighbours, scopes). Host golden-image tests on Mesa; mapping/focus unit tests.
+
+## M4 — UI and navigation
+
+View tree, layout (stack/row/column/grid), Text, Image, Button, List, Grid (virtualised), Dialog/Modal
+with focus trapping, Toast, Spinner, ProgressBar, navigation stack with focus restoration, animation
+clock. Example B.
+
+## M5 — Platform services
+
+WorkerPool, MainDispatcher, CancellationToken, timeouts; `HttpClient` + dlopen curl backend (needs
+curl headers on the host: vendor them or install `libcurl4-openssl-dev`); JSON; PathProvider probe;
+atomic files; prefs; bounded disk cache; ImageService. Example C.
+
+## M6 — Lifecycle and diagnostics
+
+Full lifecycle state machine; deterministic shutdown with join deadlines; crash record; capability
+system (`Supported`/`Unsupported`/`Unknown`) + device info; metrics overlay (frame time, textures,
+queue depth, cache); machine-readable compatibility DB (`compat/records.json`) with schema.
+
+## M7 — Media foundation
+
+`MediaSource`, `PlaybackController` state machine (host-tested with a scripted backend), NDL v2
+backend (dlopen, single mutex, lazy init, emergency release), PTS-unit device experiment, demuxer
+decision (FFmpeg libavformat as shared lib vs ES-only sources). Example D. Real playback marked
+unverified until seen on a TV.
+
+## M8–M10
+
+Reference apps A–D polished; Jellyfin client (app-only module) on top; compatibility test runs,
+licence audit, release workflow.
+
+## Device dependency
+
+Every milestone from M2 has a device column. Without a TV the kit can reach "builds, verifies, host
+tests pass" but **not** "works on webOS 6". That gap is recorded honestly in the compatibility DB.

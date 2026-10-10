@@ -25,6 +25,10 @@
 #include "wnk/storage/kv.hpp"
 #include "wnk/async/async.hpp"
 #include "wnk/net/http.hpp"
+#include "wnk/image/image.hpp"
+#include "wnk/image/textures.hpp"
+
+#include <nlohmann/json.hpp>
 #include "wnk/platform/probe.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/render/gles2_renderer.hpp"
@@ -296,6 +300,27 @@ class Demo {
 
     bool running() const { return running_; }
 
+    // Request one thumbnail per tile from `base` (".../poster-NN.png"), through the image service.
+    void load_posters(wnk::image::ImageService &images, wnk::image::ImageTextures &textures, const std::string &base) {
+        images_ = &images;
+        textures_ = &textures;
+        for (int i = 0; i < kCols * kRows; ++i) {
+            char name[32];
+            std::snprintf(name, sizeof name, "/poster-%02d.png", i + 1);
+            posters_[i] = Poster{};
+            images.request({base + name, 320, 0}, lifetime_.weak(), [this, i](wnk::image::ImageResult r) {
+                if (r.error == wnk::image::ImageError::None) {
+                    posters_[i].image = r.image;
+                    posters_[i].key = r.key;
+                    posters_[i].state = Poster::Ready;
+                } else {
+                    posters_[i].state = Poster::Failed;
+                    WNK_LOGW("image", "poster %d: %s %s", i + 1, wnk::image::error_name(r.error), r.detail.c_str());
+                }
+            });
+        }
+    }
+
     void on_key(const SDL_Event &ev) {
         auto key = wnk::input::key_event_from_sdl(ev);
         if (!key) return;
@@ -329,9 +354,10 @@ class Demo {
             const Rect rc = tile_rect(i);
             const bool focused = fm_.focused() == kTileBase + static_cast<NodeId>(i);
             r_.fill_rect(rc, focused ? theme::kTileFocused : theme::kTile, 18);
-            TextStyle label{focused ? bold_ : regular_, 38, theme::kText};
+            draw_poster(i, rc, now);
+            TextStyle label{focused ? bold_ : regular_, 34, theme::kText};
             const float w = r_.measure_text(label, kTileLabels[i]);
-            r_.draw_text(label, {rc.cx() - w * 0.5f, rc.cy() + 13}, kTileLabels[i]);
+            r_.draw_text(label, {rc.cx() - w * 0.5f, rc.bottom() - 16}, kTileLabels[i]);
         }
         if (!dialog_open_ || dialog_t_ < 0.99f) r_.stroke_rect(ring_.inset(-8), theme::kRing, 6, 24);
 
@@ -342,6 +368,39 @@ class Demo {
     }
 
  private:
+    struct Poster {
+        enum State { Loading, Ready, Failed } state = Loading;
+        std::shared_ptr<const wnk::image::ImageRGBA> image;
+        std::string key;
+    };
+
+    // Thumbnail covering the tile (cropped to its aspect) with a dark bar for the label.
+    void draw_poster(int i, const Rect &rc, Uint32 now) {
+        const Poster &p = posters_[i];
+        if (p.state == Poster::Ready && textures_ != nullptr && p.image) {
+            const auto tex = textures_->acquire(p.key, *p.image);
+            if (tex != wnk::render::kNoTexture) {
+                const float img_aspect = static_cast<float>(p.image->width) / p.image->height;
+                const float tile_aspect = rc.w / rc.h;
+                Rect uv{0, 0, 1, 1};
+                if (img_aspect > tile_aspect) {
+                    uv.w = tile_aspect / img_aspect;
+                    uv.x = (1 - uv.w) * 0.5f;
+                } else {
+                    uv.h = img_aspect / tile_aspect;
+                    uv.y = (1 - uv.h) * 0.5f;
+                }
+                r_.draw_image(tex, rc.inset(4), wnk::render::kWhite, uv);
+            }
+            r_.fill_rect({rc.x + 4, rc.bottom() - 58, rc.w - 8, 54}, Color::hex(0x000000A0));
+        } else if (p.state == Poster::Loading) {
+            const float pulse = 0.5f + 0.5f * std::sin(now * 0.006f + i);
+            r_.fill_rect(rc.inset(12), theme::kTileFocused.with_alpha(0.15f + 0.2f * pulse), 12);
+        } else {
+            r_.draw_text({bold_, 28, theme::kAccent}, {rc.x + 20, rc.y + 44}, "image failed");
+        }
+    }
+
     Rect target_ring() const {
         const auto *n = fm_.node(fm_.focused());
         return n != nullptr ? n->rect : Rect{};
@@ -460,9 +519,15 @@ class Demo {
 
     void draw_status(float fps) {
         const auto s = r_.stats();
-        char line[200];
-        std::snprintf(line, sizeof line, "%.0f fps   draw calls %u   quads %u   glyphs %u   atlas resets %u   focus %u",
-                      fps, s.draw_calls, s.quads, s.glyphs_cached, s.atlas_resets, fm_.focused());
+        char line[320];
+        const auto is = images_ != nullptr ? images_->stats() : wnk::image::ImageStats{};
+        std::snprintf(line, sizeof line,
+                      "%.0f fps   draw calls %u   quads %u   glyphs %u   textures %u   images: %llu loaded, %llu mem hits, "
+                      "%llu disk hits, %llu downloads, %.1f MB",
+                      fps, s.draw_calls, s.quads, s.glyphs_cached, s.textures,
+                      static_cast<unsigned long long>(is.requests - is.failures - is.in_flight),
+                      static_cast<unsigned long long>(is.memory_hits), static_cast<unsigned long long>(is.disk_hits),
+                      static_cast<unsigned long long>(is.downloads), is.memory_bytes / 1048576.0);
         r_.draw_text({regular_, 22, theme::kMuted}, {80, 1020}, line);
         r_.draw_text({regular_, 22, theme::kAccent}, {80, 1055}, storage_note_);
         r_.draw_text({regular_, 22, theme::kAccent}, {1000, 1055}, network_note_);
@@ -515,6 +580,10 @@ class Demo {
     wnk::input::ActionMapper mapper_;
     std::string storage_note_;
     std::string network_note_ = "Network: checking...";
+    wnk::image::ImageService *images_ = nullptr;
+    wnk::image::ImageTextures *textures_ = nullptr;
+    Poster posters_[kCols * kRows];
+    wnk::async::Lifetime lifetime_;  // last member: destroyed first, so late image callbacks are dropped
     FocusManager fm_;
     Rect ring_;
     std::deque<KeyLogLine> key_log_;
@@ -649,6 +718,25 @@ int main(int argc, char **argv) {
                     demo.set_network_note("Network unavailable: " + net_error);
                     WNK_LOGW("net", "no HTTP transport: %s", net_error.c_str());
                 }
+
+                // Thumbnails: bundled files by default; launch params {"imageBase":"http://host:port"} fetch them
+                // over HTTP instead (exercises network, disk cache and decode on the device).
+                std::string image_base = "file://" + launch.app_dir + "/posters";
+                if (!launch.params_json.empty()) {
+                    const auto params = nlohmann::json::parse(launch.params_json, nullptr, false);
+                    if (params.is_object() && params.contains("imageBase") && params["imageBase"].is_string()) {
+                        const std::string b = params["imageBase"];
+                        if (b.rfind("http://", 0) == 0 || b.rfind("https://", 0) == 0) image_base = b;
+                    }
+                }
+                wnk::image::ImageServiceConfig image_cfg;
+                image_cfg.memory_bytes = 32u << 20;
+                image_cfg.disk_bytes = 64u << 20;
+                if (!runtime.empty()) image_cfg.disk_directory = runtime + "/images";  // /tmp on the TV: volatile
+                wnk::image::ImageService images(transport, pool, dispatcher, image_cfg);
+                wnk::image::ImageTextures textures(*renderer, 48u << 20);
+                WNK_LOGI("image", "posters from %s, disk cache %s", image_base.c_str(), image_cfg.disk_directory.c_str());
+                demo.load_posters(images, textures, image_base);
                 Script script;
                 const double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
                 Uint64 prev = SDL_GetPerformanceCounter();
@@ -706,6 +794,7 @@ int main(int argc, char **argv) {
                     demo.update(std::min(dt, 0.1f));
                     demo.draw(SDL_GetTicks(), fps);
                     renderer->end_frame();
+                    textures.end_frame();
                     if (script.step(frames, *renderer, dw, dh)) {
                         WNK_LOGI(kCat, "script finished");
                         quit = true;
@@ -728,6 +817,15 @@ int main(int argc, char **argv) {
                 }
                 WNK_LOGI(kCat, "shutting down after %llu frames", static_cast<unsigned long long>(frames));
                 // Shutdown order: stop accepting results, cancel and join workers, then tear down UI.
+                {
+                    const auto is = images.stats();
+                    WNK_LOGI("image", "stats: requests %llu, memory hits %llu, disk hits %llu, downloads %llu, failures %llu, "
+                             "memory %.1f MB in %zu images, disk %.1f MB in %zu files, textures %zu",
+                             static_cast<unsigned long long>(is.requests), static_cast<unsigned long long>(is.memory_hits),
+                             static_cast<unsigned long long>(is.disk_hits), static_cast<unsigned long long>(is.downloads),
+                             static_cast<unsigned long long>(is.failures), is.memory_bytes / 1048576.0, is.memory_entries,
+                             is.disk_bytes / 1048576.0, is.disk_entries, textures.count());
+                }
                 dispatcher.close();
                 if (!pool.shutdown(std::chrono::milliseconds(2000))) {
                     WNK_LOGW(kCat, "a worker ignored cancellation; detached");

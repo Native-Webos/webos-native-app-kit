@@ -29,6 +29,7 @@
 - Follow `CONTRIBUTING.md`: imperative subject ≤ 72 chars saying what changed; body explains why and
   lists what was added; a verification paragraph at the evidence level actually reached.
 - Never mention milestones/phases ("M3", "milestone") in commit messages.
+- Never add `Co-Authored-By:`, tool attribution or session-id lines to commits.
 - Commit only when the owner asks.
 
 ## Where things are

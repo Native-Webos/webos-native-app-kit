@@ -19,7 +19,8 @@ has never seen the planning documents.
    words from `docs/research/README.md` (host tests, ASan, ARM build, firmware inventory, on a named TV).
    Never claim a TV result without having run it on a TV.
 5. **One logical change per commit.** Unrelated fixes go in their own commit.
-6. **Trailers** last, separated by a blank line (for example `Co-Authored-By:`).
+6. **No attribution trailers**: no `Co-Authored-By:`, tool or session lines. The message ends with
+   the verification paragraph.
 
 ### Example
 

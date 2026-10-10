@@ -11,6 +11,7 @@
 #     [EXPECTED_NEEDED <file>]           reviewed DT_NEEDED list for the executable
 #     [MIN_RELEASE <x.y.z>]              lowest webOS release fw-check grades (default 5.3.1)
 #     [EXTRA_FILES <file>...]            copied next to the executable
+#     [EXTRA_DIRS <dir>...]              copied next to the executable as <basename>/ (e.g. fonts)
 # )
 #
 # Adds, for webOS builds only:
@@ -28,7 +29,7 @@ set(WNK_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}/../tools")
 
 function(wnk_add_webos_package)
     cmake_parse_arguments(P "" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE"
-            "EXTRA_FILES" ${ARGN})
+            "EXTRA_FILES;EXTRA_DIRS" ${ARGN})
     foreach (req TARGET APPID TITLE VERSION VENDOR ICON LARGE_ICON)
         if (NOT P_${req})
             message(FATAL_ERROR "wnk_add_webos_package: ${req} is required")
@@ -81,6 +82,13 @@ function(wnk_add_webos_package)
     foreach (_f IN LISTS P_EXTRA_FILES)
         list(APPEND _cmds COMMAND "${CMAKE_COMMAND}" -E copy "${_f}" "${_stage}/")
     endforeach ()
+    set(_dir_deps)
+    foreach (_d IN LISTS P_EXTRA_DIRS)
+        get_filename_component(_dname "${_d}" NAME)
+        list(APPEND _cmds COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_d}" "${_stage}/${_dname}")
+        file(GLOB_RECURSE _dfiles CONFIGURE_DEPENDS "${_d}/*")
+        list(APPEND _dir_deps ${_dfiles})
+    endforeach ()
 
     set(_check_args)
     if (P_EXPECTED_NEEDED)
@@ -93,7 +101,7 @@ function(wnk_add_webos_package)
                 --arch "${WNK_WEBOS_ARCH}"
             COMMAND "${Python3_EXECUTABLE}" "${WNK_TOOLS_DIR}/check-package.py" "${_ipk}" ${_check_args}
                 --arch "${WNK_WEBOS_ARCH}"
-            DEPENDS ${P_TARGET} "${_appinfo}" "${P_ICON}" "${P_LARGE_ICON}" ${P_EXTRA_FILES}
+            DEPENDS ${P_TARGET} "${_appinfo}" "${P_ICON}" "${P_LARGE_ICON}" ${P_EXTRA_FILES} ${_dir_deps}
             BYPRODUCTS "${_ipk}"
             COMMENT "Packaging ${P_APPID} ${P_VERSION}"
             VERBATIM)

@@ -3,6 +3,7 @@
 # firmware (tools/fw-lib-matrix.py), or be bundled in lib/.
 ld-linux.so.3
 libc.so.6
+libm.so.6           # maths for text layout and animation (glibc; every firmware)
 libdl.so.2          # dlsym for webOS-only SDL functions
 libpthread.so.0     # glibc 2.12 keeps pthreads here
 librt.so.1          # glibc 2.12 keeps clock_gettime here

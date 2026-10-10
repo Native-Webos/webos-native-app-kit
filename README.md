@@ -4,7 +4,7 @@ A reusable foundation for **native** (C++/SDL/OpenGL ES) applications on retail 
 build, package, verify, install and launch, with the platform knowledge from PlxNative,
 moonlight-tv and the webosbrew projects turned into tools and checks.
 
-Status: **Milestone 2 (native runtime)**. See [docs/MILESTONES.md](docs/MILESTONES.md) for what is
+Status: **Milestone 3 (rendering, input, focus)**. See [docs/MILESTONES.md](docs/MILESTONES.md) for what is
 verified and what is not. Nothing here has run on a TV yet.
 
 ## Quick start
@@ -34,11 +34,24 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 |---|---|
 | `logging/` | Thread-safe structured logger, secret redaction, safe log files (0640, no symlinks) |
 | `platform/` | Process setup, launch params, app/runtime paths, device and storage probe |
-| `applications/examples/hello/` | Example A: GLES2 window, key capture, lifecycle log, device probe |
+| `core/` | Shared geometry (logical 1920x1080 units) |
+| `input/` | Raw key → semantic `Action` mapping with per-entry provenance; SDL adapter in `input/sdl` |
+| `focus/` | Focus manager: directional navigation, explicit neighbours, scopes, modal trapping, history |
+| `render/` | Renderer interface, fonts/UTF-8/atlas packing (CPU), GLES2 backend in `render/gles2` |
+| `applications/examples/hello/` | Example A: tile grid with focus ring, modal dialog, key log, device probe |
 | `cmake/` | Target detection, SDL-webOS build, `wnk_add_webos_package()` |
 | `tools/` | `mkipk.py` (reproducible ipk), `check-package.py`, `fw-check.py`, shell tools |
 | `tests/` | C++ unit tests and Python packaging tests |
 | `docs/research/` | Evidence the design is based on, with sources |
+
+## Trying the demo on the host
+
+```sh
+build/host-debug/applications/examples/hello/wnk-hello      # arrows, Enter, Escape (Back), F12 (Exit)
+# scripted, headless: inject keys and save a screenshot
+SDL_VIDEODRIVER=offscreen WNK_HELLO_KEYS=Right,Down,Return WNK_HELLO_SHOT=/tmp/shot.bmp \
+    build/host-debug/applications/examples/hello/wnk-hello
+```
 
 ## Licence
 

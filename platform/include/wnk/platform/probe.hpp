@@ -41,6 +41,19 @@ struct PathProbeResult {
 std::vector<PathCandidate> storage_candidates(const std::string &app_id, const std::string &app_dir,
                                               const std::string &runtime_dir);
 
+// Read-write mounts visible to this process (from /proc/self/mounts), excluding pseudo filesystems.
+struct MountInfo {
+    std::string device, mount_point, fs_type, options;
+};
+std::vector<MountInfo> writable_mounts();
+
+// Wider durable-storage search for unknown firmware: every candidate from storage_candidates(), the
+// root of each read-write mount (webOS builds only), and app-specific directories that exist under well-known webOS
+// prefixes (…/usr/palm/data/<id>, /var/palm/data/<id>, …). Only directories that already exist are
+// tried, and probe_writable() never creates directories.
+std::vector<PathCandidate> extended_storage_candidates(const std::string &app_id, const std::string &app_dir,
+                                                       const std::string &runtime_dir);
+
 // Create <dir>/<file_name> with O_CREAT|O_EXCL|O_NOFOLLOW, write, fsync, read back, then unlink it.
 // Never creates directories.
 PathProbeResult probe_writable(const PathCandidate &candidate);

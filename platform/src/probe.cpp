@@ -4,6 +4,8 @@
 #include "wnk/platform/process.hpp"
 
 #include <cerrno>
+#include <cstdio>
+#include <set>
 #include <cstdlib>
 #include <cstring>
 
@@ -115,6 +117,58 @@ std::vector<PathCandidate> storage_candidates(const std::string &app_id, const s
     }
     if (!runtime_dir.empty()) {
         c.push_back({"runtime", runtime_dir, probe, Durability::Volatile, "cleared on reboot"});
+    }
+    return c;
+}
+
+std::vector<MountInfo> writable_mounts() {
+    static const std::set<std::string> kPseudo = {"proc",   "sysfs",  "devtmpfs", "devpts",   "cgroup",
+                                                  "cgroup2", "debugfs", "securityfs", "pstore", "tracefs",
+                                                  "configfs", "mqueue", "bpf",     "fusectl",  "binfmt_misc",
+                                                  "hugetlbfs", "selinuxfs", "autofs", "rpc_pipefs"};
+    std::vector<MountInfo> out;
+    FILE *f = std::fopen("/proc/self/mounts", "re");
+    if (f == nullptr) return out;
+    char line[1024];
+    while (std::fgets(line, sizeof line, f) != nullptr) {
+        char dev[256], mnt[256], type[64], opts[512];
+        if (std::sscanf(line, "%255s %255s %63s %511s", dev, mnt, type, opts) != 4) continue;
+        const std::string options = opts;
+        const bool rw = options == "rw" || options.rfind("rw,", 0) == 0;
+        if (!rw || kPseudo.count(type) != 0) continue;
+        out.push_back({dev, mnt, type, options});
+    }
+    std::fclose(f);
+    return out;
+}
+
+std::vector<PathCandidate> extended_storage_candidates(const std::string &app_id, const std::string &app_dir,
+                                                       const std::string &runtime_dir) {
+    std::vector<PathCandidate> c = storage_candidates(app_id, app_dir, runtime_dir);
+    std::set<std::string> seen;
+    for (const auto &x : c) seen.insert(x.directory);
+    const std::string probe = "." + app_id + ".wnk-probe";
+    auto add_if_dir = [&](const std::string &dir, Durability d, const std::string &why) {
+        if (dir.empty() || seen.count(dir) != 0) return;
+        struct stat st{};
+        if (lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return;
+        seen.insert(dir);
+        c.push_back({"data", dir, probe, d, why});
+    };
+    static const char *kPrefixes[] = {
+        "/media/developer/apps/usr/palm/data/", "/media/cryptofs/apps/usr/palm/data/",
+        "/media/developer/apps/usr/palm/services/", "/var/palm/data/", "/var/lib/", "/home/", "/media/internal/"};
+    for (const char *prefix : kPrefixes) add_if_dir(std::string(prefix) + app_id, Durability::Unknown, "app-named dir");
+    // Mount roots are only tried on the TV: on a development host this would write into unrelated disks.
+    if (!kIsWebOS) return c;
+    for (const auto &m : writable_mounts()) {
+        // Never touch firmware/vendor partitions (e.g. /mnt/lg/ciplus/authcxt holds CI+ credentials)
+        // or the user's removable media (/tmp/usb/...). Observed writable on an OLED65C1PTB, 2026-10-11.
+        const std::string &mp = m.mount_point;
+        if (mp.rfind("/mnt/", 0) == 0 || mp.rfind("/tmp/usb", 0) == 0 || mp.rfind("/media/usb", 0) == 0) continue;
+        const bool volatile_fs = m.fs_type == "tmpfs" || m.fs_type == "ramfs";
+        add_if_dir(m.mount_point, volatile_fs ? Durability::Volatile : Durability::Unknown,
+                   "rw mount " + m.fs_type + " (" + m.device + ")");
     }
     return c;
 }

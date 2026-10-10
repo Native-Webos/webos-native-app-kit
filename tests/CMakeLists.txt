@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage)
+foreach (t log platform input focus font storage async)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -10,6 +10,7 @@ target_link_libraries(test_input PRIVATE wnk_input)
 target_link_libraries(test_focus PRIVATE wnk_focus)
 target_link_libraries(test_font PRIVATE wnk_render)
 target_link_libraries(test_storage PRIVATE wnk_storage)
+target_link_libraries(test_async PRIVATE wnk_async)
 target_include_directories(test_storage SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_compile_definitions(test_font PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
 

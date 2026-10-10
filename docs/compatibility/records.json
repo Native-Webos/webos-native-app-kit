@@ -215,6 +215,15 @@
       "method": "wnk::storage Db8Store (kind <app_id>.kv:1 owned by the app, index on key, find/put/del) in hello 0.4.0",
       "evidence": "launch.count 1 -> 5 across relaunches; focus.tile saved on exit by the owner's session (7 = Downloads) and restored on the next launch (focus 0 -> 107); an earlier owner session restored tile 3",
       "limitations": "one firmware; uninstall behaviour and value-size limits not measured"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "unit_tests.on_device",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "tools/device-test.sh: ARM unit tests pushed with ares-push and run with ares-shell as the Developer Mode user",
+      "evidence": "test_input 11/11, test_focus 15/15, test_async 16/16 passed; test_async passed 10 more consecutive runs; 4 CPU cores",
+      "limitations": "runs outside an app jail (no app permissions); covers platform-independent code only"
     }
   ]
 }

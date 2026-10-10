@@ -11,7 +11,7 @@ verified and what is not. Nothing here has run on a TV yet.
 
 ```sh
 tools/doctor.sh                       # what this machine has; installs nothing
-tools/test.sh                         # host build + unit tests (C++ and Python)
+tools/test.sh                         # host build + unit tests (C++ and Python); also host-asan, host-tsan
 tools/build-webos.sh                  # ARM build + build/webos-release/dist/*.ipk (checked)
 tools/verify.sh build/webos-release/dist/org.wnk.examples.hello_0.1.0_arm.ipk \
     --runtime-libs cmake/sdl-webos-runtime-libs.txt
@@ -24,6 +24,7 @@ On a **Developer Mode** TV (no root needed), after installing
 tools/install.sh build/webos-release/dist/org.wnk.examples.hello_0.1.0_arm.ipk
 tools/launch.sh org.wnk.examples.hello
 tools/logs.sh org.wnk.examples.hello     # or download /tmp/org.wnk.examples.hello/events.log with Dev Manager
+tools/device-test.sh                     # run the platform-independent unit tests on the TV's CPU
 ```
 
 Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-ndk/…` or `/opt/…`.
@@ -37,6 +38,7 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 | `core/` | Shared geometry (logical 1920x1080 units) |
 | `input/` | Raw key → semantic `Action` mapping with per-entry provenance; SDL adapter in `input/sdl` |
 | `focus/` | Focus manager: directional navigation, explicit neighbours, scopes, modal trapping, history |
+| `async/` | Cancellation tokens, worker pool, main-thread dispatcher, lifetime guards |
 | `storage/` | Key/value store with revisions: DB8 on the TV, atomic files on the host |
 | `render/` | Renderer interface, fonts/UTF-8/atlas packing (CPU), GLES2 backend in `render/gles2` |
 | `applications/examples/hello/` | Example A: tile grid with focus ring, modal dialog, key log, device probe |

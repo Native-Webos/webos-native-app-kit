@@ -12,7 +12,8 @@
   (link it statically) or any LG library.
 
 ## Gates before handing over a change
-1. `tools/test.sh` (and `tools/test.sh host-asan` for memory-sensitive code). This includes renderer
+1. `tools/test.sh` (and `tools/test.sh host-asan` for memory-sensitive code, `tools/test.sh host-tsan` for
+   anything touching threads). This includes renderer
    pixel tests on Mesa and end-to-end runs of Example A driven by `WNK_HELLO_KEYS`.
 2. `tools/build-webos.sh`: the ARM build must succeed and its ipk must pass `check-package.py`.
 3. `tools/verify.sh <ipk> --runtime-libs cmake/sdl-webos-runtime-libs.txt` must be 7/7 for 5.3.1+.
@@ -31,6 +32,12 @@
 - Never mention milestones/phases ("M3", "milestone") in commit messages.
 - Never add `Co-Authored-By:`, tool attribution or session-id lines to commits.
 - Commit as soon as a task is complete, before starting the next task.
+
+## Threading rules
+- Only the main thread touches SDL, GL, UI and focus. Blocking work goes to `async::WorkerPool`.
+- Workers return results with `MainDispatcher::post`; they never wait on the main thread.
+- Callbacks that touch an owner capture `Lifetime::Weak` and check `alive()` on the main thread.
+- Shutdown order: close the dispatcher, shut down the pool with a deadline, then destroy UI and GL.
 
 ## Where things are
 - Research and decisions: `docs/research/` (ARCHITECTURE-DECISIONS.md, PACKAGING-AND-FIRMWARE.md).

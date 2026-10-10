@@ -10,7 +10,7 @@ level stated. Device items stay open until run on a TV.
 | 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
 | 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
 | 4 | UI and navigation | ⬜ |
-| 5 | Platform services | 🟡 key/value storage done (TV-verified); async, HTTP, images pending |
+| 5 | Platform services | 🟡 storage and background work done (TV-verified); HTTP, images pending |
 | 6 | Lifecycle and diagnostics | ⬜ |
 | 7 | Media foundation | ⬜ |
 | 8 | Reference applications | ⬜ |
@@ -126,8 +126,10 @@ atomic files; prefs; bounded disk cache; ImageService. Example C.
 Done: `storage/` `KeyValueStore` with revisions and compare-and-set; `Db8Store` (TV) and `FileStore` (host
 and caches); one contract suite runs on both, DB8 against a fake built from the errors measured on the TV.
 On an OLED65C1PTB (webOS 6.5.3) the demo's launch counter and remembered focus persist through DB8.
-Pending: worker pool / main-thread dispatcher, HTTP client, JSON helpers for apps, image service, secret
-storage (keymanager) and cache eviction.
+`async/`: cancellation sources/tokens with deadlines, `MainDispatcher` (FIFO, budgets, close), `WorkerPool`
+(cancel-on-shutdown with a deadline, discards, failure counting, stats), `Lifetime` guards, `run_then_post`.
+16 tests, clean under TSan (20 runs) and ASan, and passing on the TV's CPU (`tools/device-test.sh`).
+Pending: HTTP client, JSON helpers for apps, image service, secret storage (keymanager), cache eviction.
 
 ## M6 — Lifecycle and diagnostics
 

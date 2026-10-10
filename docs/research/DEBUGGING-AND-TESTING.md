@@ -52,5 +52,9 @@ Evidence tags: see [README.md](README.md). Link prefixes: see [PROJECT-COMPARISO
 | Cross build | Every webOS preset compiles and links; import verification against firmware inventory | Host (NDK) |
 | Device | Install, launch, key capture, focus, network, paths probe, NDL init, playback | TV, recorded in the compatibility DB |
 
+Platform-independent unit tests also run on the TV: `tools/device-test.sh` cross-builds them, pushes them
+with `ares-push` and runs them with `ares-shell` as the Developer Mode user (no root). ThreadSanitizer needs
+`setarch -R` on this host's kernel (`tools/test.sh host-tsan` does it).
+
 Nothing is marked passed on the device unless it was run on a TV and the record names the model,
 firmware and date.

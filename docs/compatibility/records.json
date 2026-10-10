@@ -224,6 +224,33 @@
       "method": "tools/device-test.sh: ARM unit tests pushed with ares-push and run with ares-shell as the Developer Mode user",
       "evidence": "test_input 11/11, test_focus 15/15, test_async 16/16 passed; test_async passed 10 more consecutive runs; 4 CPU cores",
       "limitations": "runs outside an app jail (no app permissions); covers platform-independent code only"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "net.https_system_ca",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "examples/hello 0.5.0: CurlTransport (system libcurl.so.4 via dlopen) from inside the app, on a worker thread",
+      "evidence": "libcurl/7.61.0 OpenSSL/1.1.1t; https://example.com/ 200 (130 ms); https://letsencrypt.org/ 200 (291 ms, ISRG root trusted); https://expired.badssl.com/ rejected: \"SSL certificate problem: certificate has expired\"",
+      "limitations": "CA store contents beyond these roots not enumerated"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "async.worker_to_main_delivery_in_app",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "examples/hello: network check on WorkerPool, result posted to MainDispatcher and drawn",
+      "evidence": "result shown and logged; shutdown closed the dispatcher and joined the pool, exit 0",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "unit_tests.http_on_device",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "tools/device-test.sh test_http test_async",
+      "evidence": "8/8 and 16/16",
+      "limitations": "curl integration tests need a local server and run on the host only"
     }
   ]
 }

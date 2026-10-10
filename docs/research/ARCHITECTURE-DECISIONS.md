@@ -93,7 +93,10 @@ change it. Status: **Proposed** until the owner accepts or the milestone that im
   app-supplied CA bundle. A curl multi loop runs on its own worker thread.
 - **Evidence:** `libcurl.so.4` on webOS 5.3.1–11.2, TLS backend changes underneath (1.1 → 3) `[FWDB]`;
   plx needed extra CA roots on older sets `[SRC]`; host has `libcurl.so.4` runtime but no headers `[BUILD]`.
-- **Open:** moonlight's undocumented "curl ABI fix" `[UNK]`; CA store path on webOS 6 `[UNK]`.
+- **Implemented** in `net/` (2026-10-11). On an OLED65C1PTB, webOS 6.5.3: system libcurl 7.61.0 with
+  OpenSSL 1.1.1t; HTTPS to DigiCert- and Let's-Encrypt-signed hosts works from the app; an expired
+  certificate is refused `[HW]`. Only curl API ≤ 7.28 is used (`CURLOPT_PROTOCOLS`, `curl_multi_wait`).
+- **Open:** moonlight's undocumented "curl ABI fix" `[UNK]` (not needed here); other firmware.
   Fallback if system curl misbehaves: bundle a static curl + mbedTLS (moonlight bundles mbedTLS) `[INF]`.
 
 ## ADR-010 Storage: DB8 for durable app state on webOS, files for cache and host

@@ -10,7 +10,7 @@ level stated. Device items stay open until run on a TV.
 | 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
 | 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
 | 4 | UI and navigation | ⬜ |
-| 5 | Platform services | 🟡 storage and background work done (TV-verified); HTTP, images pending |
+| 5 | Platform services | 🟡 storage, background work and HTTP done (TV-verified); images, secrets, cache pending |
 | 6 | Lifecycle and diagnostics | ⬜ |
 | 7 | Media foundation | ⬜ |
 | 8 | Reference applications | ⬜ |
@@ -129,7 +129,11 @@ On an OLED65C1PTB (webOS 6.5.3) the demo's launch counter and remembered focus p
 `async/`: cancellation sources/tokens with deadlines, `MainDispatcher` (FIFO, budgets, close), `WorkerPool`
 (cancel-on-shutdown with a deadline, discards, failure counting, stats), `Lifetime` guards, `run_then_post`.
 16 tests, clean under TSan (20 runs) and ASan, and passing on the TV's CPU (`tools/device-test.sh`).
-Pending: HTTP client, JSON helpers for apps, image service, secret storage (keymanager), cache eviction.
+`net/`: `HttpRequest`/`HttpResponse`, `CurlTransport` (system libcurl via dlopen, multi interface for
+≤50 ms cancellation, TLS verification always on, size/time limits, http/https only), `RetryPolicy`,
+`HttpClient` delivering on the main thread. 8 unit tests + 9 tests against a local HTTP/HTTPS server.
+On the TV (libcurl 7.61.0, OpenSSL 1.1.1t) HTTPS works from the app and an expired certificate is refused.
+Pending: JSON helpers for apps, image service, secret storage (keymanager), cache eviction, WebSocket.
 
 ## M6 — Lifecycle and diagnostics
 

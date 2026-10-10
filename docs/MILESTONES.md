@@ -100,8 +100,8 @@ colour/CH keys arrive with exactly the SDL-webOS source codes (now marked `Measu
 double-Back exit and SAM close all end in exit 0; the Dev Mode user can pull the 0640 log from /tmp.
 
 Found on hardware: **no durable app-writable filesystem location** in the Developer Mode jail (only tmpfs).
-Persistence needs another mechanism (next candidate: Luna DB8 through a packaged native service, as
-PlxNative does; unproven). Still unverified: key repeat, transport/number/volume/Home keys, Magic Remote
+**DB8 called directly from the app works instead** and survived relaunch, reinstall and a full reboot
+(ADR-010; `platform/luna.hpp`; experiment in Example A). Still unverified: key repeat, transport/number/volume/Home keys, Magic Remote
 pointer, background/foreground switching, text quality judged up close.
 
 Simplifications, deliberate for M3: transforms are translation only (no scale/rotation); text is a

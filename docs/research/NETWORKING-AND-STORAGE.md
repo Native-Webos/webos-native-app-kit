@@ -63,7 +63,11 @@ Conflicts between sources:
   update. It reports a webOS 4.4.3 Dev Mode set where neither `/media/developer`, `/media/internal`
   nor the app dir accepted writes `[SRC]` (claim).
 
-**Writable, durable storage on webOS 6 is `[UNK]` until probed on the device.**
+**Measured on an OLED65C1PTB, webOS 6.5.3, Developer Mode (2026-10-11) `[HW]`:** no durable
+app-writable filesystem location (`/media/developer` EACCES, `/media/internal` EROFS, app dir EACCES;
+only tmpfs). **DB8 from the app process works and persists across relaunch, reinstall and reboot**
+(ADR-010). Earlier sources disagreeing about `$HOME`/`/media/*` paths are explained by different
+firmware, jail profiles or rooted installs.
 
 ### Kit design (from the evidence)
 

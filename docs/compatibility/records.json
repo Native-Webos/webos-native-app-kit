@@ -146,12 +146,12 @@
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",
-      "feature": "storage.durable_write",
+      "feature": "storage.durable_filesystem_write",
       "result": "unsupported",
       "date": "2026-10-11",
       "method": "platform probe incl. every rw mount from /proc/self/mounts (hello 0.2.1)",
       "evidence": "app uid 6617/gid 5000 in the Developer Mode jail: /media/developer (ext4, rw mount) EACCES; /media/internal EROFS; app dir EACCES; only tmpfs /tmp and /dev/shm writable. A vendor partition (/mnt/lg/ciplus/authcxt) and a USB stick were also writable and are now excluded from probing; neither may be used for app data.",
-      "limitations": "filesystem only. Luna DB8 (com.webos.service.db) via a packaged service, as PlxNative does, is untested here"
+      "limitations": "filesystem only; see storage.db8_app_owned_kind for the working alternative"
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",
@@ -179,6 +179,33 @@
       "method": "owner pressed Home while the app ran (KEYS_HOME not requested)",
       "evidence": "owner report: the app left the screen and the TV showed its home screen, like other apps; no Home key event reached the app",
       "limitations": "whether the process was terminated or only backgrounded was not logged; re-test with lifecycle logging"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "storage.db8_app_owned_kind",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "app process, libhelpers HLunaServiceCall to luna://com.palm.db (putKind owner=app id, get, put with _rev); appinfo requiredPermissions [database.operation]; no separate service",
+      "evidence": "counter 1 -> 2 -> 3 across relaunches, kept across reinstall 0.3.1 -> 0.3.2, read back as 3 and written as 4 after a full TV restart (pid 5095 after boot vs ~9500 before)",
+      "limitations": "one firmware; behaviour on uninstall not tested; com.webos.service.db alias not needed so not tested"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "storage.db8_id_length",
+      "result": "unsupported",
+      "date": "2026-10-11",
+      "method": "put with a 33-character _id",
+      "evidence": "errorCode -3968 \"db: Invalid _id length\"; a 14-character _id works",
+      "limitations": "exact maximum not measured"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "storage.db8_update_requires_rev",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "put of an existing _id without _rev",
+      "evidence": "errorCode -3960 \"db: _rev must be specified for existing objects\"; succeeds with the _rev from get",
+      "limitations": ""
     }
   ]
 }

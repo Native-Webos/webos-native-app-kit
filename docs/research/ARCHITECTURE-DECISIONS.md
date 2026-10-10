@@ -96,9 +96,18 @@ change it. Status: **Proposed** until the owner accepts or the milestone that im
 - **Open:** moonlight's undocumented "curl ABI fix" `[UNK]`; CA store path on webOS 6 `[UNK]`.
   Fallback if system curl misbehaves: bundle a static curl + mbedTLS (moonlight bundles mbedTLS) `[INF]`.
 
-## ADR-010 Storage: probed `PathProvider`, atomic writes, separate secret store
+## ADR-010 Storage: DB8 for durable app state on webOS, files for cache and host
 
-- See NETWORKING-AND-STORAGE.md. Durable location on webOS 6 is `[UNK]` until the probe runs on a device.
+- **Finding (OLED65C1PTB, webOS 6.5.3, Developer Mode, 2026-10-11):** the app's jail has no durable
+  writable filesystem location (only tmpfs). DB8 called from the app process works: `putKind` with
+  `owner` = app id, `get`, `put` with `_rev`; data survived relaunch, reinstall and a full reboot. It needs
+  `"requiredPermissions": ["database.operation"]` and short `_id`s (≤ 14 characters worked, 33 failed).
+  `[HW]` on one TV.
+- **Decision:** the webOS `KeyValueStore` backend is DB8, called from the app (no separate service unless
+  a firmware proves it necessary; PlxNative needed one on webOS 4). Files remain for disposable cache in
+  `/tmp/<id>` and for the host backend. Atomic multi-key updates use `_rev` for optimistic concurrency.
+- **Open:** other firmware versions, Homebrew Channel (non-Dev-Mode) installs, behaviour on uninstall,
+  record size limits, secrets (keymanager) — see NETWORKING-AND-STORAGE.md.
 
 ## ADR-011 Media: controller/backend split; NDL v2 first; demuxer decision deferred to M7
 

@@ -179,6 +179,13 @@ if (TARGET wnk-player)
     endfunction()
     wnk_player_e2e(pause_seek_resume "{\"autoplay\":0}" "Space,Right,Space"
             "Playing -> Paused.*Paused -> Seeking.*Seeking -> Paused.*Paused -> Playing")
+    # Backgrounding releases the decoder; playback resumes on return only if it was playing.
+    wnk_player_e2e(background_resumes_playing "{\"autoplay\":0}" "Up,bg,Up,fg,Up,Up"
+            "Playing -> Paused.*back in the foreground: resuming.*Paused -> Playing")
+    wnk_player_e2e(background_keeps_viewer_pause "{\"autoplay\":0}" "Space,bg,Up,fg,Up,Up"
+            "Playing -> Paused.*Resuming -> Running")
+    set_tests_properties(e2e.player.background_keeps_viewer_pause PROPERTIES
+            FAIL_REGULAR_EXPRESSION "back in the foreground: resuming|Paused -> Playing|${WNK_SANITIZER_FAIL}")
     wnk_player_e2e(back_stops_playback "{\"autoplay\":0}" "Up,Up,Escape" "stopping at .*-> Stopped")
     wnk_player_e2e(plays_to_the_end "{\"autoplay\":1}"
             "Right,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up"

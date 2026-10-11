@@ -10,7 +10,8 @@
 //
 // Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Stop or Back leaves. Any key
 // shows the controls; they hide after 4 s of playback. Pause and seek keep the decoder loaded, so the
-// picture holds; backgrounding the app pauses playback and releases the decoder.
+// picture holds; backgrounding the app pauses playback and releases the decoder, and playback resumes
+// on return if it was playing.
 //
 // Launch params (ares-launch --params):
 //   {"uri": "file:///path/to/file.mkv"}   play that file straight away; http(s):// URIs stream through
@@ -145,7 +146,18 @@ class PlayerScreen : public Screen {
 
     // Leaving the app: pause and give the decoder back (a held pause would keep it).
     void pause_for_background() {
-        if (controller_ != nullptr) controller_->pause_and_release();
+        if (controller_ == nullptr) return;
+        const PlayState st = controller_->state();
+        resume_on_return_ = st == PlayState::Playing || st == PlayState::Seeking;
+        controller_->pause_and_release();
+    }
+    // Back in the foreground: carry on if it was playing when the app left (the decoder was released,
+    // so there is no picture to hold); a pause the viewer chose stays paused.
+    void return_from_background() {
+        if (controller_ == nullptr || !resume_on_return_) return;
+        resume_on_return_ = false;
+        WNK_LOGI(kCat, "back in the foreground: resuming");
+        controller_->play();
     }
 
  protected:
@@ -219,6 +231,7 @@ class PlayerScreen : public Screen {
 
     wnk::app::Context &ctx_;
     std::string uri_;
+    bool resume_on_return_ = false;  // playing when the app went to the background
     std::string backend_name_;
     std::unique_ptr<PlaybackController> controller_;
     Column *bar_;
@@ -314,6 +327,8 @@ class Player : public wnk::app::Delegate {
             if (wnk::platform::kIsWebOS) NdlBackend::set_app_foreground(false);
         } else if (t.to == wnk::app::State::Resuming && wnk::platform::kIsWebOS) {
             NdlBackend::set_app_foreground(true);
+        } else if (t.from == wnk::app::State::Resuming && t.to == wnk::app::State::Running) {
+            if (auto *p = dynamic_cast<PlayerScreen *>(nav_->top())) p->return_from_background();
         }
     }
 

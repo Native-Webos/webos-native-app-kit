@@ -521,6 +521,15 @@
       "method": "Example D 0.2.1: NDL_DirectVideoFlushRenderBuffer on seek, decoder kept loaded, PTS continued monotonically",
       "evidence": "returned 0 in 4-15 ms, no black picture, but no sound for the rest of the session although audio packets kept being accepted",
       "limitations": "not usable for seeking while it kills audio; whether a reload restores audio was not tested"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.ndl.background_release_resume",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example D 0.3.1: Home while playing and while paused; NDL unloaded on Suspended, playback resumed on Resuming -> Running only if it was playing",
+      "evidence": "NDL_DirectMediaUnload in 56-59 ms on Home; playing again 142 ms after the app returned (reload 122 ms), sound fine (owner); a viewer pause stayed paused and OK reloaded NDL in 83 ms",
+      "limitations": "a paused session shows no picture after returning (the decoder was released)"
     }
   ]
 }

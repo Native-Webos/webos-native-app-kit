@@ -833,3 +833,35 @@ TEST("pointer: clicking a card in a rail activates that item") {
     CHECK(!env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Wheel, -1), {}));
 }
 
+TEST("spring: starts gently, never overshoots, keeps velocity when retargeted, dt-independent") {
+    Smoothed a;
+    a.rate = 20;
+    a.target = 100;
+    a.step(1.0f / 60);
+    CHECK(a.value > 0);
+    CHECK(a.value < 100 * (1 - std::exp(-20.0f / 60)));  // slower start than an exponential approach
+    float prev = a.value;
+    for (int i = 0; i < 120; ++i) {
+        a.step(1.0f / 60);
+        CHECK(a.value <= 100.0f);
+        CHECK(a.value >= prev);
+        prev = a.value;
+    }
+    CHECK(a.settled());
+    // One 1/30 s step lands where two 1/60 s steps do.
+    Smoothed b, c;
+    b.rate = c.rate = 20;
+    b.target = c.target = 50;
+    b.step(1.0f / 30);
+    c.step(1.0f / 60);
+    c.step(1.0f / 60);
+    CHECK(std::fabs(b.value - c.value) < 0.01f);
+    // Retargeting mid-flight keeps the velocity.
+    Smoothed d;
+    d.rate = 20;
+    d.target = 100;
+    for (int i = 0; i < 5; ++i) d.step(1.0f / 60);
+    const float v = d.velocity;
+    d.target = 200;
+    CHECK_EQ(d.velocity, v);
+}

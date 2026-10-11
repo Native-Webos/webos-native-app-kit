@@ -654,7 +654,6 @@ int main(int argc, char **argv) {
                     int dw = 0, dh = 0;
                     SDL_GL_GetDrawableSize(window, &dw, &dh);
                     renderer->begin_frame(dw, dh);
-                    renderer->clear(theme.background);
                     app.ui().draw();
                     perf.draw_max = std::max(perf.draw_max, ms_since(t_draw));
                     const Uint64 t_finish = SDL_GetPerformanceCounter();

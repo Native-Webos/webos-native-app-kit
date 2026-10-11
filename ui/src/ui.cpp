@@ -35,11 +35,10 @@ Ui::Ui(render::Renderer &renderer, Theme theme, Size canvas)
     : r_(renderer), theme_(theme), canvas_(canvas), root_(std::make_unique<View>()), overlay_(std::make_unique<View>()) {
     root_->owner_ui_ = this;
     root_->name = "root";
-    root_->set_background(theme_.background);
     overlay_->owner_ui_ = this;
     overlay_->name = "overlay";
-    for (Smoothed *s : {&ring_dx_, &ring_dy_, &ring_dw_, &ring_dh_}) s->rate = 18;
-    ring_alpha_.rate = 20;
+    for (Smoothed *s : {&ring_dx_, &ring_dy_, &ring_dw_, &ring_dh_}) s->rate = 22;  // ~0.2 s
+    ring_alpha_.rate = 24;
 }
 
 Ui::~Ui() {
@@ -459,10 +458,11 @@ void Ui::step_ring(float dt) {
             // Keep the ring attached to the focused view while it scrolls; animate only the jump
             // from the old rectangle, as an offset that decays to zero.
             if (ring_view_ != 0 && !ring_snap_ && ring_alpha_.value > 0.01f) {
-                ring_dx_.snap(ring_rect_.x - target.x);
-                ring_dy_.snap(ring_rect_.y - target.y);
-                ring_dw_.snap(ring_rect_.w - target.w);
-                ring_dh_.snap(ring_rect_.h - target.h);
+                // Keep each spring's velocity: a second press mid-flight continues the motion.
+                ring_dx_.value = ring_rect_.x - target.x;
+                ring_dy_.value = ring_rect_.y - target.y;
+                ring_dw_.value = ring_rect_.w - target.w;
+                ring_dh_.value = ring_rect_.h - target.h;
                 ring_dx_.target = ring_dy_.target = ring_dw_.target = ring_dh_.target = 0;
             } else {
                 ring_dx_.snap(0);
@@ -504,6 +504,9 @@ void Ui::draw() {
     }
     refresh();
     alpha_ = 1;
+    // A clear, not a full-screen quad: one less full-screen fragment pass per frame on the TV's GPU.
+    // A transparent theme background lets a video plane show through.
+    r_.clear(theme_.background);
     View *f = focused();
     const bool focus_in_overlay = f != nullptr && overlay_->is_ancestor_of(f);
     root_->draw_tree(*this);

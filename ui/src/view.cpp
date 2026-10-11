@@ -5,6 +5,7 @@
 #include "wnk/ui/ui.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace wnk::ui {
 namespace {
@@ -236,7 +237,11 @@ void View::draw_tree(Ui &ui) {
     if (!children_.empty()) {
         const bool clip = clips_children();
         if (clip) r.push_clip(frame_);
-        const Point s = scroll_offset();
+        // Scroll by whole device pixels: text is drawn on the pixel grid, images are not, so a
+        // fractional offset makes text shimmer against the images around it while scrolling.
+        Point s = scroll_offset();
+        const float px = r.mapping().scale > 0 ? r.mapping().scale : 1;
+        s = {std::round(s.x * px) / px, std::round(s.y * px) / px};
         const bool scrolled = s.x != 0 || s.y != 0;
         if (scrolled) r.push_translate(-s.x, -s.y);
         // Index loop: a child must not change the tree while drawing, but be defensive about size.

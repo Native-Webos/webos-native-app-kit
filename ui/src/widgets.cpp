@@ -181,7 +181,7 @@ void Grid::layout_content(Ui &ui, const Rect &content) {
 
 // ---- ScrollView -----------------------------------------------------------------------------------
 
-ScrollView::ScrollView() { scroll_.rate = 14; }
+ScrollView::ScrollView() { scroll_.rate = 16; }
 
 void ScrollView::scroll_to(float y, bool animate) {
     scroll_.target = std::clamp(y, 0.0f, max_scroll_);

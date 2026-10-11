@@ -7,7 +7,7 @@
 //
 //   for each ActionEvent:  ui.handle(e)   → focused view → its ancestors → geometric focus move
 //   ui.update(dt)                          → clock, view updates (scrolling, loading), toasts
-//   renderer.begin_frame(); ui.draw(); renderer.end_frame()
+//   renderer.begin_frame(); ui.draw(); renderer.end_frame()   (draw() clears to theme().background)
 //
 // handle() returns false for events nobody consumed; Back at the root is the app's decision (e.g.
 // "press Back again to exit").

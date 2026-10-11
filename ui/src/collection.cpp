@@ -9,7 +9,7 @@ namespace wnk::ui {
 CollectionView::CollectionView(Axis axis, int cross_count, Size cell, float spacing)
     : axis_(axis), cross_(cross_count < 1 ? 1 : cross_count), cell_(cell), spacing_(spacing) {
     set_focus_scope(false, true);
-    scroll_.rate = 14;
+    scroll_.rate = 16;  // ~0.3 s; retargeting on key repeat keeps the motion continuous
 }
 
 void CollectionView::set_items(size_t count, Factory factory) {

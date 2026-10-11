@@ -20,19 +20,29 @@ inline float in_out_cubic(float t) {
 }
 }  // namespace ease
 
-// Exponential approach to a target: frame-rate independent, never overshoots, and retargets smoothly
-// (used for focus rings and scrolling, where the target moves while the animation runs).
+// Critically damped spring towards a target (used for focus rings and scrolling, where the target
+// moves while the animation runs). Unlike an exponential approach it starts gently, keeps its velocity
+// when retargeted, and never overshoots. The step is the exact solution, so it is frame-rate
+// independent and stable for any dt.
 struct Smoothed {
     float value = 0;
     float target = 0;
-    float rate = 16;  // 1/s; larger is faster (about 95% of the way in 3/rate seconds)
+    float rate = 16;  // angular frequency, 1/s; about 95% of the way in 4.7/rate seconds
+    float velocity = 0;
 
-    void snap(float v) { value = target = v; }
-    void step(float dt) {
-        value += (target - value) * (1 - std::exp(-dt * rate));
-        if (std::fabs(target - value) < 0.05f) value = target;
+    void snap(float v) {
+        value = target = v;
+        velocity = 0;
     }
-    bool settled() const { return value == target; }
+    void step(float dt) {
+        const float x = value - target;
+        const float e = std::exp(-rate * dt);
+        const float k = (velocity + rate * x) * dt;
+        value = target + (x + k) * e;
+        velocity = (velocity - rate * k) * e;
+        if (std::fabs(value - target) < 0.05f && std::fabs(velocity) < 0.5f) snap(target);
+    }
+    bool settled() const { return value == target && velocity == 0; }
 };
 
 // Fixed-duration interpolation with an easing curve.

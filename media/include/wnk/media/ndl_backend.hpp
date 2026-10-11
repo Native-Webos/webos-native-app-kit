@@ -24,6 +24,7 @@
 #pragma once
 
 #include "wnk/media/media.hpp"
+#include "wnk/media/pts_splice.hpp"
 
 #include <cstdint>
 #include <mutex>
@@ -32,25 +33,6 @@
 namespace wnk::media {
 
 enum class PtsUnit : uint8_t { Microseconds, Milliseconds };
-
-// The PTS mapping behind splice seeks: after splice(), the next packet with a PTS is placed `gap_us`
-// after the highest PTS mapped so far and everything after it keeps that offset, so the decoder's
-// timeline only moves forward. Pure, for tests.
-class PtsSplice {
- public:
-    explicit PtsSplice(int64_t gap_us) : gap_us_(gap_us) {}
-    void reset() { *this = PtsSplice(gap_us_); }
-    void splice() { pending_ = true; }
-    // kNoTime stays kNoTime.
-    int64_t map(int64_t pts_us);
-    int64_t shift_us() const { return shift_us_; }
-
- private:
-    int64_t gap_us_;
-    int64_t shift_us_ = 0;
-    bool pending_ = false;
-    int64_t max_out_us_ = kNoTime;
-};
 
 struct NdlOptions {
     PtsUnit pts_unit = PtsUnit::Microseconds;

@@ -5,7 +5,7 @@ if (NOT TARGET wnk_media_ffmpeg)
 endif ()
 
 add_executable(wnk-player main.cpp)
-target_link_libraries(wnk-player PRIVATE wnk_app wnk_media_ffmpeg wnk_media_ndl wnk_media_ui)
+target_link_libraries(wnk-player PRIVATE wnk_app wnk_media_ffmpeg wnk_media_ndl wnk_media_starfish wnk_media_ui)
 target_include_directories(wnk-player SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 
 # A/V test clips, generated with the host's ffmpeg CLI (tools/make-test-clips.sh).
@@ -35,7 +35,7 @@ wnk_add_webos_package(
         TARGET wnk-player
         APPID org.wnk.examples.player
         TITLE "WNK Player"
-        VERSION 0.4.2
+        VERSION 0.5.1
         VENDOR "webos-native-app-kit"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"

@@ -11,6 +11,7 @@
 | [curl](https://curl.se) 7.87.0 headers (tag `curl-7_87_0`; `curl.h` identical to the NDK's) | `third_party/curl/include/curl/` (+ `COPYING`) | curl licence (MIT/X-style) | Types and constants for libcurl, which is loaded from the device at runtime and not redistributed |
 | [FFmpeg](https://ffmpeg.org) 9.0 (`ffmpeg-9.0.tar.xz` sha256 `7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52`) | built by `tools/build-ffmpeg.sh` (LGPL configuration: no `--enable-gpl`/`--enable-nonfree`); shipped in packages that use media as `lib/libavformat-wnk.so.63`, `lib/libavcodec-wnk.so.63`, `lib/libavutil-wnk.so.61` | LGPL-2.1-or-later | Demuxing, Annex-B conversion, AAC/AC-3/E-AC-3 decoding. Shared libraries so they can be replaced; whoever distributes a package must also offer that exact source tarball |
 | PlxNative `ci/build-ffmpeg.sh` | design of `tools/build-ffmpeg.sh` (bundling rationale, suffix, prefix, polyfill exclusion, component approach) | GPL-3.0-or-later | Build tooling; credited in the script header |
+| PlxNative `src/starfish.c`, `rust-modules/media/src/player/engine.rs` | `media/src/starfish_backend.cpp` (mangled StarfishMediaAPIs entry points, in-place object, sret Feed reply, BUFFERSTREAM payload, exported-window binding, frame-rate envelope) | GPL-3.0-or-later | Media backend; credited in the file headers |
 | GNU GPL v3 text | `LICENSE` | — | Licence of this kit |
 
 LG firmware libraries (EGL/GLES, Wayland, libhelpers, NDL, Starfish, …) are resolved on the TV at

@@ -292,6 +292,11 @@ PGS, DVD, DVB) becomes cues in a `SubtitleStore` that survives seeks; `SubtitleV
 text with an outline at the bottom of the video and maps bitmaps from their canvas. Example D 0.4.0 shows
 the default track and cycles tracks with Down. On the TV: SubRip in MKV in time, switching and seeking.
 
+Starfish backend (2026-10-11): `StarfishBackend` drives LG's StarfishMediaAPIs (dlopened libplayerAPIs,
+SDL-webOS exported window, BUFFERSTREAM payload with the stream's frame rate) after PlxNative's seam. On
+the TV it plays 24 fps without the NDL judder (24 frames per second presented), with a real pause, the
+decoder's position and AAC passed through. Opt-in in Example D (`{"backend":"starfish"}`, 0.5.x).
+
 Open: subtitles from external files, ASS styling (libass), non-Latin fonts, bitmap subtitles on the TV,
 HDR metadata, VP9/AV1 on the TV,
 Opus passthrough, resampling for sample rates NDL lacks, pause and seek latency (the queued lead, up to 1 s), video-only files (reported to need an audio prime),

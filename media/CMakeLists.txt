@@ -20,3 +20,8 @@ endif ()
 # Drawing subtitles over the video with the UI toolkit (keeps ui/ free of media types).
 add_library(wnk_media_ui STATIC src/subtitle_view.cpp)
 target_link_libraries(wnk_media_ui PUBLIC wnk_media wnk_ui)
+
+# LG StarfishMediaAPIs backend (webOS 5.3.1+). Builds everywhere: libplayerAPIs is dlopened and the
+# SDL-webOS exported-window functions are looked up at runtime.
+add_library(wnk_media_starfish STATIC src/starfish_backend.cpp)
+target_link_libraries(wnk_media_starfish PUBLIC wnk_media PRIVATE wnk_logging ${CMAKE_DL_LIBS})

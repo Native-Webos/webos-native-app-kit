@@ -453,6 +453,7 @@ void PlaybackController::clear_lanes() {
     lanes_[0].clear();
     lanes_[1].clear();
     lane_bytes_ = 0;
+    eos_sent_ = false;  // every caller restarts or stops feeding
 }
 
 namespace {
@@ -505,6 +506,10 @@ void PlaybackController::feed_one() {
     const bool lanes_empty = lanes_[0].empty() && lanes_[1].empty();
     if (source_done_ && lanes_empty) {
         // Everything is fed: wait for the backend to present it.
+        if (!eos_sent_ && loaded_) {
+            eos_sent_ = true;
+            backend_->end_of_stream();
+        }
         bool ended = eos_seen_;
         if (!ended) {
             std::lock_guard<std::mutex> lock(mutex_);

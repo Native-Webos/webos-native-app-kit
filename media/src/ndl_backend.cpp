@@ -112,17 +112,6 @@ void at_exit_release() {
 
 }  // namespace
 
-int64_t PtsSplice::map(int64_t pts_us) {
-    if (pts_us == kNoTime) return kNoTime;
-    if (pending_) {
-        pending_ = false;
-        shift_us_ = (max_out_us_ == kNoTime ? pts_us : max_out_us_ + gap_us_) - pts_us;
-    }
-    const int64_t out = pts_us + shift_us_;
-    max_out_us_ = max_out_us_ == kNoTime ? out : std::max(max_out_us_, out);
-    return out;
-}
-
 NdlBackend::NdlBackend(NdlOptions options) : options_(std::move(options)), splice_(kSpliceGapUs) {
     if (options_.app_id.empty()) {
         const char *id = std::getenv("APPID");

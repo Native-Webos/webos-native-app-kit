@@ -147,6 +147,7 @@ struct FfmpegSource::Impl {
     MediaInfo info;
     int video = -1, audio = -1;
     bool decode_audio = false;
+    std::vector<uint8_t> adts_config;  // AAC passthrough to a backend that wants ADTS: the AudioSpecificConfig
     int64_t start_us = 0;  // subtracted from every timestamp
     bool need_key = false;  // after a seek: drop video until a keyframe
     bool eof = false;
@@ -403,7 +404,14 @@ struct FfmpegSource::Impl {
                 Packet a;
                 a.type = TrackType::Audio;
                 a.key = true;
-                a.data.assign(p->data, p->data + p->size);
+                uint8_t adts[7];
+                const bool framed = p->size >= 2 && p->data[0] == 0xFF && (p->data[1] & 0xF0) == 0xF0;
+                if (!adts_config.empty() && !framed && adts_header(adts_config, static_cast<size_t>(p->size), adts)) {
+                    a.data.assign(adts, adts + 7);
+                    a.data.insert(a.data.end(), p->data, p->data + p->size);
+                } else {
+                    a.data.assign(p->data, p->data + p->size);
+                }
                 a.pts_us = to_us(p->pts != AV_NOPTS_VALUE ? p->pts : p->dts, tb);
                 a.duration_us = p->duration > 0 ? av_rescale_q(p->duration, tb, kMicros) : 0;
                 ready.push_back(std::move(a));
@@ -677,6 +685,10 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
         const AVCodecParameters *par = m.fmt->streams[audio_track]->codecpar;
         if (caps.accepts(t->codec)) {
             AudioFormat a{t->codec, t->sample_rate, t->channels, {}};
+            m.adts_config.clear();
+            if (t->codec == CodecId::Aac && caps.aac_adts && par->extradata_size >= 2) {
+                m.adts_config.assign(par->extradata, par->extradata + par->extradata_size);
+            }
             if (par->extradata_size > 0) a.codec_header.assign(par->extradata, par->extradata + par->extradata_size);
             out->audio = a;
             m.audio = audio_track;

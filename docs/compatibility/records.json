@@ -584,6 +584,24 @@
       "method": "Example D 0.4.2 (per-stream lanes, priming): Tears of Steel 720p H.264 + MP3 44.1 kHz (decoded to PCM) streamed over HTTPS from download.blender.org; Big Buck Bunny retimed to 25 fps over LAN",
       "evidence": "dialogue in lip sync, also after seeks; smooth at 25 fps; pause and seeks fine (owner)",
       "limitations": "24 fps content still judders on pans (media.ndl.frame_rate_24p)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.starfish.buffer_feed",
+      "result": "supported",
+      "method": "Example D 0.5.0 {\"backend\":\"starfish\"}: StarfishMediaAPIs from a dlopened libplayerAPIs.so.1 under Developer Mode, SDL-webOS exported window, BUFFERSTREAM Load; 24 fps Big Buck Bunny 720p H.264 + AAC (ADTS, passed through) over LAN HTTP",
+      "evidence": "exported window _Window_Id_11 placed rv=1; Load -> 1 in 330 ms with VDEC and ADEC allocated; pipeline reported frameRate 24; first frame ~0.6 s after Load; displayed-frame counter (type 49) 5,5,5,5,4 per 200 ms = 24 fps; owner: pans smooth (no judder), sound in sync, real Pause/Play, seeks and Back fine; position from FRAMEREADY; 6+ minutes",
+      "limitations": "H.264 + AAC only so far; HEVC, AC-3/E-AC-3, HTTPS, background/foreground and long sessions untested; objects are never freed (64 KiB per Load)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.seek_burst_settle",
+      "result": "supported",
+      "method": "Example D 0.5.1 on Starfish: quick repeated Right/Left presses with a 400 ms settle window before feeding a splice seek's target",
+      "evidence": "0.5.0 played a piece of every intermediate seek point (owner); 0.5.1 jumps straight to the final point (owner)",
+      "limitations": ""
     }
   ]
 }

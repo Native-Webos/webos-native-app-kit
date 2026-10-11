@@ -616,3 +616,34 @@ TEST("controller: a splicing backend's new content waits for the backlog; the sh
     CHECK_EQ(r.log->flushes.load(), 1);
     r.pc->stop();
 }
+
+TEST("adts: headers from AudioSpecificConfig for AAC-LC and HE-AAC; refusals") {
+    uint8_t h[7];
+    // AAC-LC 48 kHz stereo: object 2, index 3, channels 2 -> 0x11 0x90
+    REQUIRE(adts_header({0x11, 0x90}, 100, h));
+    CHECK_EQ(h[0], 0xFF);
+    CHECK_EQ(h[1], 0xF1);
+    CHECK_EQ(h[2], (1 << 6) | (3 << 2) | 0);       // profile LC, 48 kHz, channel bit 2 = 0
+    const int len = ((h[3] & 3) << 11) | (h[4] << 3) | (h[5] >> 5);
+    CHECK_EQ(len, 107);
+    CHECK_EQ(h[3] >> 6, 2);                          // channels 2
+    // HE-AAC v1 (object 5, 24 kHz core index 6, stereo, extension 48 kHz index 3, core object 2).
+    // Bits: 00101 0110 0010 0011 00010 -> 0x2B 0x11 0x88 (padded)
+    REQUIRE(adts_header({0x2B, 0x11, 0x88}, 10, h));
+    CHECK_EQ(h[2] >> 6, 1);                          // core profile LC
+    CHECK_EQ((h[2] >> 2) & 0xF, 6);                  // core rate index
+    CHECK(!adts_header({0x12}, 10, h));              // too short
+    CHECK(!adts_header({0x17, 0x80, 0x00, 0x00, 0x00}, 10, h));  // explicit frequency (index 15)
+}
+
+TEST("pts splice: unmap gives content time for timestamps from before and after a splice") {
+    PtsSplice s(200000);
+    CHECK_EQ(s.map(0), int64_t{0});
+    CHECK_EQ(s.map(1000000), int64_t{1000000});
+    s.splice();
+    CHECK_EQ(s.map(30000000), int64_t{1200000});
+    CHECK_EQ(s.unmap(500000), int64_t{500000});      // presented before the splice took effect
+    CHECK_EQ(s.unmap(1200000), int64_t{30000000});
+    CHECK_EQ(s.unmap(1300000), int64_t{30100000});
+    CHECK_EQ(s.unmap(kNoTime), kNoTime);
+}

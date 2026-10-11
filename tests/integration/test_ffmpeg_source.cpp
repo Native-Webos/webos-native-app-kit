@@ -297,6 +297,30 @@ TEST("ffmpeg source: unsupported video codec and missing files are refused with 
     CHECK(s.read(&p, &err) == MediaSource::Read::Packet);
 }
 
+TEST("ffmpeg source: AAC passed through to a backend that wants ADTS gets a header per frame") {
+    SKIP_WITHOUT_FFMPEG();
+    REQUIRE(make_clip("h264_aac.mp4", "libx264", "aac"));
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/h264_aac.mp4", &err));
+    BackendCaps caps;
+    caps.video_codecs = {CodecId::H264};
+    caps.audio_codecs = {CodecId::Aac};
+    caps.aac_adts = true;
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, s.info().best(TrackType::Audio)->index, caps, &f, &err));
+    REQUIRE(f.audio && f.audio->codec == CodecId::Aac);
+    const Drained d = drain(s);
+    REQUIRE(!d.audio.empty());
+    for (const Packet &p : d.audio) {
+        REQUIRE(p.data.size() > 7);
+        CHECK(p.data[0] == 0xFF && p.data[1] == 0xF1);
+        const size_t len = ((p.data[3] & 3u) << 11) | (static_cast<size_t>(p.data[4]) << 3) | (p.data[5] >> 5);
+        CHECK_EQ(len, p.data.size());
+    }
+    CHECK_EQ((d.audio[0].data[2] >> 2) & 0xF, 3);  // 48 kHz
+}
+
 // ---- subtitles ---------------------------------------------------------------------------------
 
 namespace {

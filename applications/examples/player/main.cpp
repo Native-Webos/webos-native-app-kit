@@ -18,6 +18,7 @@
 //   {"uri": "file:///path/to/file.mkv"}   play that file straight away; http(s):// URIs stream through
 //                                          the kit's HTTP client (byte ranges make them seekable)
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
+//   {"backend": "starfish"}                LG's Starfish pipeline instead of NDL (experiment)
 //   {"ndlReload": 1}                       pause and seek by reloading NDL (black picture; comparison)
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"autoplay": 0}                        open that bundled clip at start (scripted runs: 0..3)
@@ -27,6 +28,7 @@
 #include "wnk/media/ffmpeg_source.hpp"
 #include "wnk/media/ndl_backend.hpp"
 #include "wnk/media/pacing_backend.hpp"
+#include "wnk/media/starfish_backend.hpp"
 #include "wnk/media/subtitle_view.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/ui/navigation.hpp"
@@ -57,6 +59,7 @@ struct Settings {
     std::string clips_dir;
     PtsUnit pts_unit = PtsUnit::Microseconds;
     bool ndl_reload = false;
+    bool starfish = false;
     int lead_ms = 1000;
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
 };
@@ -71,6 +74,10 @@ std::string clock_text(int64_t us) {
 
 std::unique_ptr<MediaBackend> make_backend(const Settings &s) {
     std::string why;
+    if (wnk::platform::kIsWebOS && s.starfish) {
+        if (StarfishBackend::available(&why)) return std::make_unique<StarfishBackend>();
+        WNK_LOGW(kCat, "Starfish unavailable (%s): using NDL", why.c_str());
+    }
     if (wnk::platform::kIsWebOS && NdlBackend::available(&why)) {
         NdlOptions o;
         o.pts_unit = s.pts_unit;
@@ -121,6 +128,7 @@ class PlayerScreen : public Screen {
             WNK_LOGI(kCat, "player state %s -> %s%s%s", play_state_name(from), play_state_name(to),
                      snap.error.empty() ? "" : ": ", snap.error.c_str());
             if (to == PlayState::Ready) {
+                controller_->set_video_area({0, 0, 1920, 1080});  // again, now the stream size is known
                 describe(snap);
                 tracks_ = snap.info.tracks;
                 for (const TrackInfo &t : tracks_) {
@@ -348,6 +356,7 @@ class Player : public wnk::app::Delegate {
         if (params.is_object()) {
             if (params.contains("ptsUnit") && params["ptsUnit"] == "ms") s.pts_unit = PtsUnit::Milliseconds;
             if (params.contains("ndlReload") && params["ndlReload"] == 1) s.ndl_reload = true;
+            if (params.contains("backend") && params["backend"] == "starfish") s.starfish = true;
             if (params.contains("leadMs") && params["leadMs"].is_number_integer()) {
                 s.lead_ms = std::clamp(params["leadMs"].get<int>(), 100, 5000);
             }

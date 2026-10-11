@@ -115,6 +115,11 @@ struct Packet {
     std::shared_ptr<const SubtitleCue> subtitle;  // type == Subtitle: the decoded cue (data unused)
 };
 
+// A 7-byte ADTS header (no CRC) for one AAC frame of `payload_size` bytes, from the stream's
+// AudioSpecificConfig (MP4/MKV extradata). HE-AAC configs give the core profile and rate, as ADTS
+// signals SBR implicitly. False if the config cannot be expressed in ADTS.
+bool adts_header(const std::vector<uint8_t> &audio_specific_config, size_t payload_size, uint8_t out[7]);
+
 // Audio codecs a backend can take directly; the source decodes everything else to PcmS16.
 struct BackendCaps {
     std::vector<CodecId> video_codecs;
@@ -128,6 +133,7 @@ struct BackendCaps {
     bool seek_splices = false;
     int64_t splice_gap_us = 0;
     bool position = false;  // reports the presented position
+    bool aac_adts = false;  // AAC passed through must carry ADTS headers (Starfish)
     bool accepts(CodecId c) const;
 };
 
@@ -185,6 +191,8 @@ class MediaBackend {
     virtual int64_t position_us() const { return kNoTime; }
     // Hold/continue presentation, if caps().pause.
     virtual bool pause(bool) { return false; }
+    // Everything has been fed (until the next flush or load): let the decoder drain.
+    virtual void end_of_stream() {}
 };
 
 }  // namespace wnk::media

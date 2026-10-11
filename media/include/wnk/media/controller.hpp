@@ -180,6 +180,7 @@ class PlaybackController {
     std::deque<Packet> lanes_[2];  // [0] video, [1] audio
     size_t lane_bytes_ = 0;
     bool priming_ = false;
+    bool eos_sent_ = false;  // backend told everything is fed
     SubtitleStore subtitles_;
     std::atomic<int> subtitle_track_{-1};
     std::atomic<bool> eos_seen_{false};

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream image ui lifecycle crash capabilities media subtitles secret websocket)
+foreach (t log platform input focus font storage async http http_stream image ui lifecycle crash capabilities media subtitles subtitle_view secret websocket)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -20,6 +20,7 @@ target_link_libraries(test_crash PRIVATE wnk_diagnostics)
 target_link_libraries(test_capabilities PRIVATE wnk_diagnostics)
 target_link_libraries(test_media PRIVATE wnk_media wnk_media_ndl)
 target_link_libraries(test_subtitles PRIVATE wnk_media)
+target_link_libraries(test_subtitle_view PRIVATE wnk_media_ui)
 target_link_libraries(test_secret PRIVATE wnk_storage)
 target_link_libraries(test_websocket PRIVATE wnk_net)
 target_include_directories(test_secret SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
@@ -187,6 +188,9 @@ if (TARGET wnk-player)
             "Playing -> Paused.*Resuming -> Running")
     set_tests_properties(e2e.player.background_keeps_viewer_pause PROPERTIES
             FAIL_REGULAR_EXPRESSION "back in the foreground: resuming|Paused -> Playing|${WNK_SANITIZER_FAIL}")
+    # Subtitles: the default English track shows; Down switches to French, then off.
+    wnk_player_e2e(subtitles_default_and_switch "{\"autoplay\":3}" "Up,Up,Up,Up,Up,Down,Up,Up,Up,Up,Up,Up,Down,Up"
+            "subtitles: track 2, Subtitles: English \\(subrip\\).*subtitle shown: Second [0-9].*subtitles: track 3, Subtitles: Fran.*subtitle shown: Sous-titre fran.+ais num.+ro [0-9] / deuxi.+me ligne.*subtitles: track -1, Subtitles off")
     wnk_player_e2e(back_stops_playback "{\"autoplay\":0}" "Up,Up,Escape" "stopping at .*-> Stopped")
     wnk_player_e2e(plays_to_the_end "{\"autoplay\":1}"
             "Right,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up"

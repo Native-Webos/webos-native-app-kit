@@ -530,6 +530,15 @@
       "method": "Example D 0.3.1: Home while playing and while paused; NDL unloaded on Suspended, playback resumed on Resuming -> Running only if it was playing",
       "evidence": "NDL_DirectMediaUnload in 56-59 ms on Home; playing again 142 ms after the app returned (reload 122 ms), sound fine (owner); a viewer pause stayed paused and OK reloaded NDL in 83 ms",
       "limitations": "a paused session shows no picture after returning (the decoder was released)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.subtitles.text",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example D 0.4.0, bundled MKV with two SubRip tracks (English default, French two-line cues), drawn by SubtitleView over the NDL video plane",
+      "evidence": "cues shown every 1.00 s in time with the flash and beep, switching English/French/off, seeks with subtitles on; readable size and outline (owner); frame interval 20 ms",
+      "limitations": "text tracks only; bitmap subtitles (PGS/DVD/DVB), external files, ASS styling and non-Latin fonts untested on the TV"
     }
   ]
 }

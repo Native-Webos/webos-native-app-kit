@@ -16,3 +16,7 @@ target_link_libraries(wnk_media_ndl PUBLIC wnk_media PRIVATE wnk_diagnostics ${C
 if (WNK_WEBOS)
     target_sources(wnk_media_ndl PRIVATE src/ndl_abi_check.c)  # layout asserts against the NDK header
 endif ()
+
+# Drawing subtitles over the video with the UI toolkit (keeps ui/ free of media types).
+add_library(wnk_media_ui STATIC src/subtitle_view.cpp)
+target_link_libraries(wnk_media_ui PUBLIC wnk_media wnk_ui)

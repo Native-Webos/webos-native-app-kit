@@ -8,7 +8,8 @@
 // The bundled clips (tools/make-test-clips.sh) flash white and beep during the first 80 ms of every
 // second, so on the TV picture/sound sync and the NDL PTS unit can be judged by eye and ear.
 //
-// Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Stop or Back leaves. Any key
+// Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Down cycles the subtitle tracks
+// (a track the file marks as default starts on), Stop or Back leaves. Any key
 // shows the controls; they hide after 4 s of playback. Pause and seek keep the decoder loaded, so the
 // picture holds; backgrounding the app pauses playback and releases the decoder, and playback resumes
 // on return if it was playing.
@@ -19,13 +20,14 @@
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"ndlReload": 1}                       pause and seek by reloading NDL (black picture; comparison)
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
-//   {"autoplay": 0}                        open the first clip at start (used by scripted runs: 0..2)
+//   {"autoplay": 0}                        open that bundled clip at start (scripted runs: 0..3)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
 #include "wnk/media/controller.hpp"
 #include "wnk/media/ffmpeg_source.hpp"
 #include "wnk/media/ndl_backend.hpp"
 #include "wnk/media/pacing_backend.hpp"
+#include "wnk/media/subtitle_view.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/ui/navigation.hpp"
 #include "wnk/ui/widgets.hpp"
@@ -86,6 +88,10 @@ class PlayerScreen : public Screen {
     PlayerScreen(wnk::app::Context &ctx, const Settings &s, std::string uri, std::string title)
         : Screen(title), ctx_(ctx), uri_(std::move(uri)) {
         name = "player";
+        // Under the controls: subtitles over the whole picture.
+        subs_view_ = &add<SubtitleView>();
+        subs_view_->set_width(Dim::fill()).set_height(Dim::fill());
+        subs_view_->set_provider([this] { return controller_ ? controller_->subtitles_now() : SubtitleView::Cues{}; });
         bar_ = &add<Column>(14);
         bar_->set_align(Align::Stretch, Align::End);
         bar_->set_padding({80, 40, 80, 60});
@@ -99,7 +105,8 @@ class PlayerScreen : public Screen {
         auto &bottom = bar_->add<Row>(24);
         time_ = &bottom.add<Label>("--:-- / --:--");
         time_->set_width(Dim::fill());
-        bottom.add<Label>("OK pause  ·  Left/Right 10 s  ·  Back leaves", TextRole::Small).set_muted(true);
+        subs_label_ = &bottom.add<Label>("", TextRole::Small);
+        bottom.add<Label>("OK pause  ·  Left/Right 10 s  ·  Down subtitles  ·  Back leaves", TextRole::Small).set_muted(true);
         detail_ = &bar_->add<Label>("", TextRole::Small);
         detail_->set_muted(true);
         spinner_ = &add<Spinner>(96);
@@ -113,7 +120,17 @@ class PlayerScreen : public Screen {
         controller_->set_state_callback([this](PlayState from, PlayState to, const PlaybackSnapshot &snap) {
             WNK_LOGI(kCat, "player state %s -> %s%s%s", play_state_name(from), play_state_name(to),
                      snap.error.empty() ? "" : ": ", snap.error.c_str());
-            if (to == PlayState::Ready) describe(snap);
+            if (to == PlayState::Ready) {
+                describe(snap);
+                tracks_ = snap.info.tracks;
+                for (const TrackInfo &t : tracks_) {
+                    if (t.type == TrackType::Subtitle && t.subtitle != SubtitleKind::None && t.is_default) {
+                        select_subtitles(t.index);
+                        break;
+                    }
+                }
+                if (controller_->subtitle_track() < 0) select_subtitles(-1);
+            }
             show_controls();
         });
     }
@@ -180,8 +197,10 @@ class PlayerScreen : public Screen {
                 back.action = Action::Back;
                 return ui.handle(back);
             }
-            case Action::Up:
-            case Action::Down: return true;  // nothing to move to; keep focus here
+            case Action::Down:
+                if (e.phase == Phase::Press) next_subtitles();
+                return true;
+            case Action::Up: return true;  // nothing to move to; keep focus here
             default: return false;
         }
     }
@@ -199,6 +218,13 @@ class PlayerScreen : public Screen {
         const bool keep = s.state != PlayState::Playing;
         const bool visible = keep || ui.now_ms() - last_input_ms_ < 4000;
         bar_->set_opacity(visible ? 1.0f : 0.0f);
+        subs_view_->set_bottom_margin(visible ? 0.30f : 0.07f);  // clear of the controls while they show
+        std::string shown;
+        for (const auto &l : subs_view_->lines()) shown += (shown.empty() ? "" : " / ") + l;
+        if (shown != shown_) {
+            shown_ = shown;
+            if (!shown.empty()) WNK_LOGI(kCat, "subtitle shown: %s", shown.c_str());
+        }
         // Once a second: what the controller has fed, for the PTS-unit experiment.
         if (ui.now_ms() - last_log_ms_ >= 1000 && s.state == PlayState::Playing) {
             last_log_ms_ = ui.now_ms();
@@ -212,6 +238,27 @@ class PlayerScreen : public Screen {
 
  private:
     void show_controls() { last_input_ms_ = ctx_.ui().now_ms(); }
+
+    // Off → each subtitle track this build can draw → off.
+    void next_subtitles() {
+        std::vector<int> order{-1};
+        for (const TrackInfo &t : tracks_) {
+            if (t.type == TrackType::Subtitle && t.subtitle != SubtitleKind::None) order.push_back(t.index);
+        }
+        const auto cur = std::find(order.begin(), order.end(), controller_->subtitle_track());
+        select_subtitles(cur == order.end() || cur + 1 == order.end() ? order.front() : *(cur + 1));
+    }
+    void select_subtitles(int track) {
+        controller_->set_subtitle_track(track);
+        std::string label = "Subtitles off";
+        for (const TrackInfo &t : tracks_) {
+            if (t.index != track) continue;
+            label = "Subtitles: " + (!t.title.empty() ? t.title : !t.language.empty() ? t.language : "track " + std::to_string(track));
+            label += " (" + t.codec_label + ")";
+        }
+        subs_label_->set_text(label);
+        WNK_LOGI(kCat, "subtitles: track %d, %s", track, label.c_str());
+    }
     void describe(const PlaybackSnapshot &s) {
         std::string d = s.info.container;
         if (s.format.video) {
@@ -231,6 +278,10 @@ class PlayerScreen : public Screen {
 
     wnk::app::Context &ctx_;
     std::string uri_;
+    SubtitleView *subs_view_ = nullptr;
+    Label *subs_label_ = nullptr;
+    std::vector<TrackInfo> tracks_;
+    std::string shown_;
     bool resume_on_return_ = false;  // playing when the app went to the background
     std::string backend_name_;
     std::unique_ptr<PlaybackController> controller_;
@@ -309,6 +360,7 @@ class Player : public wnk::app::Delegate {
             {"H.264 + AAC", "MP4 · 1080p25 · AAC decoded to PCM", "h264-aac.mp4"},
             {"HEVC + AC-3 5.1", "MKV · 1080p25 · AC-3 downmixed to PCM stereo", "hevc-ac3-5.1.mkv"},
             {"H.264 + MP3", "MPEG-TS · 1080p25 · MP3 decoded to PCM", "h264-mp3.ts"},
+            {"Subtitles", "MKV · H.264 + AAC · SubRip English (default) and French · Down switches", "h264-aac-subs.mkv"},
         };
         Ui &ui = ctx.ui();
         nav_ = &ui.root().add<Navigator>();

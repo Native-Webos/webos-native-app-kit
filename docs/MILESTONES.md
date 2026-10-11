@@ -287,7 +287,13 @@ or after it) and video was dropped until the next keyframe. `FfmpegSource::seek`
 target and replays from the last keyframe before it, starting 1–16 s further back (or at the first byte)
 when there is none.
 
-Open: subtitles, HDR metadata, VP9/AV1 on the TV,
+Subtitles (2026-10-11): every subtitle track FFmpeg can decode (SubRip, ASS/SSA, WebVTT, MP4 timed text,
+PGS, DVD, DVB) becomes cues in a `SubtitleStore` that survives seeks; `SubtitleView` (wnk_media_ui) draws
+text with an outline at the bottom of the video and maps bitmaps from their canvas. Example D 0.4.0 shows
+the default track and cycles tracks with Down. On the TV: SubRip in MKV in time, switching and seeking.
+
+Open: subtitles from external files, ASS styling (libass), non-Latin fonts, bitmap subtitles on the TV,
+HDR metadata, VP9/AV1 on the TV,
 Opus passthrough, resampling for sample rates NDL lacks, pause and seek latency (the queued lead, up to 1 s), video-only files (reported to need an audio prime),
 a decoder-side position, real pause via Starfish, and a PTS-unit test that does not feed in real time.
 

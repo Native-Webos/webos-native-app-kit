@@ -8,7 +8,9 @@
 
 #include "wnk/media/adaptive_source.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -70,6 +72,52 @@ bool make_presentations() {
             "-f dash -seg_duration 2 -adaptation_sets 'id=0,streams=v id=1,streams=a' "
             "-init_seg_name 'l-init-$RepresentationID$.m4s' -media_seg_name 'l-$RepresentationID$-$Number%05d$.m4s' l.mpd";
         if (std::system(ladder.c_str()) != 0) return false;
+        // Subtitles: ten cues "Cue N" at N.2-N.8 s, as HLS WebVTT segments (no X-TIMESTAMP-MAP from
+        // ffmpeg) and as a DASH text/vtt file added to a copy of d.mpd.
+        std::string srt, vtt = "WEBVTT\n\n";
+        for (int i = 0; i < 10; ++i) {
+            char line[128];
+            std::snprintf(line, sizeof line, "%d\n00:00:%02d,200 --> 00:00:%02d,800\nCue %d\n\n", i + 1, i, i, i);
+            srt += line;
+            std::snprintf(line, sizeof line, "00:00:%02d.200 --> 00:00:%02d.800\n<i>Cue</i> %d\n\n", i, i, i);
+            vtt += line;
+        }
+        if (FILE *f = std::fopen((d + "/cues.srt").c_str(), "w")) {
+            std::fputs(srt.c_str(), f);
+            std::fclose(f);
+        }
+        if (FILE *f = std::fopen((d + "/de.vtt").c_str(), "w")) {
+            std::fputs(vtt.c_str(), f);
+            std::fclose(f);
+        }
+        const std::string subs =
+            "cd '" + d + "' && ffmpeg -hide_banner -loglevel error -y "
+            "-f lavfi -i testsrc2=size=320x240:rate=25:duration=10 "
+            "-f lavfi -i sine=frequency=440:sample_rate=48000:duration=10 -i cues.srt -map 0:v -map 1:a -map 2:s "
+            "-c:v libx264 -g 25 -keyint_min 25 -sc_threshold 0 -c:a aac -c:s webvtt -f hls -hls_time 2 "
+            "-hls_playlist_type vod -hls_segment_filename 's_%v_%03d.ts' -master_pl_name s.m3u8 "
+            "-var_stream_map 'v:0,a:0,s:0,sgroup:subs,language:en' 's_%v.m3u8'";
+        if (std::system(subs.c_str()) != 0) return false;
+        // d.mpd with a German text/vtt AdaptationSet and a TTML one this build cannot read.
+        FILE *src = std::fopen((d + "/d.mpd").c_str(), "r");
+        if (src == nullptr) return false;
+        std::string mpd;
+        char buf[4096];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof buf, src)) > 0) mpd.append(buf, n);
+        std::fclose(src);
+        const size_t end = mpd.rfind("</Period>");
+        if (end == std::string::npos) return false;
+        mpd.insert(end, "<AdaptationSet id=\"9\" contentType=\"text\" mimeType=\"text/vtt\" lang=\"de\">"
+                        "<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>"
+                        "<Representation id=\"de\" bandwidth=\"100\"><BaseURL>de.vtt</BaseURL></Representation>"
+                        "</AdaptationSet><AdaptationSet id=\"10\" contentType=\"text\" mimeType=\"application/mp4\" "
+                        "codecs=\"stpp\" lang=\"fr\"><Representation id=\"fr\" bandwidth=\"100\">"
+                        "<BaseURL>fr.mp4</BaseURL></Representation></AdaptationSet>");
+        if (FILE *out = std::fopen((d + "/ds.mpd").c_str(), "w")) {
+            std::fputs(mpd.c_str(), out);
+            std::fclose(out);
+        }
         return true;
     }();
     return ok;
@@ -286,6 +334,70 @@ TEST("adaptive source: missing and malformed manifests, live, interrupt") {
     REQUIRE(!d.video.empty());
     CHECK(d.video[0].key);
     CHECK_EQ(d.video[0].pts_us, int64_t{4000000});
+}
+
+namespace {
+
+// Reads until `want` cues of `track` have arrived (or the stream ends), keeping them.
+std::vector<std::shared_ptr<const SubtitleCue>> read_cues(AdaptiveSource &s, int track, size_t want) {
+    std::vector<std::shared_ptr<const SubtitleCue>> cues;
+    Packet p;
+    std::string err;
+    while (cues.size() < want && s.read(&p, &err) == MediaSource::Read::Packet) {
+        if (p.type == TrackType::Subtitle && p.subtitle && p.subtitle->track == track) cues.push_back(p.subtitle);
+    }
+    std::sort(cues.begin(), cues.end(), [](const auto &a, const auto &b) { return a->start_us < b->start_us; });
+    return cues;
+}
+
+}  // namespace
+
+TEST("adaptive source: HLS WebVTT subtitles arrive as cues on the presentation timeline") {
+    SKIP_UNLESS_READY();
+    AdaptiveSource s(options());
+    std::string err;
+    REQUIRE(s.open(url("s.m3u8"), &err));
+    const MediaInfo &info = s.info();
+    REQUIRE(info.tracks.size() == 3);  // video, muxed audio, subtitles
+    const TrackInfo &t = info.tracks[2];
+    CHECK(t.type == TrackType::Subtitle);
+    CHECK(t.subtitle == SubtitleKind::Text);
+    CHECK_EQ(t.language, std::string("en"));
+    CHECK(t.is_default);
+    StreamFormat f;
+    REQUIRE(s.select(0, 1, starfish_like(), &f, &err));
+    const auto cues = read_cues(s, 2, 10);
+    REQUIRE(cues.size() == 10);
+    for (int i = 0; i < 10; ++i) {
+        CHECK_EQ(cues[static_cast<size_t>(i)]->text, "Cue " + std::to_string(i));
+        // ffmpeg writes MPEG-TS from 1.4 s and cue times on the same clock without a timestamp
+        // map; within a frame or two of N.2 s is what a viewer needs.
+        CHECK(std::llabs(cues[static_cast<size_t>(i)]->start_us - (i * 1000000 + 200000)) < 150000);
+    }
+}
+
+TEST("adaptive source: DASH text/vtt subtitles; TTML listed but not readable; a seek does not stop loading") {
+    SKIP_UNLESS_READY();
+    AdaptiveSource s(options());
+    std::string err;
+    REQUIRE(s.open(url("ds.mpd"), &err));
+    const MediaInfo &info = s.info();
+    REQUIRE(info.tracks.size() == 4);
+    CHECK_EQ(info.tracks[2].language, std::string("de"));
+    CHECK(info.tracks[2].subtitle == SubtitleKind::Text);
+    CHECK(info.tracks[2].is_default);  // Role main
+    CHECK_EQ(info.tracks[3].language, std::string("fr"));
+    CHECK(info.tracks[3].subtitle == SubtitleKind::None);
+    StreamFormat f;
+    REQUIRE(s.select(0, 1, starfish_like(), &f, &err));
+    s.interrupt();  // a seek's interrupt must not reach the subtitle loader
+    REQUIRE(s.seek(4000000, &err));
+    s.reset_interrupt();
+    const auto cues = read_cues(s, 2, 10);
+    REQUIRE(cues.size() == 10);
+    CHECK_EQ(cues[3]->text, std::string("Cue 3"));  // tags removed
+    CHECK_EQ(cues[3]->start_us, int64_t{3200000});
+    CHECK_EQ(cues[3]->end_us, int64_t{3800000});
 }
 
 TEST("throughput estimate: needs 128 KiB, ignores small transfers, falls fast and rises slowly") {

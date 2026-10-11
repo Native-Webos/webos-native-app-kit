@@ -674,6 +674,15 @@
       "method": "Example D 0.10.1 vs 0.10.2 on Mux HLS-TS: held Right (about 150 coalesced seeks), single presses and Left; Starfish callbacks 48 (dropped frames per 200 ms poll on webOS 5+, PlxNative's decompile) logged in full",
       "evidence": "0.10.1: after a held-key burst the sink reported 6-19 dropped frames per poll for as long as playback ran, with audio dropping out every few seconds (owner): new content was spliced behind the decoder's clock. 0.10.2 places it after the clock estimated from FRAMEREADY: the burst left at most a few drops, audio continuous (owner)",
       "limitations": "two single seeks about 2 s apart still produced roughly 8 s of dropped-frame reports before recovering on their own; not yet explained"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "media.adaptive_subtitles",
+      "result": "supported",
+      "method": "Example D 0.11.0 AdaptiveSource subtitle loader: Apple bipbop HEVC HLS (WebVTT segments with X-TIMESTAMP-MAP MPEGTS:900000), Shaka angel-one DASH (wvtt in MP4 behind a sidx, four languages)",
+      "evidence": "Apple: English track chosen as default, 600 cues from 75 files; cues in time with the picture's bip/bop and Down toggles them (owner); Shaka: dialogue subtitles shown and Down cycles languages (owner)",
+      "limitations": "files are fetched one at a time in playback order (Apple: ~55 s for 600 s of cues), so a far seek soon after opening may show none for a while; TTML not readable; Greek and other non-Latin scripts depend on the bundled fonts"
     }
   ]
 }

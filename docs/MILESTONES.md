@@ -311,7 +311,8 @@ tracks, runs one FfmpegSource per rendition and merges them by decode time; seek
 Example D 0.8 lists four public streams. On the TV: Dolby 4K HEVC + E-AC-3, Apple HLS fMP4, Mux HLS-TS
 and Shaka DASH play and seek in sync. Example D 0.9 declares single-layer Dolby Vision (DolbyHdrInfo) and
 Atmos (immersive) to Starfish when the TV reports support: the TV shows both. Example D 0.10 switches
-video bitrate with the measured throughput (TV: Mux 720p to 1080p seamlessly). Open: audio bitrate switching,
+video bitrate with the measured throughput (TV: Mux 720p to 1080p seamlessly); 0.11 shows the manifests'
+subtitles (HLS WebVTT, DASH text/vtt and wvtt). Open: audio bitrate switching, TTML subtitles,
 live, subtitles from manifests, WebM renditions, DRM (refused).
 
 Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from

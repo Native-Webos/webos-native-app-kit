@@ -3,6 +3,7 @@
 #include "wnk_test.hpp"
 
 #include "wnk/media/subtitles.hpp"
+#include "wnk/media/webvtt.hpp"
 
 using namespace wnk::media;
 
@@ -113,4 +114,112 @@ TEST("subtitle store: bitmaps over the byte budget are evicted farthest from the
     CHECK(s.bitmap_bytes() <= l.max_bitmap_bytes);
     CHECK(s.active(3, 1500000).empty());     // the cue at 1 s went
     CHECK_EQ(s.active(3, 9500000).size(), 1u);
+}
+
+TEST("webvtt: cues with and without identifiers, settings, tags and entities; NOTE and STYLE skipped") {
+    const std::string vtt = "\xEF\xBB\xBFWEBVTT - a title\r\n\r\nSTYLE\r\n::cue { color: lime }\r\n\r\nNOTE a comment\r\nthat spans\r\n\r\n"
+                            "1\r\n00:00:01.000 --> 00:00:02.500 align:start line:0\r\n<v Roger>Hello &amp; <i>welcome</i></v>\r\n"
+                            "second &lt;line&gt;\r\n\r\n"
+                            "01:02.250 --> 01:03.000\r\nno identifier, short timestamps\r\n\r\n"
+                            "bad\r\n00:00:05.000 --> 00:00:04.000\r\nend before start: skipped\r\n\r\n"
+                            "10:00:00.000 --> 10:00:01.000\r\n<c.yellow>long</c> &nbsp;hours\r\n";
+    WebVttFile f;
+    std::string err;
+    REQUIRE(parse_webvtt(vtt, &f, &err));
+    CHECK(!f.has_timestamp_map);
+    REQUIRE(f.cues.size() == 3);
+    CHECK_EQ(f.cues[0].start_us, int64_t{1000000});
+    CHECK_EQ(f.cues[0].end_us, int64_t{2500000});
+    CHECK_EQ(f.cues[0].text, std::string("Hello & welcome\nsecond <line>"));
+    CHECK_EQ(f.cues[1].start_us, int64_t{62250000});
+    CHECK_EQ(f.cues[2].start_us, int64_t{36000000000});
+    CHECK_EQ(f.cues[2].text, std::string("long  hours"));
+}
+
+TEST("webvtt: HLS X-TIMESTAMP-MAP is reported; non-WebVTT is refused") {
+    WebVttFile f;
+    std::string err;
+    REQUIRE(parse_webvtt("WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000\n\n9\n00:00:08.000 --> 00:00:08.992\nBip!\n", &f, &err));
+    CHECK(f.has_timestamp_map);
+    CHECK_EQ(f.map_mpegts, int64_t{900000});
+    CHECK_EQ(f.map_local_us, int64_t{0});
+    REQUIRE(f.cues.size() == 1);
+    CHECK_EQ(f.cues[0].start_us, int64_t{8000000});
+    REQUIRE(parse_webvtt("WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:01.000,MPEGTS:180000\n", &f, &err));
+    CHECK_EQ(f.map_local_us, int64_t{1000000});
+    CHECK_EQ(f.map_mpegts, int64_t{180000});
+    CHECK(f.cues.empty());
+    CHECK(!parse_webvtt("1\n00:00:01,000 --> 00:00:02,000\nSubRip\n", &f, &err));
+    CHECK(!parse_webvtt("WEBVTTX\n", &f, &err));
+    int64_t us = 0;
+    CHECK(!parse_vtt_timestamp("00:61.000", &us));
+    CHECK(!parse_vtt_timestamp("00:01.5", &us));
+}
+
+namespace {
+
+void be32(std::vector<uint8_t> *b, uint32_t v) {
+    for (int s = 24; s >= 0; s -= 8) b->push_back(static_cast<uint8_t>(v >> s));
+}
+
+std::vector<uint8_t> box(const char *type, const std::vector<uint8_t> &body) {
+    std::vector<uint8_t> b;
+    be32(&b, static_cast<uint32_t>(body.size() + 8));
+    b.insert(b.end(), type, type + 4);
+    b.insert(b.end(), body.begin(), body.end());
+    return b;
+}
+
+std::vector<uint8_t> cat(std::initializer_list<std::vector<uint8_t>> parts) {
+    std::vector<uint8_t> out;
+    for (const auto &p : parts) out.insert(out.end(), p.begin(), p.end());
+    return out;
+}
+
+std::vector<uint8_t> text(const std::string &s) { return {s.begin(), s.end()}; }
+
+}  // namespace
+
+TEST("wvtt: timescale from mdhd; cues and gaps from a fragment, timed by tfdt and trun") {
+    std::vector<uint8_t> mdhd(4, 0);  // version 0, flags
+    be32(&mdhd, 0), be32(&mdhd, 0), be32(&mdhd, 1000), be32(&mdhd, 0), be32(&mdhd, 0x55c40000);  // language, pre_defined
+    const auto init = box("moov", box("trak", box("mdia", box("mdhd", mdhd))));
+    uint32_t ts = 0;
+    std::string err;
+    REQUIRE(parse_wvtt_init(init.data(), init.size(), &ts, &err));
+    CHECK_EQ(ts, 1000u);
+
+    // Three samples: a cue (2 s), a gap (1 s), two simultaneous cues (0.5 s); from t = 10 s.
+    const auto s1 = box("vttc", cat({box("sttg", text("line:0")), box("payl", text("<i>Hello</i> &amp; bye\nline two"))}));
+    const auto s2 = box("vtte", {});
+    const auto s3 = cat({box("vttc", box("payl", text("left"))), box("vttc", box("payl", text("right")))});
+    std::vector<uint8_t> tfhd = {0, 0, 0, 0};  // no optional fields
+    be32(&tfhd, 1);
+    std::vector<uint8_t> tfdt = {0, 0, 0, 0};
+    be32(&tfdt, 10000);
+    std::vector<uint8_t> trun = {0, 0, 0x03, 0x01};  // data offset, per-sample duration and size
+    be32(&trun, 3);
+    const size_t offset_at = trun.size();
+    be32(&trun, 0);  // patched below
+    for (auto [dur, size] : {std::pair<uint32_t, size_t>{2000, s1.size()}, {1000, s2.size()}, {500, s3.size()}}) {
+        be32(&trun, dur);
+        be32(&trun, static_cast<uint32_t>(size));
+    }
+    auto moof = box("moof", box("traf", cat({box("tfhd", tfhd), box("tfdt", tfdt), box("trun", trun)})));
+    const uint32_t data_offset = static_cast<uint32_t>(moof.size() + 8);  // past moof and the mdat header
+    const size_t at = 8 + 8 + 8 + tfhd.size() + 8 + tfdt.size() + 8 + offset_at;  // moof, traf, tfhd, tfdt, trun headers
+    for (int i = 0; i < 4; ++i) moof[at + static_cast<size_t>(i)] = static_cast<uint8_t>(data_offset >> (24 - 8 * i));
+    const auto frag = cat({moof, box("mdat", cat({s1, s2, s3}))});
+    std::vector<SubtitleCue> cues;
+    REQUIRE(parse_wvtt_fragment(frag.data(), frag.size(), ts, &cues, &err));
+    REQUIRE(cues.size() == 3);
+    CHECK_EQ(cues[0].start_us, int64_t{10000000});
+    CHECK_EQ(cues[0].end_us, int64_t{12000000});
+    CHECK_EQ(cues[0].text, std::string("Hello & bye\nline two"));
+    CHECK_EQ(cues[1].start_us, int64_t{13000000});  // after the 1 s gap
+    CHECK_EQ(cues[1].text, std::string("left"));
+    CHECK_EQ(cues[2].text, std::string("right"));
+    CHECK_EQ(cues[2].end_us, int64_t{13500000});
+    CHECK(!parse_wvtt_fragment(frag.data(), frag.size() - 10, ts, &cues, &err));  // truncated mdat
+    CHECK(!parse_wvtt_init(frag.data(), frag.size(), &ts, &err));
 }

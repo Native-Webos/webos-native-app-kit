@@ -22,10 +22,16 @@
 //             video's), so the first video packet is the segment's keyframe; nothing before the
 //             target is downloaded.
 //
+//   subtitles text tracks of the manifest are offered as Subtitle tracks after the audio ones: HLS
+//             WebVTT playlists (cue times placed through X-TIMESTAMP-MAP), DASH text/vtt files and
+//             WebVTT in MP4 (wvtt, parsed by the kit: FFmpeg does not read it). After select() a background thread fetches every one of them
+//             (the default first) and read() hands their cues out ahead of the media; the player's
+//             subtitle store keeps them across seeks. TTML (stpp) is listed but not readable here.
+//
 // Timestamps are presentation time: DASH segments map through presentationTimeOffset and the Period
 // start; HLS renditions share the timeline of the first segment of the video rendition.
 //
-// Not yet: live presentations, audio bitrate switching, subtitles from the manifest,
+// Not yet: live presentations, audio bitrate switching, TTML subtitles,
 // encrypted renditions (refused), WebM renditions (left out), more than the first DASH Period.
 #pragma once
 

@@ -278,6 +278,78 @@
       "method": "ares-launch --params with a custom key",
       "evidence": "argv[1] = {\"@system_native_app\":true,\"imageBase\":\"...\",\"nid\":\"org.wnk.examples.hello\"}",
       "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "ui.toolkit.frame_rate",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B (tvui 0.2.1/0.2.2) perf log, 300-frame windows over ~90 s of use and 45 s idle",
+      "evidence": "frame interval avg 16.66-16.84 ms with 186-209 views, 3-50 draw calls, 200-840 quads, 12-14 image textures; swap avg 1.1-1.4 ms (the vsync wait happens in the first GL call of the next frame, not in SDL_GL_SwapWindow)",
+      "limitations": "4-14 intervals per 300 exceed 20 ms even when idle; the average implies only ~1-2 truly dropped frames per 300, the rest is jitter made up by the next frame. Occasional 25-52 ms stalls inside SDL_PollEvent, cause unknown. Replacing a full-screen quad with a clear made no measurable difference."
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "ui.navigation.focus_restore",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B: OK on a browse grid card, Back",
+      "evidence": "open details for item 4 → back to home focus=grid.item4; dialog Back → focus=widgets.dialog",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.keys.repeat",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B key log, Magic Remote D-pad held",
+      "evidence": "Right/Left/Down/Up auto-repeat arrive with SDL repeat=1 (35 Right repeats in one hold); OK = scancode 40",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.pointer.motion",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B pointer log, Magic Remote",
+      "evidence": "SDL_MOUSEMOTION in window units = drawable pixels (window 1920x1080, logical == drawable); hover focuses the view under the pointer",
+      "limitations": "after the pointer has slept, the first wheel turn reports a move to the screen centre (960,540)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.pointer.click",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B pointer log, Magic Remote OK/wheel press in pointer mode",
+      "evidence": "SDL_MOUSEBUTTONDOWN/UP button 1 only; no Enter key event accompanies it, so a click activates exactly once",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.pointer.wheel",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B pointer log, Magic Remote wheel",
+      "evidence": "one SDL_MOUSEWHEEL per notch, y = -1 rolling down (towards the user), +1 rolling up",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.pointer.visibility_keys",
+      "result": "unknown",
+      "date": "2026-10-11",
+      "method": "Example B key log while the pointer appeared and slept several times",
+      "evidence": "no key events with scancode 484/485 (SDL-webOS CursorShow/CursorHide) were received",
+      "limitations": "apps cannot rely on them; the kit switches modes on pointer motion and on arrow keys instead"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "input.pointer.arrow_while_visible",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B key log",
+      "evidence": "the first arrow press while the pointer is shown is delivered (Right pointer=1) and moves focus immediately",
+      "limitations": ""
     }
   ]
 }

@@ -88,7 +88,14 @@ Colour keys and Back are matched on the raw evdev code, because rust-sdl3's enum
 - **Unbound keys must have no side effects** (plx `remote-keys.md` §6, LG self-checklist row 40) `[SRC]`.
 - **Pointer (Magic Remote):** SDL mouse events; `SDL_webOSCursorVisibility` hides the arrow; the
   `CURSOR_SHOW`/`HIDE` key events announce pointer mode changes `[SRC]`. Pointer coordinates are in
-  window units (punktfunk) `[SRC]`.
+  window units (punktfunk) `[SRC]`. SDL-webOS maps wayland `BTN_LEFT` to `SDL_BUTTON_LEFT` and axis
+  events to `SDL_MOUSEWHEEL` (`src/video/wayland/SDL_waylandevents.c`) `[SRC]`.
+  **Measured on an OLED65C1PTB (webOS 6.5.3), 2026-10-11** `[HW]`: motion arrives in window units equal
+  to drawable pixels (1920x1080); OK in pointer mode is a left click only (no Enter alongside it); the
+  wheel sends one event per notch, y = -1 rolling towards the user; **no 484/485 key events arrived** while
+  the pointer appeared and slept several times; the first arrow press with the pointer shown is
+  delivered and moves focus. The kit therefore switches modes on motion and arrow keys and does not
+  depend on the visibility keys (`wnk::input::PointerEvent`, `Ui::handle_pointer`).
 - **Text input:** an LG IME path exists. SDL-webOS has `SDL_waylandwebos_osk.c` `[SRC]`. PlxNative found
   `SDL_TextInputEvent` shifted by the same `inputSource` field (`rust-modules/src/textinput.rs`) `[SRC]`.
 - **Gamepads:** SDL GameController via the bundled SDL; moonlight ships a `gamecontrollerdb.txt` `[SRC]`.

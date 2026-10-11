@@ -9,7 +9,7 @@ level stated. Device items stay open until run on a TV.
 | 1 | Research and architecture | ✅ documents written; ADRs await owner acceptance |
 | 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
 | 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
-| 4 | UI and navigation | 🟡 implemented and host-tested; device run pending |
+| 4 | UI and navigation | 🟡 implemented, host-tested and run on an OLED65C1PTB (webOS 6.5.3); Magic Remote pointer included |
 | 5 | Platform services | 🟡 storage, background work, HTTP and images done (TV-verified); secrets, WebSocket pending |
 | 6 | Lifecycle and diagnostics | ⬜ |
 | 7 | Media foundation | ⬜ |
@@ -101,8 +101,8 @@ double-Back exit and SAM close all end in exit 0; the Dev Mode user can pull the
 
 Found on hardware: **no durable app-writable filesystem location** in the Developer Mode jail (only tmpfs).
 **DB8 called directly from the app works instead** and survived relaunch, reinstall and a full reboot
-(ADR-010; `platform/luna.hpp`; experiment in Example A). Still unverified: key repeat, transport/number/volume/Home keys, Magic Remote
-pointer, background/foreground switching, text quality judged up close.
+(ADR-010; `platform/luna.hpp`; experiment in Example A). Still unverified: transport/number/volume/Home keys, background/foreground switching, text quality
+judged up close. (Key repeat and the Magic Remote pointer were measured later with Example B.)
 
 Simplifications, deliberate for M3: transforms are translation only (no scale/rotation); text is a
 single line, left-to-right, no shaping (Latin/Cyrillic/Greek fine; complex scripts need HarfBuzz later);
@@ -141,11 +141,29 @@ uses only these pieces.
 | ARM build: `DT_NEEDED` reviewed (as Example A without `libdl`), `org.wnk.examples.tvui_0.1.0` passes `check-package` | `[BUILD]` `[TEST]` |
 | Loadable on 5.3.1–11.2.0 incl. SDL's dlopen'd libraries | `[FWDB]` |
 
-Not verified: anything on a TV (the TV was not reachable from this machine on 2026-10-11) — frame time
-with ~200 views and 20+ image textures on the Mali-G51, text legibility at 3 m, key-repeat feel when
-scrolling the grid. Simplifications: no pointer (Magic Remote) hit-testing yet; transforms are
-translation only, so focus "zoom" is a ring rather than a scale; cells in one collection share one size;
-ScrollView does not combine nested scroll offsets.
+Magic Remote pointer: `input::PointerEvent` (SDL-free) with `pointer_event_from_sdl` converting window
+units to drawable pixels; `Ui::handle_pointer` hit-tests the topmost focusable view (clipped cells and
+everything behind a modal dialog are excluded), hover focuses, a click is OK on the clicked view, the
+wheel goes to the vertical scroller under the pointer (horizontal rails pass it on), an arrow key hands
+control back to the D-pad. Hover focus never auto-scrolls a list (it would slide the item away from a
+stationary pointer). 7 pointer unit tests, 2 e2e tests (click a card, wheel the grid).
+
+Animation: `Smoothed` is a critically damped spring (gentle start, no overshoot, velocity kept when
+retargeted); the focus ring keeps its velocity across rapid moves; scroll offsets are drawn on whole
+device pixels so text does not shimmer against images; `Ui::draw` clears instead of drawing a
+full-screen background quad.
+
+On hardware (LG OLED65C1PTB, webOS 6.5.3, 2026-10-11; `docs/compatibility/records.json`): Example B runs
+at a 16.7 ms average frame interval with ~190 views; D-pad repeat, OK, Back, details → Back focus restore,
+dialog trap and restore, double-Back exit; pointer hover, click (left button only, no duplicate Enter),
+wheel (one event per notch), arrow while the pointer shows. The owner judged the spring animation
+smoother than the first build. Not resolved: 4-14 intervals per 300 frames exceed 20 ms even when idle
+(most are made up by the next frame; ~1-2 real drops per 300) and occasional 25-52 ms stalls inside
+`SDL_PollEvent`; the SDL-webOS cursor show/hide keys never arrived.
+
+Simplifications: transforms are translation only, so focus "zoom" is a ring rather than a scale; cells in
+one collection share one size; ScrollView does not combine nested scroll offsets; no pointer
+auto-scroll at list edges (the wheel scrolls).
 
 ## M5 — Platform services
 

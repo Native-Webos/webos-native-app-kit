@@ -658,6 +658,23 @@ TEST("splice: new content never lands behind the decoder's clock (a burst of see
     CHECK_EQ(s.unmap(2740000), int64_t{30040000});
 }
 
+TEST("controller: relative seeks in quick succession add up") {
+    PlaybackOptions o;
+    o.seek_settle = std::chrono::milliseconds(0);
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/true, o);
+    r.log->seek_splices = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    const int64_t start = r.pc->snapshot().position_us;
+    r.pc->seek_relative(10000000);
+    r.pc->seek_relative(10000000);
+    r.pc->seek_relative(10000000);  // three presses: +30 s from where it was
+    REQUIRE(r.wait([&] { return r.log->first_video_after_flush.load() != kNoTime &&
+                                r.log->first_video_after_flush.load() >= start + 29000000; }));
+    CHECK(r.log->first_video_after_flush.load() < start + 31500000);
+    r.pc->stop();
+}
+
 TEST("controller: a seek waits until the last splice has settled (at most 2.5 s); later ones coalesce") {
     PlaybackOptions o;
     o.max_lead_us = 600000;

@@ -119,6 +119,7 @@ struct PlaybackController::Core {
     bool eos_sent_ = false;  // backend told everything is fed
     std::atomic<int64_t> last_seek_request_ms_{0};  // steady clock, from seek() on the main thread
     int64_t last_seek_applied_ms_ = 0;               // playback thread
+    std::atomic<int64_t> last_seek_target_us_{kNoTime};  // main thread: the latest seek() target
     SubtitleStore subtitles_;
     std::atomic<int> subtitle_track_{-1};
     std::atomic<bool> eos_seen_{false};
@@ -218,12 +219,21 @@ void PlaybackController::Core::seek(int64_t pts_us) {
     last_seek_request_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now().time_since_epoch())
                                 .count();
+    last_seek_target_us_ = std::max<int64_t>(0, pts_us);
     post({Cmd::Seek, {}, std::max<int64_t>(0, pts_us)});
 }
 
 void PlaybackController::Core::seek_relative(int64_t delta_us) {
     const PlaybackSnapshot s = snapshot();
     int64_t base = s.position_us != kNoTime ? s.position_us : 0;
+    // Presses in quick succession add up: while a seek is still on its way the position shown is
+    // not its target yet, so the next step starts from the target.
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    if (now_ms - last_seek_request_ms_.load() < 2000 && last_seek_target_us_.load() != kNoTime) {
+        base = last_seek_target_us_.load();
+    }
     int64_t target = base + delta_us;
     if (s.duration_us != kNoTime) target = std::min(target, std::max<int64_t>(0, s.duration_us - 1000000));
     seek(target);

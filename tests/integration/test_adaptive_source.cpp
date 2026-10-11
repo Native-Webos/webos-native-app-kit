@@ -112,6 +112,7 @@ BackendCaps ndl_like() {
 struct Drained {
     std::vector<Packet> video, audio;
     bool ordered = true;  // the merged stream never goes back in time by more than a frame
+    bool timed = true;    // every packet has a timestamp (a backend cannot place one without)
 };
 
 Drained drain(AdaptiveSource &s) {
@@ -121,6 +122,7 @@ Drained drain(AdaptiveSource &s) {
     int64_t last = INT64_MIN;
     MediaSource::Read r;
     while ((r = s.read(&p, &err)) == MediaSource::Read::Packet) {
+        d.timed = d.timed && p.pts_us != kNoTime;
         if (p.pts_us != kNoTime) {
             const int64_t t = p.dts_us != kNoTime ? p.dts_us : p.pts_us;
             if (last != INT64_MIN && t < last) d.ordered = false;
@@ -163,6 +165,7 @@ void check_full_play(const char *name, const BackendCaps &caps, CodecId audio_co
     CHECK(d.video[0].pts_us >= 0 && d.video[0].pts_us < 50000);
     CHECK(std::llabs(d.audio[0].pts_us) < 50000);
     CHECK(d.audio.back().pts_us > 9800000);
+    CHECK(d.timed);
     if (s.audio_rendition() >= 0) CHECK(d.ordered);  // our merge; one lane keeps the container order
     size_t keys = 0;
     for (const Packet &p : d.video) keys += p.key ? 1 : 0;
@@ -183,6 +186,7 @@ void check_seek(const char *name, int64_t target, int64_t expect_video) {
     CHECK(d.video[0].key);
     CHECK(d.video[0].pts_us >= expect_video && d.video[0].pts_us < expect_video + 50000);
     CHECK(std::llabs(d.audio[0].pts_us - expect_video) < 100000);
+    CHECK(d.timed);
     CHECK_EQ(d.video.size(), static_cast<size_t>((10000000 - expect_video) / 40000));
 }
 

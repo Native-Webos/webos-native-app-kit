@@ -110,6 +110,9 @@ class StarfishBackend : public MediaBackend {
     std::atomic<bool> load_completed_{false};
     std::atomic<bool> seen_frame_{false};
     std::atomic<int64_t> presented_out_us_{kNoTime};
+    std::atomic<int64_t> presented_at_ns_{0};  // steady clock when presented_out_us_ arrived
+    // Where the decoder's clock is now: the last presented PTS plus the time since (when playing).
+    int64_t clock_out_us(bool paused) const;
     std::atomic<int> events_logged_{0};
     std::mutex events_mutex_;
     EventFn events_;

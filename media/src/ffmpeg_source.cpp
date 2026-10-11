@@ -172,6 +172,9 @@ struct FfmpegSource::Impl {
     int64_t enc_cpu_samples = 0;   // output samples that took
     std::vector<uint8_t> adts_config;  // AAC passthrough to a backend that wants ADTS: the AudioSpecificConfig
     int64_t start_us = 0;  // subtracted from every timestamp
+    // Passthrough audio: where the next frame starts. MPEG-TS carries several AAC frames per PES and
+    // only the first has a PTS; a stream opened mid-way (adaptive streaming) leaves the rest unset.
+    int64_t next_audio_us = kNoTime;
     bool need_key = false;  // after a seek: drop video until a keyframe
     bool eof = false;
     std::deque<Packet> ready;
@@ -625,6 +628,13 @@ struct FfmpegSource::Impl {
                 }
                 a.pts_us = to_us(p->pts != AV_NOPTS_VALUE ? p->pts : p->dts, tb);
                 a.duration_us = p->duration > 0 ? av_rescale_q(p->duration, tb, kMicros) : 0;
+                const AVCodecParameters *par = fmt->streams[si]->codecpar;
+                if (a.duration_us == 0 && par->frame_size > 0 && par->sample_rate > 0) {
+                    a.duration_us = static_cast<int64_t>(par->frame_size) * 1000000 / par->sample_rate;
+                }
+                if (a.pts_us == kNoTime) a.pts_us = next_audio_us;
+                if (a.pts_us == kNoTime) return;  // nothing timed yet: an untimed frame cannot be placed
+                next_audio_us = a.duration_us > 0 ? a.pts_us + a.duration_us : kNoTime;
                 ready.push_back(std::move(a));
             }
         }
@@ -881,6 +891,7 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
         avcodec_free_context(&ctx);
     }
     m.decode_audio = false;
+    m.next_audio_us = kNoTime;
     *out = StreamFormat{};
 
     if (video_track >= 0) {
@@ -1072,6 +1083,7 @@ bool FfmpegSource::seek(int64_t pts_us, std::string *error) {
     if (m.bsf != nullptr) av_bsf_flush(m.bsf);
     if (m.dec != nullptr) avcodec_flush_buffers(m.dec);
     m.reset_ac3();
+    m.next_audio_us = kNoTime;
     // Keep the subtitles decoded while looking for the keyframe; drop everything else.
     m.ready.erase(std::remove_if(m.ready.begin(), m.ready.end(),
                                  [](const Packet &p) { return p.type != TrackType::Subtitle; }),

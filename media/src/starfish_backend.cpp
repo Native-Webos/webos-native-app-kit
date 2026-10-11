@@ -254,11 +254,16 @@ void StarfishBackend::on_event(int type, long long num, const char *str) {
     }
     if (type == 0) {  // FRAMEREADY: the presented PTS, in ns
         presented_out_us_ = num / 1000;
+        presented_at_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch()).count();
         if (!seen_frame_.exchange(true)) WNK_LOGI(kCat, "first frame presented (pts %lld ns)", num);
         return;
     }
     const std::string s = str != nullptr ? str : "";
-    if (events_logged_.fetch_add(1) < 40) WNK_LOGI(kCat, "event type=%d num=%lld %s", type, num, s.substr(0, 300).c_str());
+    // Type 49 (a frame counter, 5 Hz) only at first; everything else is rare and worth having.
+    if (type != 49 || events_logged_.fetch_add(1) < 40) {
+        WNK_LOGI(kCat, "event type=%d num=%lld %s", type, num, s.substr(0, 300).c_str());
+    }
     EventFn fn;
     {
         std::lock_guard<std::mutex> lock(events_mutex_);
@@ -354,7 +359,8 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
         if (!loaded_) return Feed::Error;
         if (p.type == TrackType::Audio && !format_.audio) return Feed::Accepted;
         object = object_;
-        out_us = splice_.map(p.pts_us);
+        // After a seek the new content goes after the decoder's clock if it ran past what was fed.
+        out_us = splice_.map(p.pts_us, clock_out_us(paused_));
         // Play issued before loadCompleted is queued; it is issued once more after it (samples README).
         if (!paused_ && !play_issued_) play = play_issued_ = true;
         if (!paused_ && load_completed_ && !replayed_) replay = replayed_ = true;
@@ -373,6 +379,15 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
     if (std::strstr(s, "Ok") != nullptr) return Feed::Accepted;
     WNK_LOGW(kCat, "Feed reply \"%s\"", s);
     return Feed::Error;
+}
+
+int64_t StarfishBackend::clock_out_us(bool paused) const {
+    const int64_t out = presented_out_us_.load();
+    if (out == kNoTime) return kNoTime;
+    if (paused) return out;
+    const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+    return out + std::max<int64_t>(0, now - presented_at_ns_.load()) / 1000;
 }
 
 bool StarfishBackend::flush(std::string *) {

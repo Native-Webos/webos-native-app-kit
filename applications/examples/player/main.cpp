@@ -274,11 +274,13 @@ class PlayerScreen : public Screen {
         // Once a second: what the controller has fed, for the PTS-unit experiment.
         if (ui.now_ms() - last_log_ms_ >= 1000 && s.state == PlayState::Playing) {
             last_log_ms_ = ui.now_ms();
-            WNK_LOGI(kCat, "position %s (%s) last video pts %.2f s, fed %llu video %llu audio, full retries %llu",
+            WNK_LOGI(kCat, "position %s (%s) last video pts %.2f s, last audio pts %.2f s, fed %llu video %llu audio, "
+                     "full retries %llu, untimed %llu",
                      clock_text(s.position_us).c_str(), s.position_estimated ? "estimated" : "decoder",
                      s.last_video_pts_us == kNoTime ? -1.0 : s.last_video_pts_us / 1e6,
+                     s.last_audio_pts_us == kNoTime ? -1.0 : s.last_audio_pts_us / 1e6,
                      static_cast<unsigned long long>(s.video_packets), static_cast<unsigned long long>(s.audio_packets),
-                     static_cast<unsigned long long>(s.full_retries));
+                     static_cast<unsigned long long>(s.full_retries), static_cast<unsigned long long>(s.untimed_packets));
         }
     }
 

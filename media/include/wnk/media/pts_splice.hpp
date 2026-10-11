@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // The PTS mapping behind splice seeks (backends with seek_splices): after splice(), the next packet
-// with a PTS is placed `gap_us` after the highest PTS mapped so far and everything after it keeps
-// that offset, so the decoder's timeline only moves forward. unmap() turns a decoder timestamp back
+// with a PTS is placed `gap_us` after the highest PTS mapped so far, or after the decoder's clock if
+// that has run past it (a burst of seeks can leave nothing fed for a second while the clock goes on),
+// and everything after it keeps that offset, so the decoder's timeline only moves forward and new
+// content is never late. unmap() turns a decoder timestamp back
 // into content time, using the offset that was in force where that timestamp was fed. Pure.
 #pragma once
 
@@ -18,8 +20,9 @@ class PtsSplice {
     explicit PtsSplice(int64_t gap_us) : gap_us_(gap_us) {}
     void reset() { *this = PtsSplice(gap_us_); }
     void splice() { pending_ = true; }
-    // kNoTime stays kNoTime.
-    int64_t map(int64_t pts_us);
+    // kNoTime stays kNoTime. `clock_out_us`: where the decoder's clock is now, if known (only used
+    // for the first packet after a splice).
+    int64_t map(int64_t pts_us, int64_t clock_out_us = kNoTime);
     int64_t unmap(int64_t out_us) const;
     int64_t shift_us() const { return shift_us_; }
 

@@ -618,6 +618,20 @@ TEST("ndl splice: PTS after a seek continue just after the highest one fed, forw
     CHECK_EQ(s.map(7000000), int64_t{7000000});
 }
 
+TEST("splice: new content never lands behind the decoder's clock (a burst of seeks fed nothing for a while)") {
+    PtsSplice s(200000);
+    s.map(0);
+    s.map(1000000);          // fed up to 1 s
+    s.splice();
+    // The decoder has played on to 2.5 s meanwhile: placing the next packet at 1.2 s would make
+    // everything after it late, and the sink drops late frames for good.
+    CHECK_EQ(s.map(30000000, 2500000), int64_t{2700000});
+    CHECK_EQ(s.map(30040000, 2600000), int64_t{2740000});  // the floor only applies at the splice
+    s.splice();
+    CHECK_EQ(s.map(5000000, 100000), int64_t{2940000});    // a floor behind what was fed changes nothing
+    CHECK_EQ(s.unmap(2740000), int64_t{30040000});
+}
+
 TEST("controller: a splicing backend's new content waits for the backlog; the shown position holds at the target") {
     PlaybackOptions o;
     o.max_lead_us = 600000;

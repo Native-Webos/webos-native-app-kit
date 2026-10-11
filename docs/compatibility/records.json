@@ -656,6 +656,24 @@
       "method": "Example D 0.9.0: Dolby DV/Atmos test DASH (DV profile 8.1 HEVC 2160p59.94, E-AC-3 JOC) on Starfish with contents.DolbyHdrInfo {trackType single, encryptionType clear, profileId 8} and contents.immersive ATMOS, both gated on com.webos.service.config (supportDolbyHDRContents, supportDolbyTVATMOS = true)",
       "evidence": "dvvC read from the init segment (profile 8, compatibility 1); pipeline video info hdrType DolbyVision (was none without the node in 0.8.0), audio info immersive ATMOS; the TV showed Dolby Vision and Dolby Atmos with picture and sound fine (owner)",
       "limitations": "profile 8.1 only; profile 5, PlxNative's 1 ns PTS nudge for DV LUT lookups (measured on webOS 4.10.2) and ACB's Atmos read-out are not examined on this TV"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "media.adaptive_bitrate",
+      "result": "supported",
+      "method": "Example D 0.10.0 AdaptiveSource with bitrate switching on Starfish (adaptiveResolution declared): Mux x36xhzz HLS-TS (five rungs 288p-1080p, 10 s segments) from initial_bandwidth 6 Mb/s; Unified Streaming Tears of Steel HLS-TS over a slow link",
+      "evidence": "Mux: started 1280x720 2.1 Mb/s, estimate 61.7 Mb/s after the first segment, switched to 1920x1080 6.2 Mb/s at segment 2 (20 s); pipeline reported 1920x1080 and playback continued 1 s/s; no visible glitch (owner). Tears of Steel: estimate 0.5 Mb/s, switched from 1680x750 2.5 Mb/s down to 224x100",
+      "limitations": "video only (audio renditions do not switch); H.264 size changes only tried"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "media.starfish.seek_splice_clock",
+      "result": "supported",
+      "method": "Example D 0.10.1 vs 0.10.2 on Mux HLS-TS: held Right (about 150 coalesced seeks), single presses and Left; Starfish callbacks 48 (dropped frames per 200 ms poll on webOS 5+, PlxNative's decompile) logged in full",
+      "evidence": "0.10.1: after a held-key burst the sink reported 6-19 dropped frames per poll for as long as playback ran, with audio dropping out every few seconds (owner): new content was spliced behind the decoder's clock. 0.10.2 places it after the clock estimated from FRAMEREADY: the burst left at most a few drops, audio continuous (owner)",
+      "limitations": "two single seeks about 2 s apart still produced roughly 8 s of dropped-frame reports before recovering on their own; not yet explained"
     }
   ]
 }

@@ -745,7 +745,9 @@ void PlaybackController::Core::feed_one() {
                     if (pkt.pts_us != kNoTime) snap_.last_video_pts_us = std::max(snap_.last_video_pts_us, pkt.pts_us);
                 } else {
                     ++snap_.audio_packets;
+                    snap_.last_audio_pts_us = pkt.pts_us;
                 }
+                if (pkt.pts_us == kNoTime) ++snap_.untimed_packets;
                 // Start the position clock at the first packet after a load or seek.
                 const bool primary = pkt.type == TrackType::Video || !snap_.format.video;
                 if (primary && pkt.pts_us != kNoTime) {

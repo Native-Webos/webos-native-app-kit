@@ -67,6 +67,8 @@ struct PlaybackSnapshot {
     uint64_t video_packets = 0, audio_packets = 0;  // fed since open
     uint64_t full_retries = 0;  // feed() returned Full
     int64_t last_video_pts_us = kNoTime;
+    int64_t last_audio_pts_us = kNoTime;  // of the latest audio packet fed
+    uint64_t untimed_packets = 0;         // fed without a timestamp (a source bug if it grows)
 };
 
 struct PlaybackOptions {

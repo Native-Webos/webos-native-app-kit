@@ -119,10 +119,14 @@ bool adts_header(const std::vector<uint8_t> &asc, size_t payload_size, uint8_t o
     return true;
 }
 
-int64_t PtsSplice::map(int64_t pts_us) {
+int64_t PtsSplice::map(int64_t pts_us, int64_t clock_out_us) {
     if (pts_us == kNoTime) return kNoTime;
     if (pending_ || segments_.empty()) {
-        if (pending_) shift_us_ = (max_out_us_ == kNoTime ? pts_us : max_out_us_ + gap_us_) - pts_us;
+        if (pending_) {
+            int64_t after = max_out_us_;
+            if (clock_out_us != kNoTime && (after == kNoTime || clock_out_us > after)) after = clock_out_us;
+            shift_us_ = (after == kNoTime ? pts_us : after + gap_us_) - pts_us;
+        }
         pending_ = false;
         segments_.push_back({pts_us + shift_us_, shift_us_});
         if (segments_.size() > 8) segments_.erase(segments_.begin());

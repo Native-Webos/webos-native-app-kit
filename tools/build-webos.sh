@@ -12,5 +12,5 @@ need git "SDL-webOS is fetched from GitHub at a pinned tag"
 cd "$KIT_ROOT"
 cmake --preset "$preset"
 cmake --build --preset "$preset" -j"$(nproc)"
-cmake --build --preset "$preset" --target wnk-hello-ipk
+cmake --build --preset "$preset" --target wnk-ipks
 ls -l "build/$preset/dist/"

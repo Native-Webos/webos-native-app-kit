@@ -51,6 +51,7 @@ add_subdirectory(ui)
 if (WNK_BUILD_EXAMPLES)
     include(WebOSPackage)
     add_subdirectory(applications/examples/hello)
+    add_subdirectory(applications/examples/tvui)
 endif ()
 
 if (WNK_BUILD_TESTS)

@@ -74,3 +74,21 @@ if (TARGET wnk-hello)
             FAIL_REGULAR_EXPRESSION "dialog opened|quitting|${WNK_SANITIZER_FAIL}"
             TIMEOUT 30)
 endif ()
+
+# End-to-end tests of Example B (UI toolkit): navigation stack, virtualised grid, modal dialog and
+# Back handling, through real SDL key events on the offscreen driver.
+if (TARGET wnk-tvui)
+    function(wnk_tvui_e2e name keys pass)
+        add_test(NAME e2e.tvui.${name} COMMAND wnk-tvui)
+        set_tests_properties(e2e.tvui.${name} PROPERTIES
+                ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_TVUI_KEYS=${keys}"
+                PASS_REGULAR_EXPRESSION "${pass}"
+                FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
+                TIMEOUT 30)
+    endfunction()
+    wnk_tvui_e2e(details_back_restores_focus "Right,Right,Return,Escape" "back to home focus=rail0.item2")
+    wnk_tvui_e2e(browse_grid_scrolls "Left,Down,Right,Down,Down,Down,Down,Down,Down,Down,Down,Down,Down"
+            "focus grid.item40")
+    wnk_tvui_e2e(dialog_focus_restore "Left,Down,Down,Right,Return,Right,Escape" "dialog closed focus=widgets.dialog")
+    wnk_tvui_e2e(double_back_exits "Escape,Escape" "Back twice at root: quitting")
+endif ()

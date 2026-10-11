@@ -43,7 +43,9 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 | `image/` | Image service: fetch, PNG/JPEG decode, downscale, memory and disk caches, coalescing; textures via the renderer |
 | `storage/` | Key/value store with revisions: DB8 on the TV, atomic files on the host |
 | `render/` | Renderer interface, fonts/UTF-8/atlas packing (CPU), GLES2 backend in `render/gles2` |
+| `ui/` | Widget toolkit: view tree, Row/Column/Grid layouts, Label, ImageView, Button, Card, virtualised lists/grids, ScrollView, dialogs, toasts, navigation stack, focus ring, animation helpers |
 | `applications/examples/hello/` | Example A: tile grid with focus ring, modal dialog, key log, device probe |
+| `applications/examples/tvui/` | Example B: sidebar, poster rails, 1000-item grid, details screen, dialogs, built only from `ui/` |
 | `cmake/` | Target detection, SDL-webOS build, `wnk_add_webos_package()` |
 | `tools/` | `mkipk.py` (reproducible ipk), `check-package.py`, `fw-check.py`, shell tools |
 | `tests/` | C++ unit tests and Python packaging tests |
@@ -56,6 +58,7 @@ build/host-debug/applications/examples/hello/wnk-hello      # arrows, Enter, Esc
 # scripted, headless: inject keys and save a screenshot
 SDL_VIDEODRIVER=offscreen WNK_HELLO_KEYS=Right,Down,Return WNK_HELLO_SHOT=/tmp/shot.bmp \
     build/host-debug/applications/examples/hello/wnk-hello
+build/host-debug/applications/examples/tvui/wnk-tvui        # Example B; WNK_TVUI_KEYS / WNK_TVUI_SHOT likewise
 ```
 
 ## Licence

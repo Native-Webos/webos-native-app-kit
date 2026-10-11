@@ -14,7 +14,7 @@
 ## Gates before handing over a change
 1. `tools/test.sh` (and `tools/test.sh host-asan` for memory-sensitive code, `tools/test.sh host-tsan` for
    anything touching threads). This includes renderer
-   pixel tests on Mesa and end-to-end runs of Example A driven by `WNK_HELLO_KEYS`.
+   pixel tests on Mesa and end-to-end runs of Examples A and B driven by `WNK_HELLO_KEYS`/`WNK_TVUI_KEYS`.
 2. `tools/build-webos.sh`: the ARM build must succeed and its ipk must pass `check-package.py`.
 3. `tools/verify.sh <ipk> --runtime-libs cmake/sdl-webos-runtime-libs.txt` must be 7/7 for 5.3.1+.
 4. If the executable's libraries change, update `applications/**/expected-needed.txt` deliberately.

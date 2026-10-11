@@ -9,7 +9,7 @@ level stated. Device items stay open until run on a TV.
 | 1 | Research and architecture | ✅ documents written; ADRs await owner acceptance |
 | 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
 | 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
-| 4 | UI and navigation | ⬜ |
+| 4 | UI and navigation | 🟡 implemented and host-tested; device run pending |
 | 5 | Platform services | 🟡 storage, background work, HTTP and images done (TV-verified); secrets, WebSocket pending |
 | 6 | Lifecycle and diagnostics | ⬜ |
 | 7 | Media foundation | ⬜ |
@@ -114,6 +114,38 @@ whole golden images.
 View tree, layout (stack/row/column/grid), Text, Image, Button, List, Grid (virtualised), Dialog/Modal
 with focus trapping, Toast, Spinner, ProgressBar, navigation stack with focus restoration, animation
 clock. Example B.
+
+### M4 status (2026-10-11)
+
+Implemented: `ui/` — `View` tree (measure/layout only when invalidated; translation and scroll offsets
+applied at draw time and in reported focus rectangles), `Row`/`Column` (fixed, auto and weighted fill,
+gaps, justify, cross alignment), `Grid`, `ScrollView` (follows focus), `Label` (word wrap, long-word
+breaking at code point boundaries, ellipsis), `ImageView` (through an `ImageSource`; `ServiceImageSource`
+adapts the image service and texture cache; cancels on destruction, reloads if pixels were evicted),
+`Button`, `Card`, `Spinner`, `ProgressBar` (determinate/indeterminate), `CollectionView` (virtualised
+list/rail/grid; arrows handled by index so fast repeats never skip or escape; smooth scroll with a peek of
+the next line; keeps the focused index across data changes), `Navigator` + `Screen` (covered screens keep
+their focus nodes registered but unfocusable, so popping restores the exact node and nested row memory),
+`Dialog` (modal through the focus manager's modal stack; Back never reaches the screen underneath),
+toasts, an animated focus ring that stays attached to scrolling content, `Smoothed`/`Tween` animation on
+a clock advanced by `Ui::update`. Input bubbles from the focused view to its ancestors; unhandled arrows
+fall back to geometric focus; unhandled Back is returned to the app. Example B (`applications/examples/tvui`)
+uses only these pieces.
+
+| Item | Evidence |
+|---|---|
+| 27 toolkit unit tests (layout, wrapping, focus sync, bubbling, navigation and restore, dialogs, toasts, 1000-item grid virtualisation, rails row memory, image loading/cancel, scroll view) on a recording renderer | `[TEST]` `unit.ui` |
+| 4 end-to-end tests of Example B through real SDL key events (details → Back restores the card, grid scroll to item 40, dialog focus restore, double Back exits) | `[TEST]` `e2e.tvui.*` |
+| All tests clean under ASan/UBSan, including handlers that close their own screen | `[TEST]` `host-asan` |
+| Screenshots of home rails, browse grid, details and dialog at 1280x720 reviewed | manual, host |
+| ARM build: `DT_NEEDED` reviewed (as Example A without `libdl`), `org.wnk.examples.tvui_0.1.0` passes `check-package` | `[BUILD]` `[TEST]` |
+| Loadable on 5.3.1–11.2.0 incl. SDL's dlopen'd libraries | `[FWDB]` |
+
+Not verified: anything on a TV (the TV was not reachable from this machine on 2026-10-11) — frame time
+with ~200 views and 20+ image textures on the Mali-G51, text legibility at 3 m, key-repeat feel when
+scrolling the grid. Simplifications: no pointer (Magic Remote) hit-testing yet; transforms are
+translation only, so focus "zoom" is a ring rather than a scale; cells in one collection share one size;
+ScrollView does not combine nested scroll offsets.
 
 ## M5 — Platform services
 

@@ -20,6 +20,7 @@
 #   <target>-verify   tools/verify.sh on that ipk (firmware loadability; webosbrew-ipk-verify if installed)
 #   <target>-install  tools/install.sh (ares-install, honours ARES_DEVICE)
 #   <target>-launch   tools/launch.sh  (ares-launch)
+# and makes wnk-ipks (every app's ipk) depend on <target>-ipk.
 #
 # Staging is plain `cmake -E` so it is readable. The bundled SDL (cmake/SdlWebOS.cmake) is copied to
 # lib/libSDL2-2.0.so.0 as a real file. Only the staged copies are stripped; the unstripped executable
@@ -126,4 +127,8 @@ function(wnk_add_webos_package)
     add_custom_target(${P_TARGET}-launch
             COMMAND "${WNK_TOOLS_DIR}/launch.sh" "${P_APPID}"
             VERBATIM USES_TERMINAL)
+    if (NOT TARGET wnk-ipks)
+        add_custom_target(wnk-ipks)
+    endif ()
+    add_dependencies(wnk-ipks ${P_TARGET}-ipk)
 endfunction()

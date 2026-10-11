@@ -1,0 +1,10 @@
+# Reviewed DT_NEEDED list for wnk-tvui on webOS (checked by tools/check-package.py).
+# Adding a line is a review decision: the library must exist under this SONAME on every targeted
+# firmware (tools/fw-lib-matrix.py), or be bundled in lib/.
+ld-linux.so.3
+libc.so.6
+libm.so.6           # maths for layout and animation (glibc; every firmware)
+libpthread.so.0     # glibc 2.12 keeps pthreads here (worker pool for image decoding)
+librt.so.1          # glibc 2.12 keeps clock_gettime here
+libGLESv2.so.2      # firmware GLES2, same SONAME on every inventoried release
+libSDL2-2.0.so.0    # bundled SDL-webOS 2.30.12, lib/ via RPATH $ORIGIN/lib

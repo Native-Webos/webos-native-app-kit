@@ -7,7 +7,7 @@
 //   video  H.264/HEVC as Annex-B access units: MP4/MKV length-prefixed samples go through FFmpeg's
 //          h264_mp4toannexb / hevc_mp4toannexb, which also insert the parameter sets before every
 //          keyframe; streams that are already Annex-B (MPEG-TS, raw) pass through. VP9/AV1 as is.
-//   audio  passed through when the backend accepts the codec; AAC, AC-3 and E-AC-3 otherwise
+//   audio  passed through when the backend accepts the codec; AAC, AC-3, E-AC-3 and MP3 otherwise
 //          decoded to interleaved S16 stereo (more channels are downmixed: L = FL + 0.707·C +
 //          0.707·SL, LFE dropped), at the stream's own sample rate.
 //   time   microseconds from the start of the media (the container's start_time is subtracted, so

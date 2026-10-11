@@ -10,8 +10,8 @@
 //   * flush() is unload + load: an NDL flush can silently kill audio for the session (punktfunk), and
 //     must not happen before load completed.
 //   * NDL v2 has no pause and no position query (caps say so); the controller handles both.
-//   * Audio: PCM S16 stereo and MP3 are fed directly. Opus is in the v2 header but its stream-header
-//     format is unverified, so the source decodes nothing to Opus and Opus files play without sound.
+//   * Audio: PCM S16 stereo only (measured: AAC and AC-3 decoded to PCM play in sync). MP3 passed
+//     through played silently, so it is decoded too. Opus is in the v2 header but unverified.
 //
 // Unverified until measured on a TV (docs/compatibility/records.json): the PTS unit (µs per webosbrew
 // samples; ms since load per ss4s and punktfunk), the PCM layout string, the coordinate space of

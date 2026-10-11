@@ -47,7 +47,7 @@ bool have_ffmpeg() {
 BackendCaps ndl_like_caps() {
     BackendCaps c;
     c.video_codecs = {CodecId::H264, CodecId::Hevc, CodecId::Vp9, CodecId::Av1};
-    c.audio_codecs = {CodecId::PcmS16, CodecId::Mp3, CodecId::Opus};  // NDL v2's list
+    c.audio_codecs = {CodecId::PcmS16};  // what the NDL backend takes (MP3/Opus passthrough unverified)
     return c;
 }
 
@@ -181,7 +181,7 @@ TEST("ffmpeg source: MKV HEVC + AC-3 5.1 → VPS/SPS/PPS before keyframes, audio
     CHECK(peak > 1000);
 }
 
-TEST("ffmpeg source: MPEG-TS H.264 + MP3 → Annex-B passes through, MP3 passes through, time starts at 0") {
+TEST("ffmpeg source: MPEG-TS H.264 + MP3 → Annex-B passes through, MP3 decoded to PCM (or passed through), time from 0") {
     SKIP_WITHOUT_FFMPEG();
     REQUIRE(make_clip("h264_mp3.ts", "libx264", "libmp3lame"));
     FfmpegSource s;
@@ -193,12 +193,16 @@ TEST("ffmpeg source: MPEG-TS H.264 + MP3 → Annex-B passes through, MP3 passes 
     REQUIRE(v && a);
     StreamFormat f;
     REQUIRE(s.select(v->index, a->index, ndl_like_caps(), &f, &err));
-    CHECK(f.audio && f.audio->codec == CodecId::Mp3);
+    CHECK(f.audio && f.audio->codec == CodecId::PcmS16 && f.audio->channels == 2);  // mono → stereo PCM
     const Drained d = drain(s);
     REQUIRE(!d.video.empty() && !d.audio.empty());
     CHECK(starts_with_start_code(d.video[0].data));
     CHECK(d.video[0].pts_us >= 0 && d.video[0].pts_us < 100000);  // MPEG-TS start_time subtracted
     CHECK(d.audio[0].data.size() > 100);
+    BackendCaps mp3 = ndl_like_caps();
+    mp3.audio_codecs.push_back(CodecId::Mp3);
+    REQUIRE(s.select(v->index, a->index, mp3, &f, &err));
+    CHECK(f.audio && f.audio->codec == CodecId::Mp3);  // passthrough when a backend takes MP3
 }
 
 TEST("ffmpeg source: WebM VP9 + Opus → Opus passes through with its header") {
@@ -215,7 +219,9 @@ TEST("ffmpeg source: WebM VP9 + Opus → Opus passes through with its header") {
     REQUIRE(v && a);
     CHECK(v->codec == CodecId::Vp9);
     StreamFormat f;
-    REQUIRE(s.select(v->index, a->index, ndl_like_caps(), &f, &err));
+    BackendCaps opus = ndl_like_caps();
+    opus.audio_codecs.push_back(CodecId::Opus);
+    REQUIRE(s.select(v->index, a->index, opus, &f, &err));
     REQUIRE(f.audio.has_value());
     CHECK(f.audio->codec == CodecId::Opus);
     CHECK(f.audio->codec_header.size() >= 19);

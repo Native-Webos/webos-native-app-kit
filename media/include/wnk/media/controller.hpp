@@ -9,7 +9,8 @@
 //   any state ─stop─► Stopped
 //
 // The playback thread reads packets, feeds the backend and retries while the backend reports Full,
-// so the decoder's own buffer is the pacing. Commands from the main thread are queued and applied
+// and never runs more than max_lead_us ahead of the playback clock (decoders that accept everything
+// would otherwise receive the whole file at once). Commands from the main thread are queued and applied
 // between packets; a blocked read or open is interrupted for stop and seek.
 //
 // Pause: when the backend cannot pause (NDL v2 has no pause call) the controller stops feeding,
@@ -61,6 +62,10 @@ struct PlaybackOptions {
     int video_track = -2;          // -2: best, -1: none, else a stream index
     int audio_track = -2;
     std::chrono::milliseconds full_backoff{8};  // wait after Full before retrying
+    // Never feed more than this far ahead of the playback clock, whatever the backend says. NDL v2
+    // was measured accepting a whole 15 s clip in 0.6 s without ever reporting Full (OLED65C1PTB,
+    // webOS 6.5.3), so its own backpressure cannot be relied on. 0 disables.
+    int64_t max_lead_us = 1000000;
     std::chrono::milliseconds stop_deadline{2000};
 };
 

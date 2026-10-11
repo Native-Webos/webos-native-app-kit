@@ -140,7 +140,9 @@ void NdlBackend::set_app_foreground(bool foreground) {
 BackendCaps NdlBackend::caps() const {
     BackendCaps c;
     c.video_codecs = {CodecId::H264, CodecId::Hevc, CodecId::Vp9, CodecId::Av1};
-    c.audio_codecs = {CodecId::PcmS16, CodecId::Mp3};
+    // PCM only: MP3 passed through loaded fine but played silently on an OLED65C1PTB (webOS 6.5.3,
+    // mono 48 kHz), so sources decode MP3 to PCM like everything else.
+    c.audio_codecs = {CodecId::PcmS16};
     c.pause = false;
     c.position = false;
     return c;

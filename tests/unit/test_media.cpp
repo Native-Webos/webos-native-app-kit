@@ -261,6 +261,24 @@ TEST("controller: open, play to the end, every packet fed in order") {
     CHECK(r.pc->stop());
 }
 
+TEST("controller: a backend that never reports Full is still fed at most max_lead ahead") {
+    // Speed 1000x and a huge lead: the backend accepts everything immediately, like NDL v2.
+    async::MainDispatcher main;
+    auto log = std::make_shared<PacedBackend::Log>();
+    PlaybackOptions opts;
+    opts.max_lead_us = 500000;
+    PlaybackController pc(std::make_unique<ScriptedSource>(10000000),
+                          std::make_unique<PacedBackend>(log, false, 1000.0, int64_t{1} << 40), main, opts);
+    pc.open("x");
+    std::this_thread::sleep_for(300ms);
+    const auto s = pc.snapshot();
+    // After 0.3 s of a 10 s clip: about 0.3 s presented + 0.5 s lead fed, nowhere near all of it.
+    CHECK(s.last_video_pts_us <= 900000);
+    CHECK(s.last_video_pts_us >= 500000);
+    CHECK_EQ(s.full_retries, uint64_t{0});
+    pc.stop();
+}
+
 TEST("controller: open and selection failures end in Error with the reason") {
     Rig r;
     r.pc->open("missing");

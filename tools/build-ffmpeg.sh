@@ -26,8 +26,9 @@
 #   demuxers  containers and raw streams the kit opens
 #   parsers   fill codec parameters during stream probing
 #   bsf       length-prefixed (MP4/MKV) H.264/HEVC → Annex-B, which NDL requires
-#   decoders  AAC, AC-3 and E-AC-3 only: NDL v2 takes PCM, MP3 and Opus, so these are decoded to PCM.
-#             Video is never decoded here.
+#   decoders  AAC, AC-3, E-AC-3 and MP3, decoded to PCM: PCM is the NDL v2 audio path measured to work
+#             (MP3 passed through to NDL was silent on an OLED65C1PTB, webOS 6.5.3). Video is never
+#             decoded here.
 #   protocol  file only; network reads go through the kit's own HTTP client (custom AVIO), later.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -45,7 +46,7 @@ COMPONENTS=(
   --enable-demuxer=matroska,mov,mpegts,h264,hevc,aac,mp3,ogg,wav
   --enable-parser=h264,hevc,aac,ac3,mpegaudio,opus,vp9,av1
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata
-  --enable-decoder=aac,ac3,eac3
+  --enable-decoder=aac,ac3,eac3,mp3float
   --enable-protocol=file
 )
 COMMON=(

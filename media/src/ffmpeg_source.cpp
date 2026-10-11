@@ -369,7 +369,8 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
             out->audio = a;
             m.audio = audio_track;
         } else if (caps.accepts(CodecId::PcmS16) &&
-                   (t->codec == CodecId::Aac || t->codec == CodecId::Ac3 || t->codec == CodecId::Eac3)) {
+                   (t->codec == CodecId::Aac || t->codec == CodecId::Ac3 || t->codec == CodecId::Eac3 ||
+                    t->codec == CodecId::Mp3)) {
             const AVCodec *codec = avcodec_find_decoder(par->codec_id);
             m.dec = codec != nullptr ? avcodec_alloc_context3(codec) : nullptr;
             if (m.dec == nullptr || avcodec_parameters_to_context(m.dec, par) < 0) {
@@ -379,7 +380,7 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
             }
             m.dec->pkt_timebase = m.fmt->streams[audio_track]->time_base;
             // AC-3/E-AC-3 can downmix inside the decoder, which also applies the stream's mix levels.
-            if (t->codec != CodecId::Aac) {
+            if (t->codec == CodecId::Ac3 || t->codec == CodecId::Eac3) {
                 AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
                 av_opt_set_chlayout(m.dec->priv_data, "downmix", &stereo, 0);
             }

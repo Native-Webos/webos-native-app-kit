@@ -440,6 +440,17 @@ void PlaybackController::feed_one() {
             case MediaSource::Read::Error: fail("read failed: " + err); return;
         }
     }
+    if (options_.max_lead_us > 0 && pending_->pts_us != kNoTime) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (clock_running_) {
+            const int64_t ahead = pending_->pts_us - estimated_position() - options_.max_lead_us;
+            if (ahead > 0) {
+                const auto wait = std::chrono::microseconds(std::min<int64_t>(ahead, 20000));
+                cv_.wait_for(lock, wait, [this] { return !commands_.empty(); });
+                return;
+            }
+        }
+    }
     switch (backend_->feed(*pending_)) {
         case MediaBackend::Feed::Accepted: {
             std::lock_guard<std::mutex> lock(mutex_);

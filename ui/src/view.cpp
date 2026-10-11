@@ -219,6 +219,7 @@ bool View::on_action(Ui &, const input::ActionEvent &) { return false; }
 void View::on_focus_changed(Ui &, bool) {}
 void View::on_descendant_focused(Ui &, View *, View *) {}
 void View::update(Ui &, float) {}
+bool View::on_wheel(Ui &, float) { return false; }
 void View::draw(Ui &) {}
 void View::draw_over(Ui &) {}
 

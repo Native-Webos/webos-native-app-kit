@@ -13,10 +13,15 @@
 //   * OK on a card pushes a details screen (navigation stack); Back pops it and focus returns to
 //     the card it came from;
 //   * Widgets shows buttons, a modal dialog, a toast, a spinner and progress bars;
-//   * Back at the root shows "Press Back again to exit"; Exit quits.
+//   * Back at the root shows "Press Back again to exit"; Exit quits;
+//   * Magic Remote pointer: hovering focuses, clicking is OK, the wheel scrolls the page or grid.
+//
+// Measurement log (for docs/compatibility/records.json): every raw key-down with its scancode,
+// pointer buttons/wheel/visibility events, and frame timing every 300 frames.
 //
 // Scripted runs (host diagnostics; SAM launches cannot pass environment variables):
-//   WNK_TVUI_KEYS="Left,Down,Right"  SDL scancode names injected as key presses, 6 frames apart
+//   WNK_TVUI_KEYS="Left,Down,Right"  SDL scancode names injected as key presses, 6 frames apart;
+//                                    also move@X:Y, click@X:Y (logical 1920x1080 units) and wheel@N
 //   WNK_TVUI_SHOT=/path/out.bmp      save the last frame, then quit
 #include "wnk/async/async.hpp"
 #include "wnk/image/image.hpp"
@@ -34,6 +39,7 @@
 
 #include <SDL.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -68,6 +74,11 @@ struct Catalogue {
 // Key presses injected through SDL's event queue, so they take the same path as real keys.
 class Script {
  public:
+    struct Step {
+        enum Kind { Key, Move, Click, Wheel } kind = Key;
+        SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
+        float x = 0, y = 0;
+    };
     Script() {
         if (const char *keys = SDL_getenv("WNK_TVUI_KEYS")) {
             std::string list = keys;
@@ -76,8 +87,19 @@ class Script {
                 const size_t comma = list.find(',', start);
                 const std::string name = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
                 const SDL_Scancode sc = SDL_GetScancodeFromName(name.c_str());
-                if (sc != SDL_SCANCODE_UNKNOWN) {
-                    keys_.push_back(sc);
+                Step st;
+                if (std::sscanf(name.c_str(), "move@%f:%f", &st.x, &st.y) == 2) {
+                    st.kind = Step::Move;
+                    keys_.push_back(st);
+                } else if (std::sscanf(name.c_str(), "click@%f:%f", &st.x, &st.y) == 2) {
+                    st.kind = Step::Click;
+                    keys_.push_back(st);
+                } else if (std::sscanf(name.c_str(), "wheel@%f", &st.y) == 1) {
+                    st.kind = Step::Wheel;
+                    keys_.push_back(st);
+                } else if (sc != SDL_SCANCODE_UNKNOWN) {
+                    st.key = sc;
+                    keys_.push_back(st);
                 } else if (!name.empty()) {
                     WNK_LOGW("script", "unknown key name '%s'", name.c_str());
                 }
@@ -87,12 +109,30 @@ class Script {
         }
         if (const char *shot = SDL_getenv("WNK_TVUI_SHOT")) shot_ = shot;
     }
-    bool step(Uint64 frame, wnk::render::Gles2Renderer &r, int dw, int dh) {
+    bool step(Uint64 frame, wnk::render::Gles2Renderer &r, SDL_Window *window, int dw, int dh) {
         if (keys_.empty() && shot_.empty()) return false;
         const Uint64 first = 20, gap = 6;
         if (frame >= first && next_ < keys_.size() && (frame - first) % gap == 0) {
-            push(keys_[next_], true);
-            push(keys_[next_], false);
+            const Step &st = keys_[next_];
+            // Logical units → drawable pixels → window units, the reverse of the app's input path.
+            const wnk::Point px = r.mapping().to_pixels({st.x, st.y});
+            int ww = 0, wh = 0;
+            SDL_GetWindowSize(window, &ww, &wh);
+            const int wx = static_cast<int>(px.x * ww / std::max(1, dw));
+            const int wy = static_cast<int>(px.y * wh / std::max(1, dh));
+            switch (st.kind) {
+                case Step::Key:
+                    push(st.key, true);
+                    push(st.key, false);
+                    break;
+                case Step::Move: push_motion(wx, wy); break;
+                case Step::Click:
+                    push_motion(wx, wy);
+                    push_button(wx, wy, true);
+                    push_button(wx, wy, false);
+                    break;
+                case Step::Wheel: push_wheel(static_cast<int>(st.y)); break;
+            }
             ++next_;
         }
         if (next_ < keys_.size() || frame < first + keys_.size() * gap + 60) return false;
@@ -101,6 +141,31 @@ class Script {
     }
 
  private:
+    static void push_motion(int x, int y) {
+        SDL_Event ev{};
+        ev.type = SDL_MOUSEMOTION;
+        ev.motion.x = x;
+        ev.motion.y = y;
+        ev.motion.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&ev);
+    }
+    static void push_button(int x, int y, bool down) {
+        SDL_Event ev{};
+        ev.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+        ev.button.button = SDL_BUTTON_LEFT;
+        ev.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+        ev.button.x = x;
+        ev.button.y = y;
+        ev.button.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&ev);
+    }
+    static void push_wheel(int y) {
+        SDL_Event ev{};
+        ev.type = SDL_MOUSEWHEEL;
+        ev.wheel.y = y;
+        ev.wheel.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&ev);
+    }
     static void push(SDL_Scancode sc, bool down) {
         SDL_Event ev{};
         ev.type = down ? SDL_KEYDOWN : SDL_KEYUP;
@@ -120,7 +185,7 @@ class Script {
         }
         if (s != nullptr) SDL_FreeSurface(s);
     }
-    std::vector<SDL_Scancode> keys_;
+    std::vector<Step> keys_;
     size_t next_ = 0;
     std::string shot_;
 };
@@ -174,13 +239,16 @@ class DetailsScreen : public Screen {
     }
 };
 
+// Sidebar entry: with the D-pad the section follows focus; with the pointer it changes on click, so
+// sweeping the pointer across the sidebar does not flip through every section (seen on the TV).
 class NavItem : public Button {
  public:
-    NavItem(std::string text, std::function<void(Ui &)> on_focus) : Button(std::move(text)), on_focus_(std::move(on_focus)) {
+    NavItem(std::string text, std::function<void(Ui &)> on_select) : Button(std::move(text)), on_select_(on_select) {
         set_align(Align::Stretch, Align::Start);
+        set_on_click(std::move(on_select));
     }
     void on_focus_changed(Ui &ui, bool focused) override {
-        if (focused && on_focus_) on_focus_(ui);
+        if (focused && on_select_ && ui.focus_source() != FocusSource::Pointer) on_select_(ui);
     }
     bool selected = false;  // the section shown on the right, marked even when focus is elsewhere
 
@@ -193,7 +261,7 @@ class NavItem : public Button {
     }
 
  private:
-    std::function<void(Ui &)> on_focus_;
+    std::function<void(Ui &)> on_select_;
 };
 
 class HomeScreen : public Screen {
@@ -366,7 +434,29 @@ class App {
     void on_key(const SDL_Event &ev) {
         auto key = wnk::input::key_event_from_sdl(ev);
         if (!key) return;
+        if (key->down) {
+            const auto *b = mapper_.keymap().find(key->scancode, key->keycode);
+            WNK_LOGI("key", "down sc=%d kc=0x%x repeat=%d action=%s pointer=%d", key->scancode, key->keycode,
+                     key->repeat ? 1 : 0, b != nullptr ? wnk::input::action_name(b->action) : "unmapped",
+                     ui_.pointer_active() ? 1 : 0);
+        }
         if (auto a = mapper_.map(*key)) handle(*a);
+    }
+
+    void on_pointer(const wnk::input::PointerEvent &p) {
+        using T = wnk::input::PointerEvent::Type;
+        const bool hit = ui_.handle_pointer(p);
+        const wnk::Point l = ui_.pointer_position();
+        View *f = ui_.focused();
+        const char *name = f != nullptr ? f->name.c_str() : "<none>";
+        if (p.type == T::Move) {
+            // Rate-limited: motion arrives at the remote's report rate.
+            if (p.time_ms - last_move_log_ < 1000 && moves_logged_ > 0) return;
+            last_move_log_ = p.time_ms;
+            ++moves_logged_;
+        }
+        WNK_LOGI("pointer", "%s px=(%.0f,%.0f) logical=(%.0f,%.0f) button=%d wheel=%.1f hit=%d focus=%s",
+                 wnk::input::pointer_type_name(p.type), p.x, p.y, l.x, l.y, p.button, p.wheel, hit ? 1 : 0, name);
     }
 
     void on_focus_lost(Uint32 now) {
@@ -380,6 +470,20 @@ class App {
             last_focus_ = f;
             WNK_LOGI("focus", "focus %s", f != nullptr ? f->name.c_str() : "<none>");
         }
+    }
+
+    struct Perf {
+        int n = 0, late = 0;  // frames, intervals over 20 ms (a missed vsync at 60 Hz)
+        double interval_sum = 0, interval_max = 0;
+        double events_max = 0, update_max = 0, draw_max = 0, finish_max = 0, swap_sum = 0, swap_max = 0;
+    };
+    void perf_log(Uint64 frames, const Perf &p, const wnk::render::RenderStats &rs) {
+        const auto s = ui_.stats();
+        WNK_LOGI("perf", "frames %llu: interval avg %.2f max %.2f ms, late %d; max ms events %.2f update %.2f "
+                 "draw %.2f finish %.2f swap %.2f (avg %.2f); draw calls %u, quads %u, textures %u, views %zu",
+                 static_cast<unsigned long long>(frames), p.interval_sum / p.n, p.interval_max, p.late, p.events_max,
+                 p.update_max, p.draw_max, p.finish_max, p.swap_max, p.swap_sum / p.n, rs.draw_calls, rs.quads,
+                 rs.textures, s.views);
     }
 
     void shutdown_log() {
@@ -414,6 +518,8 @@ class App {
     HomeScreen *home_ = nullptr;
     View *last_focus_ = nullptr;
     size_t depth_ = 0;
+    Uint32 last_move_log_ = 0;
+    int moves_logged_ = 0;
     bool running_ = true;
     Uint32 last_back_ = 0;
 };
@@ -500,15 +606,29 @@ int main(int argc, char **argv) {
                 const double freq = static_cast<double>(SDL_GetPerformanceFrequency());
                 Uint64 prev = SDL_GetPerformanceCounter();
                 Uint64 frames = 0;
+                App::Perf perf;
+                auto ms_since = [freq](Uint64 t) { return (SDL_GetPerformanceCounter() - t) * 1000.0 / freq; };
                 bool quit = false;
                 while (!quit && app.running()) {
+                    const Uint64 t_events = SDL_GetPerformanceCounter();
                     SDL_Event ev;
                     while (SDL_PollEvent(&ev)) {
                         switch (ev.type) {
                             case SDL_QUIT: quit = true; break;
                             case SDL_KEYDOWN:
-                            case SDL_KEYUP: app.on_key(ev); break;
+                            case SDL_KEYUP:
+                                // SDL-webOS announces the pointer appearing/hiding as pseudo-keys.
+                                if (auto p = wnk::input::pointer_event_from_sdl(ev, window)) app.on_pointer(*p);
+                                app.on_key(ev);
+                                break;
+                            case SDL_MOUSEMOTION:
+                            case SDL_MOUSEBUTTONDOWN:
+                            case SDL_MOUSEBUTTONUP:
+                            case SDL_MOUSEWHEEL:
+                                if (auto p = wnk::input::pointer_event_from_sdl(ev, window)) app.on_pointer(*p);
+                                break;
                             case SDL_WINDOWEVENT:
+                                if (auto p = wnk::input::pointer_event_from_sdl(ev, window)) app.on_pointer(*p);
                                 if (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST) app.on_focus_lost(SDL_GetTicks());
                                 if (ev.window.event == SDL_WINDOWEVENT_CLOSE) quit = true;
                                 break;
@@ -518,20 +638,39 @@ int main(int argc, char **argv) {
                         if (!app.running()) break;
                     }
                     if (quit || !app.running()) break;
+                    perf.events_max = std::max(perf.events_max, ms_since(t_events));
                     const Uint64 now = SDL_GetPerformanceCounter();
                     const float dt = static_cast<float>((now - prev) / freq);
                     prev = now;
+                    if (frames > 0) {
+                        perf.interval_sum += dt * 1000.0;
+                        perf.interval_max = std::max(perf.interval_max, static_cast<double>(dt) * 1000.0);
+                        if (dt * 1000.0 > 20.0) ++perf.late;
+                    }
                     dispatcher.drain(32, std::chrono::milliseconds(4));
                     app.frame(std::min(dt, 0.1f));
+                    perf.update_max = std::max(perf.update_max, ms_since(now));
+                    const Uint64 t_draw = SDL_GetPerformanceCounter();
                     int dw = 0, dh = 0;
                     SDL_GL_GetDrawableSize(window, &dw, &dh);
                     renderer->begin_frame(dw, dh);
                     renderer->clear(theme.background);
                     app.ui().draw();
+                    perf.draw_max = std::max(perf.draw_max, ms_since(t_draw));
+                    const Uint64 t_finish = SDL_GetPerformanceCounter();
                     renderer->end_frame();
                     textures.end_frame();
-                    if (script.step(frames, *renderer, dw, dh)) quit = true;
+                    perf.finish_max = std::max(perf.finish_max, ms_since(t_finish));
+                    if (script.step(frames, *renderer, window, dw, dh)) quit = true;
+                    const Uint64 t_swap = SDL_GetPerformanceCounter();
                     SDL_GL_SwapWindow(window);
+                    const double swap_ms = ms_since(t_swap);
+                    perf.swap_sum += swap_ms;
+                    perf.swap_max = std::max(perf.swap_max, swap_ms);
+                    if (++perf.n == 300) {
+                        app.perf_log(frames + 1, perf, renderer->stats());
+                        perf = App::Perf{};
+                    }
                     ++frames;
                     const double frame_ms = (SDL_GetPerformanceCounter() - now) * 1000.0 / freq;
                     if (frame_ms < 4.0) SDL_Delay(static_cast<Uint32>(1000.0 / 60.0 - frame_ms));

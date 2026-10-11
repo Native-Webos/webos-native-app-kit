@@ -28,6 +28,28 @@ using F = KeyBinding::Field;
 
 }  // namespace
 
+const char *pointer_type_name(PointerEvent::Type t) {
+    switch (t) {
+        case PointerEvent::Type::Move: return "move";
+        case PointerEvent::Type::Press: return "press";
+        case PointerEvent::Type::Release: return "release";
+        case PointerEvent::Type::Wheel: return "wheel";
+        case PointerEvent::Type::Shown: return "shown";
+        case PointerEvent::Type::Hidden: return "hidden";
+        case PointerEvent::Type::Left: return "left";
+    }
+    return "?";
+}
+
+std::optional<PointerEvent> pointer_visibility_from_key(const KeyEvent &key) {
+    if (!key.down || key.repeat) return std::nullopt;
+    if (key.scancode != kScancodeCursorShow && key.scancode != kScancodeCursorHide) return std::nullopt;
+    PointerEvent p;
+    p.type = key.scancode == kScancodeCursorShow ? PointerEvent::Type::Shown : PointerEvent::Type::Hidden;
+    p.time_ms = key.time_ms;
+    return p;
+}
+
 const char *action_name(Action action) {
     switch (action) {
         case Action::Unknown: return "Unknown";

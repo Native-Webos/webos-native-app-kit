@@ -92,3 +92,9 @@ if (TARGET wnk-tvui)
     wnk_tvui_e2e(dialog_focus_restore "Left,Down,Down,Right,Return,Right,Escape" "dialog closed focus=widgets.dialog")
     wnk_tvui_e2e(double_back_exits "Escape,Escape" "Back twice at root: quitting")
 endif ()
+if (TARGET wnk-tvui)
+    # Pointer: clicking the second card of the first rail, and the wheel over the browse grid (4 columns,
+    # two lines down puts item 8 under a stationary pointer). Positions in logical 1920x1080 units.
+    wnk_tvui_e2e(pointer_click_opens_details "move@904:230,click@904:230" "open details for item 1")
+    wnk_tvui_e2e(pointer_wheel_scrolls_grid "Left,Down,move@556:292,wheel@-2" "focus grid.item8")
+endif ()

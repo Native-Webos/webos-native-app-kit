@@ -119,4 +119,38 @@ class ActionMapper {
     std::vector<Held> held_;
 };
 
+// ---- pointer (Magic Remote) ------------------------------------------------------------------------
+//
+// The Magic Remote moves an on-screen pointer. SDL-webOS delivers it as ordinary SDL mouse events in
+// window coordinates (wayland pointer → SDL_MOUSEMOTION/BUTTON/WHEEL) and announces the pointer
+// appearing or hiding as two pseudo-keys in its webOS scancode block (484/485, include/SDL_scancode.h).
+// Whether the remote's OK in pointer mode arrives as a left click, as Enter, or as both is not knowable
+// from source; apps must accept either (record in docs/compatibility/records.json once measured).
+
+struct PointerEvent {
+    enum class Type : uint8_t {
+        Move,     // position changed
+        Press,    // button down at position
+        Release,  // button up at position
+        Wheel,    // wheel turned; position is not reported (use the last Move)
+        Shown,    // pointer appeared (SDL-webOS CursorShow key)
+        Hidden,   // pointer hidden: timeout or the user switched to the D-pad (CursorHide key)
+        Left,     // pointer left the window
+    };
+    Type type = Type::Move;
+    float x = 0, y = 0;  // drawable pixels (not window units, not logical units)
+    int button = 1;      // 1 left, 2 middle, 3 right
+    float wheel = 0;     // notches; positive = away from the user (scroll towards the start)
+    uint32_t time_ms = 0;
+};
+
+const char *pointer_type_name(PointerEvent::Type t);
+
+// SDL-webOS 2.x scancodes for the pointer show/hide pseudo-keys (include/SDL_scancode.h).
+inline constexpr int kScancodeCursorShow = 484;
+inline constexpr int kScancodeCursorHide = 485;
+
+// Shown/Hidden for a key-down of the cursor pseudo-keys, nothing for every other key.
+std::optional<PointerEvent> pointer_visibility_from_key(const KeyEvent &key);
+
 }  // namespace wnk::input

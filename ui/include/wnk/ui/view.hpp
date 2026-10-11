@@ -14,7 +14,9 @@
 // scope's remembered focus while a screen is covered by another.
 //
 // Input: Ui::handle() offers each ActionEvent to the focused view, then to its ancestors, until one
-// returns true from on_action(). Unhandled arrows fall back to geometric focus movement.
+// returns true from on_action(). Unhandled arrows fall back to geometric focus movement. With the
+// Magic Remote pointer (Ui::handle_pointer) hovering a focusable view focuses it, a click is OK on it,
+// and the wheel goes to on_wheel() of the views under the pointer.
 //
 // Ownership and threading: parents own children through unique_ptr. Everything here runs on the
 // main thread. Views removed from a tree attached to a Ui are destroyed at the start of the next
@@ -148,6 +150,9 @@ class View {
     // Called on every ancestor of a newly focused view; `child` is this view's child on the path.
     virtual void on_descendant_focused(Ui &ui, View *child, View *focused);
     virtual void update(Ui &ui, float dt);
+    // Pointer wheel over this view or a descendant (bubbles like actions). `notches` > 0 means the
+    // wheel turned away from the user: scroll towards the start.
+    virtual bool on_wheel(Ui &ui, float notches);
 
     // Draws this view and its subtree (background, draw(), children, draw_over()).
     void draw_tree(Ui &ui);

@@ -13,6 +13,14 @@ namespace {
 
 constexpr double kToastFadeIn = 150, kToastFadeOut = 300;
 
+// Sets the focus source for the duration of a call.
+struct SourceScope {
+    SourceScope(FocusSource &slot, FocusSource value) : slot_(slot), saved_(slot) { slot_ = value; }
+    ~SourceScope() { slot_ = saved_; }
+    FocusSource &slot_;
+    FocusSource saved_;
+};
+
 // Counts nested entry points so the graveyard is only emptied by the outermost one.
 struct Entry {
     explicit Entry(int &depth) : depth_(depth) { ++depth_; }
@@ -250,7 +258,26 @@ bool Ui::handle(const input::ActionEvent &ev) {
         graveyard_.clear();
     }
     refresh();
+    SourceScope source(focus_source_, FocusSource::Key);
+    const bool arrow = ev.action == input::Action::Up || ev.action == input::Action::Down ||
+                       ev.action == input::Action::Left || ev.action == input::Action::Right;
+    if (arrow && ev.phase != input::Phase::Release) pointer_active_ = false;  // the D-pad takes over
+    if (route(ev)) return true;
+    if (ev.phase == input::Phase::Release) return false;
+    focus::Direction dir;
+    switch (ev.action) {
+        case input::Action::Up: dir = focus::Direction::Up; break;
+        case input::Action::Down: dir = focus::Direction::Down; break;
+        case input::Action::Left: dir = focus::Direction::Left; break;
+        case input::Action::Right: dir = focus::Direction::Right; break;
+        default: return false;
+    }
+    const bool moved = fm_.move(dir);
+    dispatch_focus_events();
+    return moved;
+}
 
+bool Ui::route(const input::ActionEvent &ev) {
     View *target = focused();
     if (target == nullptr) {
         // Nothing focused: offer the event to the top dialog, else down the visible content.
@@ -276,18 +303,112 @@ bool Ui::handle(const input::ActionEvent &ev) {
             return true;
         }
     }
-    if (ev.phase == input::Phase::Release) return false;
-    focus::Direction dir;
-    switch (ev.action) {
-        case input::Action::Up: dir = focus::Direction::Up; break;
-        case input::Action::Down: dir = focus::Direction::Down; break;
-        case input::Action::Left: dir = focus::Direction::Left; break;
-        case input::Action::Right: dir = focus::Direction::Right; break;
-        default: return false;
+    return false;
+}
+
+// ---- pointer --------------------------------------------------------------------------------------
+
+View *Ui::hit(View &v, Point p, Point offset, Rect clip, bool focusable_only) {
+    if (!v.visible_ || v.opacity_ <= 0.001f) return nullptr;
+    const Point self{offset.x + v.translation_.x, offset.y + v.translation_.y};
+    const Rect r{v.frame_.x + self.x, v.frame_.y + self.y, v.frame_.w, v.frame_.h};
+    const Rect child_clip = v.clips_children() ? clip.intersect(r) : clip;
+    const Point s = v.scroll_offset();
+    const Point child{self.x - s.x, self.y - s.y};
+    // Last child first: it is drawn on top.
+    for (auto it = v.children_.rbegin(); it != v.children_.rend(); ++it) {
+        if (View *h = hit(**it, p, child, child_clip, focusable_only)) return h;
     }
-    const bool moved = fm_.move(dir);
+    if (!r.contains(p) || !clip.contains(p)) return nullptr;
+    if (!focusable_only) return &v;
+    return v.focusable_ && v.enabled_ ? &v : nullptr;
+}
+
+View *Ui::hit_focusable(Point p) {
+    const Rect canvas{0, 0, canvas_.w, canvas_.h};
+    if (Dialog *d = top_dialog()) return hit(*d, p, {0, 0}, canvas, true);  // modal: nothing else is live
+    return hit(*root_, p, {0, 0}, canvas, true);
+}
+
+void Ui::hover() {
+    View *v = hit_focusable(pointer_);
+    if (v == nullptr || v == focused()) return;
+    SourceScope source(focus_source_, FocusSource::Pointer);
+    fm_.focus(v->id_);
     dispatch_focus_events();
-    return moved;
+}
+
+bool Ui::handle_pointer(const input::PointerEvent &e) {
+    return handle_pointer_logical(e, r_.mapping().to_logical({e.x, e.y}));
+}
+
+bool Ui::handle_pointer_logical(const input::PointerEvent &e, Point p) {
+    Entry entry(depth_);
+    if (entry.outermost()) {
+        views_.clear();
+        graveyard_.clear();
+    }
+    refresh();
+    using T = input::PointerEvent::Type;
+    switch (e.type) {
+        case T::Move:
+            pointer_active_ = true;
+            pointer_ = p;
+            hover();
+            return hit_focusable(p) != nullptr;
+        case T::Press: {
+            pointer_active_ = true;
+            pointer_ = p;
+            hover();
+            if (e.button != 1) return false;
+            View *v = hit_focusable(p);
+            pressed_ = v != nullptr ? v->id_ : 0;
+            return v != nullptr;
+        }
+        case T::Release: {
+            pointer_ = p;
+            if (e.button != 1) return false;
+            View *v = hit_focusable(p);
+            const bool same = v != nullptr && v->id_ == pressed_;
+            pressed_ = 0;
+            if (!same) return false;  // released somewhere else: no click
+            SourceScope source(focus_source_, FocusSource::Pointer);
+            if (!is_focused(v)) {
+                fm_.focus(v->id_);
+                dispatch_focus_events();
+            }
+            // A click is OK on the clicked view: the same path as the remote's OK key.
+            input::ActionEvent ok;
+            ok.action = input::Action::Confirm;
+            ok.source.time_ms = e.time_ms;
+            const bool handled = route(ok);
+            ok.phase = input::Phase::Release;
+            route(ok);
+            return handled;
+        }
+        case T::Wheel: {
+            const Rect canvas{0, 0, canvas_.w, canvas_.h};
+            Dialog *d = top_dialog();
+            View *target = d != nullptr ? hit(*d, pointer_, {0, 0}, canvas, false)
+                                        : hit(*root_, pointer_, {0, 0}, canvas, false);
+            for (View *v = target; v != nullptr; v = v->parent_) {
+                if (v->on_wheel(*this, e.wheel)) {
+                    refresh();
+                    return true;  // what is under the pointer changes as it scrolls: update() re-hovers
+                }
+            }
+            return false;
+        }
+        case T::Shown:
+            pointer_active_ = true;  // position unknown until the next Move
+            return false;
+        case T::Hidden:
+        case T::Left:
+            pointer_active_ = false;
+            pressed_ = 0;
+            return false;
+    }
+    return false;
 }
 
 // ---- frame ----------------------------------------------------------------------------------------
@@ -317,6 +438,8 @@ void Ui::update(float dt) {
     update_tree(*this, *root_, dt);
     update_tree(*this, *overlay_, dt);
     refresh();
+    // Content may have moved under a stationary pointer (wheel scrolling, screen changes).
+    if (pointer_active_) hover();
 
     if (!toasts_.empty()) {
         Toast &t = toasts_.front();

@@ -127,3 +127,21 @@ TEST("action names are defined for every action") {
         CHECK(std::string(action_name(static_cast<Action>(a))) != "?");
     }
 }
+
+TEST("pointer: SDL-webOS cursor pseudo-keys become Shown/Hidden, other keys do not") {
+    KeyEvent k;
+    k.scancode = kScancodeCursorShow;
+    k.down = true;
+    auto p = pointer_visibility_from_key(k);
+    REQUIRE(p.has_value());
+    CHECK(p->type == PointerEvent::Type::Shown);
+    k.scancode = kScancodeCursorHide;
+    p = pointer_visibility_from_key(k);
+    REQUIRE(p.has_value());
+    CHECK(p->type == PointerEvent::Type::Hidden);
+    k.down = false;
+    CHECK(!pointer_visibility_from_key(k).has_value());
+    k.down = true;
+    k.scancode = 40;
+    CHECK(!pointer_visibility_from_key(k).has_value());
+}

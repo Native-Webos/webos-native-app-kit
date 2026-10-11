@@ -212,10 +212,18 @@ void CollectionView::on_descendant_focused(Ui &ui, View *child, View *) {
         if (v != child) continue;
         const bool changed = i != notified_index_;
         focused_index_ = notified_index_ = i;
-        ensure_visible(i, true);
+        if (ui.focus_source() != FocusSource::Pointer) ensure_visible(i, true);
         if (changed && on_focus) on_focus(ui, i);
         return;
     }
+}
+
+bool CollectionView::on_wheel(Ui &, float notches) {
+    // The wheel scrolls vertically: a horizontal rail passes it on, so a page of rails scrolls.
+    if (count_ == 0 || axis_ != Axis::Vertical) return false;
+    // One line per notch; the focused cell may scroll out of view and stays alive until it does.
+    scroll_.target = std::clamp(scroll_.target - notches * line_extent(), 0.0f, max_scroll());
+    return true;
 }
 
 void CollectionView::update(Ui &ui, float dt) {

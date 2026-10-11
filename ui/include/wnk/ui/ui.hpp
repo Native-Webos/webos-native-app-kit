@@ -75,6 +75,10 @@ class ImageSource {
     virtual render::TextureId texture(const std::string &key) = 0;
 };
 
+// What moved focus last; scrolling containers follow keyboard and programmatic focus but not hover,
+// which would slide the hovered item away from under a stationary pointer.
+enum class FocusSource : uint8_t { Program, Key, Pointer };
+
 struct UiStats {
     size_t views = 0;        // in the content and overlay trees, last sync
     size_t focus_nodes = 0;  // registered with the FocusManager
@@ -103,6 +107,18 @@ class Ui {
 
     // ---- frame -------------------------------------------------------------------------------------
     bool handle(const input::ActionEvent &e);
+    // Magic Remote / mouse pointer. Returns true if the event hit something. Positions in the event
+    // are drawable pixels; they are mapped to logical units with the renderer's current mapping, so
+    // call this after the first frame has been drawn.
+    bool handle_pointer(const input::PointerEvent &e);
+    // Same, with the position already in logical units (tests, synthetic input).
+    bool handle_pointer_logical(const input::PointerEvent &e, Point logical);
+    // True from pointer movement until an arrow key, a Hidden event or the pointer leaving.
+    bool pointer_active() const { return pointer_active_; }
+    Point pointer_position() const { return pointer_; }
+    FocusSource focus_source() const { return focus_source_; }
+    // Topmost focusable, enabled view under `p` (logical units), honouring clipping and modal dialogs.
+    View *hit_focusable(Point p);
     void update(float dt);
     void draw();
     // Runs layout now if anything invalidated it, and re-syncs focus. Entry points call this already.
@@ -146,6 +162,7 @@ class Ui {
  private:
     friend class View;
     void refresh();  // layout if dirty + focus sync, without destroying retired views
+    bool route(const input::ActionEvent &e);  // focused view → ancestors
     void walk(View &v, focus::ScopeId scope, Point offset, bool shown, std::vector<focus::NodeSpec> &on,
               std::vector<focus::NodeSpec> &off);
     bool attached(const View &v) const;
@@ -156,6 +173,8 @@ class Ui {
     void step_ring(float dt);
     void draw_ring();
     void draw_toasts();
+    void hover();
+    View *hit(View &v, Point p, Point offset, Rect clip, bool focusable_only);
 
     render::Renderer &r_;
     Theme theme_;
@@ -190,6 +209,11 @@ class Ui {
         double shown_at = -1;
     };
     std::deque<Toast> toasts_;
+    // Pointer.
+    bool pointer_active_ = false;
+    Point pointer_;
+    ViewId pressed_ = 0;
+    FocusSource focus_source_ = FocusSource::Program;
 };
 
 }  // namespace wnk::ui

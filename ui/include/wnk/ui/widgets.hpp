@@ -80,6 +80,7 @@ class ScrollView : public View {
     void layout_content(Ui &ui, const Rect &content) override;
     void on_descendant_focused(Ui &ui, View *child, View *focused) override;
     void update(Ui &ui, float dt) override;
+    bool on_wheel(Ui &ui, float notches) override;
 
  private:
     Smoothed scroll_;

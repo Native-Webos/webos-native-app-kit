@@ -691,3 +691,145 @@ TEST("progress bar and animation helpers move towards their targets") {
     CHECK_EQ(tw.value(1200), 10.0f);
     CHECK(tw.value(1100) > 5.0f);  // ease-out: past halfway at half time
 }
+
+// ---- pointer (Magic Remote) -----------------------------------------------------------------------
+
+namespace {
+input::PointerEvent pev(input::PointerEvent::Type t, float wheel = 0) {
+    input::PointerEvent e;
+    e.type = t;
+    e.wheel = wheel;
+    return e;
+}
+bool move(Env &env, Point p) { return env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Move), p); }
+bool click(Env &env, Point p) {
+    env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Press), p);
+    return env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Release), p);
+}
+Point centre(const View &v) {
+    const Rect r = v.screen_rect();
+    return {r.cx(), r.cy()};
+}
+}  // namespace
+
+TEST("pointer: hovering focuses, a click is OK, empty space changes nothing") {
+    Env env;
+    int clicks = 0;
+    auto &row = env.ui.root().add<Row>(100);
+    row.set_align(Align::Start, Align::Start);
+    auto &a = static_cast<Button &>(row.add_child(button("A")));
+    auto &b = static_cast<Button &>(row.add_child(button("B", &clicks)));
+    env.ui.focus(&a);
+    env.frame();
+    CHECK(move(env, centre(b)));
+    CHECK(env.ui.is_focused(&b));
+    CHECK(env.ui.focus_source() == FocusSource::Program);  // only during the hover itself
+    CHECK(!move(env, {1800, 1000}));
+    CHECK(env.ui.is_focused(&b));  // focus stays where it was
+    CHECK(click(env, centre(a)));
+    CHECK(env.ui.is_focused(&a));
+    CHECK_EQ(clicks, 0);
+    CHECK(click(env, centre(b)));
+    CHECK_EQ(clicks, 1);
+    // Press on one view, release on another: no click.
+    env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Press), centre(a));
+    CHECK(!env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Release), centre(b)));
+    CHECK_EQ(clicks, 1);
+}
+
+TEST("pointer: an arrow key hands control back to the D-pad") {
+    Env env;
+    auto &row = env.ui.root().add<Row>(100);
+    row.set_align(Align::Start, Align::Start);
+    auto &a = static_cast<Button &>(row.add_child(button("A")));
+    auto &b = static_cast<Button &>(row.add_child(button("B")));
+    env.ui.focus(&a);
+    env.frame();
+    move(env, centre(a));
+    CHECK(env.ui.pointer_active());
+    env.press(Action::Right);
+    CHECK(!env.ui.pointer_active());
+    env.frames(3);  // no re-hover pulling focus back under the stationary pointer
+    CHECK(env.ui.is_focused(&b));
+    env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Shown), {});
+    CHECK(env.ui.pointer_active());
+    env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Hidden), {});
+    CHECK(!env.ui.pointer_active());
+}
+
+TEST("pointer: cells clipped out of a collection cannot be hovered; hover does not scroll") {
+    Grid1000 t;
+    // The overscan line below the viewport exists but is clipped away.
+    View *below = t.grid->cell(15);
+    REQUIRE(below != nullptr);
+    const Point under = centre(*below);
+    CHECK(under.y > t.grid->frame().bottom());
+    CHECK(t.env.ui.hit_focusable(under) == nullptr);
+    // A partly visible cell at the bottom edge can be hovered, but the grid does not scroll to it.
+    View *edge = t.grid->cell(10);
+    REQUIRE(edge != nullptr);
+    const Rect er = edge->screen_rect();
+    CHECK(er.bottom() > t.grid->frame().bottom());
+    CHECK(move(t.env, {er.cx(), er.y + 10}));
+    CHECK_EQ(t.grid->focused_index(), size_t{10});
+    t.env.frames(30);
+    CHECK_EQ(t.grid->scroll_target(), 0.0f);
+    // The same cell reached with the D-pad scrolls into view.
+    t.env.press(Action::Up);
+    t.env.press(Action::Down);
+    CHECK(t.grid->scroll_target() > 0);
+}
+
+TEST("pointer: the wheel scrolls the collection under the pointer and focus follows the pointer") {
+    Grid1000 t;
+    View *c0 = t.grid->cell(0);
+    REQUIRE(c0 != nullptr);
+    const Point p = centre(*c0);
+    move(t.env, p);
+    CHECK(t.env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Wheel, -3), {}));
+    CHECK(t.grid->scroll_target() > 0);
+    t.env.frames(60);
+    // Three lines scrolled: the cell now under the pointer is three lines further on.
+    CHECK_EQ(t.grid->focused_index(), size_t{15});
+    t.env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Wheel, 10), {});
+    t.env.frames(60);
+    CHECK_EQ(t.grid->scroll_target(), 0.0f);  // clamped at the start
+    CHECK_EQ(t.grid->focused_index(), size_t{0});
+}
+
+TEST("pointer: with a dialog open only the dialog can be hovered or clicked") {
+    Env env;
+    int clicks = 0;
+    auto &screen = env.ui.root().add<ButtonsScreen>(3);
+    env.ui.focus(screen.buttons[0]);
+    env.frame();
+    auto d = std::make_unique<Dialog>("Sure?");
+    auto &ok = d->add_button("OK", [&clicks](Ui &) { ++clicks; });
+    env.ui.show_dialog(std::move(d));
+    env.frames(20);
+    CHECK(!move(env, centre(*screen.buttons[2])));
+    CHECK(env.ui.is_focused(&ok));
+    CHECK(click(env, centre(ok)));
+    env.frame();
+    CHECK_EQ(clicks, 1);
+    CHECK_EQ(env.ui.dialog_count(), size_t{0});
+    CHECK(env.ui.is_focused(screen.buttons[0]));
+}
+
+TEST("pointer: clicking a card in a rail activates that item") {
+    Env env;
+    auto &rail = env.ui.root().add<CollectionView>(Axis::Horizontal, 1, Size{200, 300}, 20);
+    rail.set_width(Dim::fixed(1200)).set_align(Align::Start, Align::Start);
+    rail.set_items(30, [](Ui &, size_t i) { return std::make_unique<Button>(std::to_string(i)); });
+    std::vector<size_t> hits;
+    rail.on_activate = [&hits](Ui &, size_t i) { hits.push_back(i); };
+    env.frames(2);
+    View *c3 = rail.cell(3);
+    REQUIRE(c3 != nullptr);
+    CHECK(click(env, centre(*c3)));
+    REQUIRE(hits.size() == 1);
+    CHECK_EQ(hits[0], size_t{3});
+    // The wheel over a horizontal rail is left for an outer (vertical) scroller.
+    CHECK(!env.ui.handle_pointer_logical(pev(input::PointerEvent::Type::Wheel, -1), {}));
+}
+

@@ -57,6 +57,7 @@ class CollectionView : public View {
     bool on_action(Ui &ui, const input::ActionEvent &e) override;
     void on_descendant_focused(Ui &ui, View *child, View *focused) override;
     void update(Ui &ui, float dt) override;
+    bool on_wheel(Ui &ui, float notches) override;
 
  private:
     size_t lines() const;

@@ -14,6 +14,8 @@ static_assert(SDL_SCANCODE_AUDIOREWIND == 285 && SDL_SCANCODE_AUDIOFASTFORWARD =
 #if defined(WNK_SDL_WEBOS)
 static_assert(SDL_SCANCODE_WEBOS_BACK == 482 && SDL_SCANCODE_WEBOS_EXIT == 505 && SDL_SCANCODE_WEBOS_HOME == 384);
 static_assert(SDL_SCANCODE_WEBOS_RED == 486 && SDL_SCANCODE_WEBOS_BLUE == 489 && SDL_SCANCODE_WEBOS_CH_UP == 480);
+static_assert(SDL_SCANCODE_WEBOS_CURSOR_SHOW == wnk::input::kScancodeCursorShow &&
+              SDL_SCANCODE_WEBOS_CURSOR_HIDE == wnk::input::kScancodeCursorHide);
 #endif
 
 namespace wnk::input {
@@ -27,6 +29,55 @@ std::optional<KeyEvent> key_event_from_sdl(const SDL_Event &event) {
     k.repeat = event.key.repeat != 0;
     k.time_ms = event.key.timestamp;
     return k;
+}
+
+std::optional<PointerEvent> pointer_event_from_sdl(const SDL_Event &event, SDL_Window *window) {
+    float sx = 1, sy = 1;
+    if (window != nullptr) {
+        int ww = 0, wh = 0, dw = 0, dh = 0;
+        SDL_GetWindowSize(window, &ww, &wh);
+        SDL_GL_GetDrawableSize(window, &dw, &dh);
+        if (ww > 0 && wh > 0 && dw > 0 && dh > 0) {
+            sx = static_cast<float>(dw) / static_cast<float>(ww);
+            sy = static_cast<float>(dh) / static_cast<float>(wh);
+        }
+    }
+    PointerEvent p;
+    switch (event.type) {
+        case SDL_MOUSEMOTION:
+            if (event.motion.which == SDL_TOUCH_MOUSEID) return std::nullopt;
+            p.type = PointerEvent::Type::Move;
+            p.x = static_cast<float>(event.motion.x) * sx;
+            p.y = static_cast<float>(event.motion.y) * sy;
+            p.time_ms = event.motion.timestamp;
+            return p;
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP:
+            if (event.button.which == SDL_TOUCH_MOUSEID) return std::nullopt;
+            p.type = event.type == SDL_MOUSEBUTTONDOWN ? PointerEvent::Type::Press : PointerEvent::Type::Release;
+            p.x = static_cast<float>(event.button.x) * sx;
+            p.y = static_cast<float>(event.button.y) * sy;
+            p.button = event.button.button;
+            p.time_ms = event.button.timestamp;
+            return p;
+        case SDL_MOUSEWHEEL:
+            if (event.wheel.which == SDL_TOUCH_MOUSEID) return std::nullopt;
+            p.type = PointerEvent::Type::Wheel;
+            p.wheel = static_cast<float>(event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y);
+            p.time_ms = event.wheel.timestamp;
+            return p;
+        case SDL_WINDOWEVENT:
+            if (event.window.event != SDL_WINDOWEVENT_LEAVE) return std::nullopt;
+            p.type = PointerEvent::Type::Left;
+            p.time_ms = event.window.timestamp;
+            return p;
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+            if (auto k = key_event_from_sdl(event)) return pointer_visibility_from_key(*k);
+            return std::nullopt;
+        default:
+            return std::nullopt;
+    }
 }
 
 }  // namespace wnk::input

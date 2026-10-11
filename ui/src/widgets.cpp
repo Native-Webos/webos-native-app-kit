@@ -212,7 +212,8 @@ void ScrollView::layout_content(Ui &ui, const Rect &content) {
     scroll_.value = std::clamp(scroll_.value, 0.0f, max_scroll_);
 }
 
-void ScrollView::on_descendant_focused(Ui &, View *, View *focused) {
+void ScrollView::on_descendant_focused(Ui &ui, View *, View *focused) {
+    if (ui.focus_source() == FocusSource::Pointer) return;  // hovering must not move the content
     const Rect c = content_rect();
     // Position of the focused view inside the scrolled content (nested scrolling is not combined).
     const Rect f = focused->frame();
@@ -224,6 +225,12 @@ void ScrollView::on_descendant_focused(Ui &, View *, View *focused) {
 }
 
 void ScrollView::update(Ui &, float dt) { scroll_.step(dt); }
+
+bool ScrollView::on_wheel(Ui &, float notches) {
+    if (max_scroll_ <= 0) return false;  // nothing to scroll: let an outer scroller have it
+    scroll_to(scroll_.target - notches * 160);
+    return true;
+}
 
 // ---- Label ----------------------------------------------------------------------------------------
 

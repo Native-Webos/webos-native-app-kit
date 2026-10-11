@@ -417,3 +417,78 @@ TEST("sidx: version 0 and 1 boxes give byte ranges and times; hierarchical ones 
         CHECK(!parse_sidx(b.data(), 20, 0, "u", &segs, &err));
     }
 }
+
+// ---- live ----------------------------------------------------------------------------------------
+
+TEST("ISO 8601 date-times: UTC, fractions, zones") {
+    int64_t us = 0;
+    REQUIRE(parse_iso_datetime("1970-01-01T00:00:00Z", &us));
+    CHECK_EQ(us, int64_t{0});
+    REQUIRE(parse_iso_datetime("2026-10-12T08:30:00.250Z", &us));
+    CHECK_EQ(us, int64_t{1791793800250000});
+    REQUIRE(parse_iso_datetime("2026-10-12T10:30:00.250+02:00", &us));
+    CHECK_EQ(us, int64_t{1791793800250000});
+    REQUIRE(parse_iso_datetime("2000-02-29T00:00:00", &us));  // no zone: UTC
+    CHECK_EQ(us, int64_t{951782400000000});
+    CHECK(!parse_iso_datetime("2026-13-01T00:00:00Z", &us));
+    CHECK(!parse_iso_datetime("yesterday", &us));
+}
+
+TEST("dash live: an endless SegmentTemplate lists what has arrived, back to the time-shift window") {
+    // Shaped like DASH-IF livesim2's testpic_2s.
+    const char *mpd = R"(<MPD type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S"
+        timeShiftBufferDepth="PT1M" suggestedPresentationDelay="PT6S"><Period id="P0" start="PT0S">
+      <AdaptationSet contentType="video" mimeType="video/mp4">
+        <SegmentTemplate media="$RepresentationID$/$Number$.m4s" initialization="$RepresentationID$/init.mp4" duration="2" startNumber="0"/>
+        <Representation id="V300" bandwidth="300000" width="640" height="360" codecs="avc1.64001e"/>
+      </AdaptationSet></Period>
+      <UTCTiming schemeIdUri="urn:mpeg:dash:utc:http-xsdate:2014" value="https://time.akamai.com/?iso"/></MPD>)";
+    Presentation p;
+    std::string err;
+    CHECK(!parse_mpd(mpd, "https://h/l/Manifest.mpd", &p, &err));  // no clock
+    const int64_t now = int64_t{1791793801} * 1000000 + 500000;    // ...:01.5
+    REQUIRE(parse_mpd(mpd, "https://h/l/Manifest.mpd", &p, &err, now));
+    CHECK(p.live);
+    CHECK_EQ(p.duration_us, kNoTime);
+    CHECK_EQ(p.update_period_us, int64_t{2000000});
+    CHECK_EQ(p.time_shift_us, int64_t{60000000});
+    CHECK_EQ(p.live_delay_us, int64_t{6000000});
+    CHECK_EQ(p.availability_start_us, int64_t{0});
+    CHECK_EQ(p.utc_timing_scheme, std::string("urn:mpeg:dash:utc:http-xsdate:2014"));
+    const auto &segs = p.renditions[0].segments;
+    REQUIRE(segs.size() == 30);  // 60 s of 2 s segments
+    // 1791793801.5 s elapsed: segment 895896899 (starting 1791793798) is the last complete one.
+    CHECK_EQ(segs.back().number, int64_t{895896899});
+    CHECK_EQ(segs.back().start_us, int64_t{1791793798000000});
+    CHECK_EQ(segs.back().url, std::string("https://h/l/V300/895896899.m4s"));
+    CHECK_EQ(segs.front().number, int64_t{895896870});
+}
+
+TEST("dash live: a SegmentTimeline ending in r=-1 repeats up to now") {
+    const char *mpd = R"(<MPD type="dynamic" availabilityStartTime="2026-10-12T08:00:00Z"><Period start="PT0S">
+      <AdaptationSet contentType="video"><SegmentTemplate timescale="1000" media="$Time$.m4s">
+        <SegmentTimeline><S t="0" d="4000" r="-1"/></SegmentTimeline></SegmentTemplate>
+        <Representation id="v" bandwidth="1" codecs="avc1.64001f"/></AdaptationSet></Period></MPD>)";
+    int64_t ast = 0;
+    REQUIRE(parse_iso_datetime("2026-10-12T08:00:00Z", &ast));
+    Presentation p;
+    std::string err;
+    REQUIRE(parse_mpd(mpd, "https://h/m.mpd", &p, &err, ast + 20500000));
+    const auto &segs = p.renditions[0].segments;
+    REQUIRE(segs.size() == 5);  // 0 ... 16 s: the 20 s one is still arriving at 20.5 s
+    CHECK_EQ(segs[4].url, std::string("https://h/16000.m4s"));
+    CHECK_EQ(segs[4].number, int64_t{5});
+}
+
+TEST("hls live: media sequence numbers and the target duration are kept") {
+    Rendition r;
+    bool live = false;
+    std::string err;
+    REQUIRE(parse_hls_media("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:1234\n#EXTINF:6,\na.ts\n#EXTINF:5.5,\nb.ts\n",
+                            "https://h/live.m3u8", &r, &live, &err));
+    CHECK(live);
+    CHECK_EQ(r.target_duration_us, int64_t{6000000});
+    REQUIRE(r.segments.size() == 2);
+    CHECK_EQ(r.segments[0].number, int64_t{1234});
+    CHECK_EQ(r.segments[1].number, int64_t{1235});
+}

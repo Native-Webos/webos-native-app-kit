@@ -26,7 +26,7 @@
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"ac3": false}                         never re-encode audio to AC-3 (audio Starfish cannot take
 //                                          then sends the file to NDL, as before)
-//   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..9)
+//   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..11)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
 #include "wnk/media/auto_backend.hpp"
@@ -257,7 +257,10 @@ class PlayerScreen : public Screen {
         const bool busy = s.state == PlayState::Opening || s.state == PlayState::Seeking;
         spinner_->set_visible(busy);
         status_->set_text(s.state == PlayState::Error ? "Error" : play_state_name(s.state));
-        time_->set_text(clock_text(s.position_us) + " / " + clock_text(s.duration_us) + (s.position_estimated ? "" : " ·"));
+        // A stream without a duration (live DASH/HLS) shows LIVE instead.
+        const bool live = s.duration_us == kNoTime && (s.info.container == "dash" || s.info.container == "hls");
+        time_->set_text(clock_text(s.position_us) + " / " + (live ? std::string("LIVE") : clock_text(s.duration_us)) +
+                        (s.position_estimated ? "" : " ·"));
         if (s.duration_us > 0 && s.position_us != kNoTime) progress_->set_value(static_cast<float>(s.position_us) / s.duration_us);
         if (s.state == PlayState::Error) detail_->set_text(s.error);
         // Controls hide during playback; paused, ended or failed keeps them up.
@@ -435,6 +438,10 @@ class Player : public wnk::app::Delegate {
             {"Mux test stream", "HLS · MPEG-TS · H.264 + AAC muxed", "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"},
             {"Shaka angel-one", "DASH · SegmentBase (sidx) · H.264 · AAC in six languages",
              "https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd"},
+            {"DASH-IF livesim2 (live)", "DASH · dynamic · 2 s segments · 1 min time-shift window",
+             "https://livesim2.dashif.org/livesim2/testpic_2s/Manifest.mpd"},
+            {"Unified Streaming (live)", "HLS · live · MPEG-TS · H.264 + AAC renditions",
+             "https://demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8"},
         };
         Ui &ui = ctx.ui();
         nav_ = &ui.root().add<Navigator>();

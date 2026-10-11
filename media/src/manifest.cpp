@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -274,16 +275,23 @@ std::string base_url_of(const XmlNode *n, const std::string &parent) {
 }
 
 // Segments of one Representation from its inherited segment information.
+// What a dynamic MPD's endless series needs: elapsed time since the period began, and the window.
+struct LiveClock {
+    bool live = false;
+    int64_t elapsed_us = kNoTime;  // now - availabilityStartTime - Period@start
+    int64_t window_us = 60000000;  // timeShiftBufferDepth
+};
+
 bool dash_segments(const SegmentInfo &si, const std::string &base, const std::string &rep_id, int64_t bandwidth,
                    int64_t period_start_us, int64_t period_duration_us, bool is_template, bool is_list, Rendition *r,
-                   std::string *error) {
+                   const LiveClock &clock, std::string *error) {
     const int64_t timescale = std::max<int64_t>(1, i64_or(si.get("timescale"), 1));
     const int64_t pto = i64_or(si.get("presentationTimeOffset"), 0);
     const int64_t start_number = i64_or(si.get("startNumber"), 1);
     const int64_t duration = i64_or(si.get("duration"), 0);
     r->time_origin_us = ticks_to_us(pto, timescale) - period_start_us;
 
-    auto add = [&](std::string url, ByteRange range, int64_t t, int64_t d) -> bool {
+    auto add = [&](std::string url, ByteRange range, int64_t t, int64_t d, int64_t number) -> bool {
         if (r->segments.size() >= kMaxSegments) {
             *error = "too many segments";
             return false;
@@ -293,6 +301,7 @@ bool dash_segments(const SegmentInfo &si, const std::string &base, const std::st
         s.range = range;
         s.start_us = period_start_us + ticks_to_us(t - pto, timescale);
         s.duration_us = ticks_to_us(d, timescale);
+        s.number = number;
         r->segments.push_back(std::move(s));
         return true;
     };
@@ -325,6 +334,8 @@ bool dash_segments(const SegmentInfo &si, const std::string &base, const std::st
                     int64_t until = -1;
                     if (k + 1 < entries.size() && entries[k + 1]->attribute("t") != nullptr) {
                         until = i64_or(entries[k + 1]->attribute("t"), -1);
+                    } else if (clock.live && clock.elapsed_us != kNoTime) {
+                        until = pto + clock.elapsed_us / 1000000 * timescale + (clock.elapsed_us % 1000000) * timescale / 1000000;
                     } else if (period_duration_us != kNoTime) {
                         until = pto + period_duration_us / 1000000 * timescale +
                                 (period_duration_us % 1000000) * timescale / 1000000;
@@ -333,10 +344,14 @@ bool dash_segments(const SegmentInfo &si, const std::string &base, const std::st
                         *error = "open-ended SegmentTimeline without a period duration";
                         return false;
                     }
-                    repeat = until > t ? (until - t + d - 1) / d - 1 : 0;
+                    // Live: only segments that have fully arrived; otherwise up to the period's end.
+                    const bool by_clock = clock.live && clock.elapsed_us != kNoTime &&
+                                          !(k + 1 < entries.size() && entries[k + 1]->attribute("t") != nullptr);
+                    repeat = until > t ? (by_clock ? (until - t) / d : (until - t + d - 1) / d) - 1 : 0;
+                    if (repeat < 0) continue;  // not even the first has arrived
                 }
                 for (int64_t n = 0; n <= repeat; ++n) {
-                    if (!add(resolve_url(base, expand_template(*media, rep_id, number, bandwidth, t)), {}, t, d)) return false;
+                    if (!add(resolve_url(base, expand_template(*media, rep_id, number, bandwidth, t)), {}, t, d, number)) return false;
                     t += d;
                     ++number;
                 }
@@ -346,6 +361,28 @@ bool dash_segments(const SegmentInfo &si, const std::string &base, const std::st
         if (duration <= 0) {
             *error = "SegmentTemplate without @duration or SegmentTimeline";
             return false;
+        }
+        if (clock.live) {
+            // An endless series: what has fully arrived by now, back to the time-shift window.
+            if (clock.elapsed_us == kNoTime) {
+                *error = "a live MPD needs the current time";
+                return false;
+            }
+            const int64_t dur_us = ticks_to_us(duration, timescale);
+            if (dur_us <= 0) {
+                *error = "bad segment duration";
+                return false;
+            }
+            const int64_t last = clock.elapsed_us / dur_us - 1;  // the newest complete segment
+            const int64_t first = std::max<int64_t>(0, (clock.elapsed_us - clock.window_us) / dur_us);
+            for (int64_t n = first; n <= last; ++n) {
+                const int64_t t = pto + n * duration;
+                if (!add(resolve_url(base, expand_template(*media, rep_id, start_number + n, bandwidth, t)), {}, t, duration,
+                         start_number + n)) {
+                    return false;
+                }
+            }
+            return true;
         }
         if (period_duration_us == kNoTime) {
             *error = "SegmentTemplate@duration without a period duration";
@@ -358,7 +395,7 @@ bool dash_segments(const SegmentInfo &si, const std::string &base, const std::st
             const int64_t t = pto + n * duration;
             const int64_t d = std::min(duration, period_ticks - n * duration);
             if (!add(resolve_url(base, expand_template(*media, rep_id, start_number + n, bandwidth, t)), {}, t,
-                     d > 0 ? d : duration)) {
+                     d > 0 ? d : duration, start_number + n)) {
                 return false;
             }
         }
@@ -398,7 +435,7 @@ bool dash_segments(const SegmentInfo &si, const std::string &base, const std::st
             } else if (duration <= 0 && period_duration_us != kNoTime) {
                 d = period_duration_us * timescale / 1000000;
             }
-            if (!add(resolve_url(base, u->attribute_or("media", "")), range, st, d)) return false;
+            if (!add(resolve_url(base, u->attribute_or("media", "")), range, st, d, static_cast<int64_t>(k))) return false;
             t = st + d;
         }
         return true;
@@ -594,6 +631,35 @@ CodecId codec_from_rfc6381(const std::string &codecs, TrackType type) {
     return CodecId::Unknown;
 }
 
+bool parse_iso_datetime(const std::string &str, int64_t *epoch_us) {
+    // YYYY-MM-DDThh:mm:ss[.fraction][Z|+hh:mm|-hh:mm]; a missing zone is UTC (DASH profiles say so).
+    const std::string s = trim(str);
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0;
+    double sec = 0;
+    int n = 0;
+    if (std::sscanf(s.c_str(), "%4d-%2d-%2dT%2d:%2d:%lf%n", &y, &mo, &d, &h, &mi, &sec, &n) < 6 || mo < 1 || mo > 12 ||
+        d < 1 || d > 31 || h > 23 || mi > 59 || sec < 0 || sec >= 61) {
+        return false;
+    }
+    int64_t zone_s = 0;
+    const std::string zone = s.substr(static_cast<size_t>(n));
+    if (!zone.empty() && zone != "Z") {
+        int zh = 0, zm = 0;
+        if ((zone[0] != '+' && zone[0] != '-') || std::sscanf(zone.c_str() + 1, "%2d:%2d", &zh, &zm) != 2) return false;
+        zone_s = (zone[0] == '+' ? 1 : -1) * (zh * 3600 + zm * 60);
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    const int yy = y - (mo <= 2 ? 1 : 0);
+    const int era = (yy >= 0 ? yy : yy - 399) / 400;
+    const int yoe = yy - era * 400;
+    const int doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const int64_t days = static_cast<int64_t>(era) * 146097 + doe - 719468;
+    const int64_t whole = days * 86400 + h * 3600 + mi * 60 - zone_s;
+    *epoch_us = whole * 1000000 + static_cast<int64_t>(std::llround(sec * 1e6));
+    return true;
+}
+
 int dolby_vision_profile(const std::string &codec) {
     if (!is_dolby_vision(codec)) return -1;
     const size_t dot = codec.find('.');
@@ -603,7 +669,7 @@ int dolby_vision_profile(const std::string &codec) {
     return end != codec.c_str() + dot + 1 && p >= 0 && p < 100 ? static_cast<int>(p) : -1;
 }
 
-bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out, std::string *error) {
+bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out, std::string *error, int64_t now_epoch_us) {
     *out = Presentation{};
     out->format = Presentation::Format::Dash;
     out->url = url;
@@ -617,6 +683,21 @@ bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out
         return false;
     }
     out->live = mpd.attribute_or("type", "static") == "dynamic";
+    auto duration_attr = [&](const char *name) {
+        int64_t v = kNoTime;
+        if (const std::string *d = mpd.attribute(name)) {
+            if (!parse_iso_duration(*d, &v)) v = kNoTime;
+        }
+        return v;
+    };
+    if (const std::string *ast = mpd.attribute("availabilityStartTime")) parse_iso_datetime(*ast, &out->availability_start_us);
+    out->update_period_us = duration_attr("minimumUpdatePeriod");
+    out->time_shift_us = duration_attr("timeShiftBufferDepth");
+    out->live_delay_us = duration_attr("suggestedPresentationDelay");
+    if (const XmlNode *utc = mpd.child("UTCTiming")) {
+        out->utc_timing_scheme = utc->attribute_or("schemeIdUri", "");
+        out->utc_timing_value = utc->attribute_or("value", "");
+    }
     int64_t mpd_duration = kNoTime;
     if (const std::string *d = mpd.attribute("mediaPresentationDuration")) {
         int64_t v = 0;
@@ -635,6 +716,16 @@ bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out
     }
     if (period_duration == kNoTime && mpd_duration != kNoTime) period_duration = mpd_duration - period_start;
     out->duration_us = mpd_duration != kNoTime ? mpd_duration : period_duration;
+    LiveClock clock;
+    clock.live = out->live;
+    if (out->live) {
+        if (out->time_shift_us != kNoTime) clock.window_us = out->time_shift_us;
+        if (now_epoch_us != kNoTime) {
+            const int64_t ast = out->availability_start_us != kNoTime ? out->availability_start_us : 0;
+            clock.elapsed_us = now_epoch_us - ast - period_start;
+        }
+        out->duration_us = kNoTime;
+    }
 
     const std::string mpd_base = base_url_of(&mpd, url);
     const std::string period_base = base_url_of(period, mpd_base);
@@ -709,7 +800,8 @@ bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out
             if (const XmlNode *n = rep->child("SegmentBase")) si.merge(n), is_template = false, is_list = false;
             const std::string base = base_url_of(rep, as_base);
             std::string why;
-            if (!dash_segments(si, base, r.id, r.bandwidth, period_start, period_duration, is_template, is_list, &r, &why)) {
+            if (!dash_segments(si, base, r.id, r.bandwidth, period_start, period_duration, is_template, is_list, &r, clock,
+                               &why)) {
                 *error = "Representation " + r.id + ": " + why;
                 return false;
             }
@@ -852,6 +944,7 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
     r->encrypted = false;
     *live = true;
     int64_t t = 0;
+    int64_t sequence = 0;  // EXT-X-MEDIA-SEQUENCE: the first segment's number
     double pending_duration = -1;
     bool pending_discontinuity = false;
     ByteRange pending_range;
@@ -872,6 +965,10 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
             pending_range.offset = off;
         } else if (l == "#EXT-X-DISCONTINUITY") {
             pending_discontinuity = true;
+        } else if (l.rfind("#EXT-X-MEDIA-SEQUENCE:", 0) == 0) {
+            to_i64(l.substr(22), &sequence);
+        } else if (l.rfind("#EXT-X-TARGETDURATION:", 0) == 0) {
+            r->target_duration_us = static_cast<int64_t>(std::llround(to_double(l.substr(22)) * 1e6));
         } else if (l == "#EXT-X-ENDLIST") {
             *live = false;
         } else if (l.rfind("#EXT-X-PLAYLIST-TYPE:", 0) == 0) {
@@ -919,6 +1016,7 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
             s.start_us = t;
             s.duration_us = static_cast<int64_t>(std::llround(pending_duration * 1e6));
             s.discontinuity = pending_discontinuity;
+            s.number = sequence + static_cast<int64_t>(r->segments.size());
             t += s.duration_us;
             r->segments.push_back(std::move(s));
             pending_duration = -1;
@@ -1002,6 +1100,7 @@ bool parse_sidx(const uint8_t *d, size_t size, int64_t box_offset, const std::st
         s.range = ByteRange{offset, len};
         s.start_us = ticks_to_us(t, timescale);
         s.duration_us = ticks_to_us(dur, timescale);
+        s.number = k;
         out->push_back(std::move(s));
         offset += len;
         t += dur;

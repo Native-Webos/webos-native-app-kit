@@ -2,8 +2,8 @@
 //
 // MediaSource for DASH (.mpd) and HLS (.m3u8) presentations over HTTP(S), on the bundled FFmpeg.
 //
-//   open()    fetches the manifest (wnk/media/manifest.hpp), refuses live and fully encrypted
-//             presentations, chooses one video rendition (AdaptiveSourceOptions: codecs in order of
+//   open()    fetches the manifest (wnk/media/manifest.hpp), refuses fully encrypted presentations,
+//             chooses one video rendition (AdaptiveSourceOptions: codecs in order of
 //             preference, size, frame-rate and bandwidth limits, Dolby Vision or not) and lists the
 //             audio choices as tracks: track 0 is the video, then one track per audio rendition (DASH:
 //             the best Representation of each AdaptationSet; HLS: every audio rendition, or the audio
@@ -31,7 +31,17 @@
 // Timestamps are presentation time: DASH segments map through presentationTimeOffset and the Period
 // start; HLS renditions share the timeline of the first segment of the video rendition.
 //
-// Not yet: live presentations, audio bitrate switching, TTML subtitles,
+//   live      DASH type="dynamic" (read against the server's clock when the MPD names a UTCTiming
+//             source) and HLS without EXT-X-ENDLIST. Playback joins a few segments behind the newest
+//             (HLS: three target durations; DASH: suggestedPresentationDelay, else three segments) on
+//             a timeline that starts at the window's first segment; duration is unknown and seeks are
+//             clamped to what the server still lists. A refresher thread reloads the playlists in use
+//             (HLS: every target duration) or the MPD (minimumUpdatePeriod) and appends new segments,
+//             by sequence number, to the open-ended readers of every rendition in use, including a
+//             bitrate switch in progress. HLS ENDLIST or an MPD turned static ends the stream.
+//             Subtitles of live presentations are listed but not loaded yet.
+//
+// Not yet: audio bitrate switching, TTML subtitles, live subtitles,
 // encrypted renditions (refused), WebM renditions (left out), more than the first DASH Period.
 #pragma once
 

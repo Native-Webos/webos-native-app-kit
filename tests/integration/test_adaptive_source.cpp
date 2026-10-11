@@ -9,6 +9,10 @@
 #include "wnk/media/adaptive_source.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <ctime>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -299,7 +303,7 @@ TEST("adaptive source: audio reopened at an earlier segment boundary is trimmed 
     CHECK(d.ordered);
 }
 
-TEST("adaptive source: missing and malformed manifests, live, interrupt") {
+TEST("adaptive source: missing and malformed manifests, interrupt") {
     SKIP_UNLESS_READY();
     std::string err;
     {
@@ -398,6 +402,140 @@ TEST("adaptive source: DASH text/vtt subtitles; TTML listed but not readable; a 
     CHECK_EQ(cues[3]->text, std::string("Cue 3"));  // tags removed
     CHECK_EQ(cues[3]->start_us, int64_t{3200000});
     CHECK_EQ(cues[3]->end_us, int64_t{3800000});
+}
+
+namespace {
+
+void write_file(const std::string &path, const std::string &text) {
+    const std::string tmp = path + ".tmp";
+    if (FILE *f = std::fopen(tmp.c_str(), "w")) {
+        std::fputs(text.c_str(), f);
+        std::fclose(f);
+        std::rename(tmp.c_str(), path.c_str());  // the server never sees half a playlist
+    }
+}
+
+std::string iso_utc(std::chrono::system_clock::time_point t) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count();
+    const std::time_t sec = static_cast<std::time_t>(ms / 1000);
+    std::tm tm{};
+    gmtime_r(&sec, &tm);
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+                  tm.tm_min, tm.tm_sec, static_cast<int>(ms % 1000));
+    return buf;
+}
+
+struct LiveRun {
+    size_t video = 0;
+    bool ordered = true, timed = true;
+    MediaSource::Read end = MediaSource::Read::Error;
+    double seconds = 0;
+};
+
+LiveRun play_live(AdaptiveSource &s) {
+    LiveRun run;
+    std::string err;
+    StreamFormat f;
+    if (!s.select(0, 1, starfish_like(), &f, &err)) return run;
+    const auto t0 = std::chrono::steady_clock::now();
+    Packet p;
+    int64_t last = INT64_MIN;
+    while ((run.end = s.read(&p, &err)) == MediaSource::Read::Packet) {
+        if (p.type != TrackType::Video) continue;
+        ++run.video;
+        run.timed = run.timed && p.pts_us != kNoTime;
+        run.ordered = run.ordered && p.dts_us > last;
+        last = p.dts_us;
+    }
+    if (run.end != MediaSource::Read::EndOfStream) std::printf("  live read ended: %s\n", err.c_str());
+    run.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return run;
+}
+
+}  // namespace
+
+TEST("adaptive source live: HLS sliding window followed by sequence number until EXT-X-ENDLIST") {
+    SKIP_UNLESS_READY();
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    // The server: a three-segment window over ts_000..ts_004 that moves on every second.
+    auto playlist = [&](int first, int count, bool end) {
+        std::string m = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:" + std::to_string(first) + "\n";
+        for (int i = first; i < first + count; ++i) {
+            char line[64];
+            std::snprintf(line, sizeof line, "#EXTINF:2.000000,\nts_%03d.ts\n", i);
+            m += line;
+        }
+        if (end) m += "#EXT-X-ENDLIST\n";
+        write_file(d + "/live.m3u8", m);
+    };
+    playlist(0, 3, false);
+    std::atomic<bool> stop{false};
+    std::thread server([&] {
+        for (int first = 1; first <= 2 && !stop; ++first) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            playlist(first, 3, first == 2);  // 1..3, then 2..4 with ENDLIST
+        }
+    });
+    AdaptiveSource s(options());
+    std::string err;
+    const bool opened = s.open(url("live.m3u8"), &err);
+    LiveRun run;
+    if (opened) {
+        CHECK_EQ(s.info().duration_us, kNoTime);
+        run = play_live(s);
+    }
+    stop = true;
+    server.join();
+    REQUIRE(opened);
+    CHECK(run.end == MediaSource::Read::EndOfStream);
+    CHECK_EQ(run.video, size_t{250});  // every segment once, though two fell out of the window
+    CHECK(run.ordered && run.timed);
+    CHECK(run.seconds > 1.0);  // it had to wait for the playlist to grow
+}
+
+TEST("adaptive source live: dynamic DASH segments become available by the clock; static ends it") {
+    SKIP_UNLESS_READY();
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    const auto ast = std::chrono::system_clock::now() - std::chrono::milliseconds(4500);
+    auto mpd = [&](bool dynamic) {
+        const std::string tmpl = "<SegmentTemplate timescale=\"1000000\" duration=\"2000000\" initialization=\"d-init-$RepresentationID$.m4s\" "
+                                 "media=\"d-$RepresentationID$-$Number%05d$.m4s\" startNumber=\"1\"/>";
+        std::string m = "<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" ";
+        m += dynamic ? "type=\"dynamic\" availabilityStartTime=\"" + iso_utc(ast) + "\" minimumUpdatePeriod=\"PT1S\" timeShiftBufferDepth=\"PT30S\""
+                     : "type=\"static\" mediaPresentationDuration=\"PT10S\"";
+        m += "><Period id=\"0\" start=\"PT0S\"><AdaptationSet id=\"0\" contentType=\"video\">" + tmpl +
+             "<Representation id=\"0\" mimeType=\"video/mp4\" codecs=\"avc1.64000d\" bandwidth=\"312164\" width=\"320\" height=\"240\"/>"
+             "</AdaptationSet><AdaptationSet id=\"1\" contentType=\"audio\">" + tmpl +
+             "<Representation id=\"1\" mimeType=\"audio/mp4\" codecs=\"mp4a.40.2\" bandwidth=\"69000\" audioSamplingRate=\"48000\"/>"
+             "</AdaptationSet></Period></MPD>";
+        write_file(d + "/dl.mpd", m);
+    };
+    mpd(true);
+    std::atomic<bool> stop{false};
+    std::thread server([&] {
+        // All five segments have arrived 10 s after the availability start; then the event is over.
+        while (!stop && std::chrono::system_clock::now() < ast + std::chrono::milliseconds(10600)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!stop) mpd(false);
+    });
+    AdaptiveSource s(options());
+    std::string err;
+    const bool opened = s.open(url("dl.mpd"), &err);
+    LiveRun run;
+    if (opened) {
+        CHECK(s.presentation().live);
+        CHECK_EQ(s.presentation().renditions[0].segments.size(), size_t{2});  // 0-2 s and 2-4 s by 4.5 s
+        run = play_live(s);
+    }
+    stop = true;
+    server.join();
+    REQUIRE(opened);
+    CHECK(run.end == MediaSource::Read::EndOfStream);
+    CHECK_EQ(run.video, size_t{250});
+    CHECK(run.ordered && run.timed);
+    CHECK(run.seconds > 4.0);
 }
 
 TEST("throughput estimate: needs 128 KiB, ignores small transfers, falls fast and rises slowly") {

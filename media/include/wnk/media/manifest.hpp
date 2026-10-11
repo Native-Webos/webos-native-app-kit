@@ -18,8 +18,12 @@
 //                           rendition encrypted. A media playlist given directly becomes one muxed
 //                           rendition.
 //
-// Live presentations (DASH type="dynamic", HLS without EXT-X-ENDLIST) are recognised and reported
-// through Presentation::live; their segment lists are a snapshot.
+// Live presentations (DASH type="dynamic", HLS without EXT-X-ENDLIST) are reported through
+// Presentation::live with what a player needs to follow them: segment numbers (HLS media sequence,
+// DASH $Number$ or position) to merge refreshed lists, how often to refresh, and for DASH the
+// availability start, time-shift window and suggested delay. A dynamic MPD whose SegmentTemplate is
+// by @duration describes an endless series; parse_mpd() lists what is available at `now` within the
+// time-shift window (60 s when the MPD gives none).
 #pragma once
 
 #include "wnk/media/media.hpp"
@@ -44,6 +48,7 @@ struct MediaSegment {
     int64_t start_us = 0;     // presentation time from the start of the presentation
     int64_t duration_us = 0;
     bool discontinuity = false;  // HLS: timestamps may restart here
+    int64_t number = -1;         // HLS media sequence number, DASH $Number$ (or position in the list)
 };
 
 struct Rendition {
@@ -76,6 +81,7 @@ struct Rendition {
     ByteRange index;
     // HLS: the media playlist that lists the segments (not loaded yet while `segments` is empty).
     std::string playlist_url;
+    int64_t target_duration_us = 0;  // HLS EXT-X-TARGETDURATION of the loaded playlist
 
     bool needs_index() const { return segments.empty() && !index_url.empty(); }
     bool needs_playlist() const { return segments.empty() && !playlist_url.empty(); }
@@ -88,7 +94,16 @@ struct Presentation {
     bool live = false;
     int64_t duration_us = kNoTime;
     std::vector<Rendition> renditions;
+    // Live DASH (kNoTime where the MPD says nothing).
+    int64_t availability_start_us = kNoTime;  // availabilityStartTime, microseconds since the Unix epoch
+    int64_t update_period_us = kNoTime;       // minimumUpdatePeriod
+    int64_t time_shift_us = kNoTime;          // timeShiftBufferDepth
+    int64_t live_delay_us = kNoTime;          // suggestedPresentationDelay
+    std::string utc_timing_scheme, utc_timing_value;  // the first UTCTiming element
 };
+
+// "2026-10-12T08:30:00Z", "...00.250+02:00" → microseconds since the Unix epoch; false if malformed.
+bool parse_iso_datetime(const std::string &s, int64_t *epoch_us);
 
 // RFC 3986 reference resolution ("../a.m4s" against "https://h/p/q/x.mpd" → "https://h/p/a.m4s").
 std::string resolve_url(const std::string &base, const std::string &ref);
@@ -103,7 +118,9 @@ CodecId codec_from_rfc6381(const std::string &codecs, TrackType type);
 // The profile of a Dolby Vision codec string ("dvhe.08.06" → 8, "dvh1.05.06" → 5), else -1.
 int dolby_vision_profile(const std::string &codec);
 
-bool parse_mpd(const std::string &xml, const std::string &url, Presentation *out, std::string *error);
+// `now_epoch_us`: the current time (needed for a dynamic MPD with SegmentTemplate@duration).
+bool parse_mpd(const std::string &xml, const std::string &url, Presentation *out, std::string *error,
+               int64_t now_epoch_us = kNoTime);
 
 // A master playlist (renditions with playlist_url set) or a media playlist (one muxed rendition
 // with its segments).

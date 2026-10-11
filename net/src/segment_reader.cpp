@@ -58,6 +58,7 @@ struct SegmentReader::Impl {
     size_t part = 0;      // being downloaded
     size_t limit = SIZE_MAX;  // parts to deliver (stop_after_current)
     double waited = 0;    // seconds store() spent waiting for room, this transfer
+    bool finished = false;  // no more parts will be appended (always so unless open_ended)
     std::vector<int64_t> part_end;  // stream offset after each completed part
 
     // The part the reader is in: completed parts that end at or before read_pos.
@@ -216,23 +217,29 @@ struct SegmentReader::Impl {
     }
 
     void run() {
-        for (size_t i = 0; i < parts.size(); ++i) {
+        for (size_t i = 0;; ++i) {
+            SegmentPart p;
             {
                 std::unique_lock<std::mutex> lock(m);
+                // Live: wait for the list to grow (or to be finished, or stopped).
+                cv.wait(lock, [&] { return quit || i < parts.size() || finished || i >= limit; });
+                if (quit) return;
+                if (i >= parts.size() || i >= limit) break;
                 if (opt.max_parts_ahead > 0) {
-                    cv.wait(lock, [&] { return quit || i <= reading_part() + opt.max_parts_ahead; });
+                    cv.wait(lock, [&] { return quit || i <= reading_part() + opt.max_parts_ahead || i >= limit; });
                     if (quit) return;
                 }
                 if (i >= limit) break;
                 part = i;
+                p = parts[i];  // a copy: append() may grow the list meanwhile
             }
-            if (!fetch(i, parts[i])) return;
+            if (!fetch(i, p)) return;
             std::lock_guard<std::mutex> lock(m);
             ++stats.parts_done;
             part_end.push_back(write_pos);
         }
         std::lock_guard<std::mutex> lock(m);
-        part = parts.size();
+        part = std::min(limit, parts.size());
         done = true;
         cv.notify_all();
     }
@@ -245,6 +252,7 @@ SegmentReader::SegmentReader(std::shared_ptr<HttpTransport> transport, std::vect
     s.transport = std::move(transport);
     s.parts = std::move(parts);
     s.opt = std::move(options);
+    s.finished = !s.opt.open_ended;
     s.ring.assign(std::max<size_t>(s.opt.buffer_bytes, 64u << 10), 0);
     if (s.transport == nullptr) {
         s.fail(NetError::Unsupported, 0, "no HTTP transport");
@@ -323,8 +331,29 @@ size_t SegmentReader::stop_after_current() {
     std::lock_guard<std::mutex> lock(impl_->m);
     Impl &s = *impl_;
     if (s.done || s.failed) return std::min(s.limit, s.parts.size());
-    s.limit = std::min(s.limit, s.part + 1);
+    // Between parts (a live reader waiting for the next one) `part` is the last one fetched.
+    const size_t fetched = s.part_end.size();
+    s.limit = std::min(s.limit, std::max(s.part + 1, fetched));
+    s.cv.notify_all();
     return s.limit;
+}
+
+void SegmentReader::append(std::vector<SegmentPart> parts) {
+    std::lock_guard<std::mutex> lock(impl_->m);
+    if (impl_->finished) return;
+    for (auto &p : parts) impl_->parts.push_back(std::move(p));
+    impl_->cv.notify_all();
+}
+
+void SegmentReader::finish() {
+    std::lock_guard<std::mutex> lock(impl_->m);
+    impl_->finished = true;
+    impl_->cv.notify_all();
+}
+
+size_t SegmentReader::part_count() const {
+    std::lock_guard<std::mutex> lock(impl_->m);
+    return impl_->parts.size();
 }
 
 size_t SegmentReader::download_part() const {

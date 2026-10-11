@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -203,6 +204,9 @@ struct AdaptiveSource::Impl {
         // are only approximate).
         int64_t drop_before_us = kNoTime;
     };
+    // Guards the renditions' segment lists, which the live refresher grows. Never held across a
+    // blocking call. Order: pres_mutex before lanes_mutex.
+    std::mutex pres_mutex;
     std::mutex lanes_mutex;  // guards the lane pointers against interrupt() from other threads
     std::vector<Lane> lanes;
     BackendCaps caps;
@@ -210,6 +214,14 @@ struct AdaptiveSource::Impl {
     int64_t position_us = 0;   // where the next select() starts
     bool reopen = false;       // a seek was interrupted while reopening: reopen at position_us first
     int64_t hls_origin_us = kNoTime;
+    // Live.
+    bool live_ended = false;               // the presentation stopped being live (HLS ENDLIST, static MPD)
+    int64_t zero_us = 0;                   // DASH: subtracted from presentation times (the window start at open)
+    int64_t clock_offset_us = 0;           // server time minus this device's (DASH UTCTiming)
+    std::map<long, int64_t> window_first;  // rendition → number of its oldest segment still listed
+    std::thread refresh_thread;
+    std::mutex refresh_mutex;
+    std::condition_variable refresh_cv;
     std::vector<int> ladder;        // video renditions that can replace each other, bandwidth ascending
     std::vector<int> active_ladder; // the part of it the backend can follow (select)
     ThroughputEstimator estimator;
@@ -221,15 +233,18 @@ struct AdaptiveSource::Impl {
     std::mutex fetch_mutex;
     std::shared_ptr<async::CancellationSource> fetch_cancel = std::make_shared<async::CancellationSource>();
 
-    // The subtitle loader's own stop flag and cancellation: a seek interrupts playback, not it.
+    // The subtitle loader's and the live refresher's own stop flags and cancellation: a seek
+    // interrupts playback, not them.
     std::atomic<bool> subs_stop{false};
     std::shared_ptr<async::CancellationSource> subs_cancel = std::make_shared<async::CancellationSource>();
+    std::atomic<bool> refresh_stop{false};
+    std::shared_ptr<async::CancellationSource> refresh_cancel = std::make_shared<async::CancellationSource>();
+    enum class Ctx : uint8_t { Playback, Subtitles, Refresh };
 
-    // GET (optionally a byte range), with retries on transient failures. `background`: for the
-    // subtitle loader (its own cancellation, deaf to playback interrupts).
+    // GET (optionally a byte range), with retries on transient failures.
     bool fetch(const std::string &url, const ByteRange *range, std::string *body, std::string *final_url,
-               std::string *error, bool background = false) {
-        const std::atomic<bool> &stop = background ? subs_stop : interrupted;
+               std::string *error, Ctx ctx = Ctx::Playback) {
+        const std::atomic<bool> &stop = ctx == Ctx::Subtitles ? subs_stop : ctx == Ctx::Refresh ? refresh_stop : interrupted;
         if (!opt.http) {
             *error = "no HTTP transport";
             return false;
@@ -246,7 +261,9 @@ struct AdaptiveSource::Impl {
         async::CancellationToken token;
         {
             std::lock_guard<std::mutex> lock(fetch_mutex);
-            token = background ? subs_cancel->token() : fetch_cancel->token();
+            token = ctx == Ctx::Subtitles ? subs_cancel->token()
+                    : ctx == Ctx::Refresh ? refresh_cancel->token()
+                                          : fetch_cancel->token();
         }
         const net::RetryPolicy retry;
         for (int attempt = 1;; ++attempt) {
@@ -284,20 +301,33 @@ struct AdaptiveSource::Impl {
     }
 
     // Loads an HLS media playlist or a DASH segment index if the rendition still needs one.
-    bool ensure_segments(Rendition &r, std::string *error, bool background = false) {
+    bool ensure_segments(Rendition &r, std::string *error, Ctx ctx = Ctx::Playback) {
+        {
+            std::lock_guard<std::mutex> lock(pres_mutex);
+            if (!r.needs_playlist() && !r.needs_index()) {
+                if (r.segments.empty()) *error = "rendition " + r.id + " has no segments";
+                return !r.segments.empty();
+            }
+        }
         if (r.needs_playlist()) {
             std::string body, final_url;
-            if (!fetch(r.playlist_url, nullptr, &body, &final_url, error, background)) return false;
+            if (!fetch(r.playlist_url, nullptr, &body, &final_url, error, ctx)) return false;
+            Rendition fresh = r;
             bool live = false;
-            if (!parse_hls_media(body, final_url, &r, &live, error)) return false;
+            if (!parse_hls_media(body, final_url, &fresh, &live, error)) return false;
+            std::lock_guard<std::mutex> lock(pres_mutex);
             if (live) {
-                *error = "live HLS playlists are not supported yet";
-                r.segments.clear();
-                return false;
+                pres.live = true;
+                align_to_video(&r - pres.renditions.data(), fresh);
             }
+            r.segments = std::move(fresh.segments);
+            r.init = fresh.init;
+            r.encrypted = fresh.encrypted;
+            r.target_duration_us = fresh.target_duration_us;
+            if (live && !r.segments.empty()) window_first[&r - pres.renditions.data()] = r.segments.front().number;
         } else if (r.needs_index()) {
             std::string body;
-            if (!fetch(r.index_url, &r.index, &body, nullptr, error, background)) return false;
+            if (!fetch(r.index_url, &r.index, &body, nullptr, error, ctx)) return false;
             std::vector<MediaSegment> segs;
             if (!parse_sidx(reinterpret_cast<const uint8_t *>(body.data()), body.size(), r.index.offset, r.index_url,
                             &segs, error)) {
@@ -305,8 +335,10 @@ struct AdaptiveSource::Impl {
             }
             const int64_t origin = r.time_origin_us != kNoTime ? r.time_origin_us : 0;
             for (MediaSegment &s : segs) s.start_us -= origin;
+            std::lock_guard<std::mutex> lock(pres_mutex);
             r.segments = std::move(segs);
         }
+        std::lock_guard<std::mutex> lock(pres_mutex);
         if (r.segments.empty()) {
             *error = "rendition " + r.id + " has no segments";
             return false;
@@ -324,8 +356,7 @@ struct AdaptiveSource::Impl {
         return parts;
     }
 
-    // Opens `lane` on its rendition from segment `first`, delivering what it wants; `fmt` gets what
-    // the inner source will deliver.
+    // A reader over `r` from segment `first`. The caller holds pres_mutex.
     std::unique_ptr<net::SegmentReader> make_reader(const Rendition &r, size_t first) {
         net::SegmentReaderOptions so = opt.segments;
         so.headers = opt.headers;
@@ -334,35 +365,53 @@ struct AdaptiveSource::Impl {
         for (const MediaSegment &s : r.segments) seg_us = std::max(seg_us, s.duration_us);
         so.max_parts_ahead = seg_us > 0 ? static_cast<size_t>(std::max<int64_t>(2, (opt.max_ahead_us + seg_us - 1) / seg_us))
                                         : 0;
+        so.open_ended = pres.live && !live_ended;  // the refresher appends what the server publishes next
         return std::make_unique<net::SegmentReader>(opt.http, parts_from(r, first), so);
     }
 
+    // Opens `lane` on its rendition from segment `first`, delivering what it wants; `fmt` gets what
+    // the inner source will deliver.
     bool open_lane(Lane &lane, size_t first, StreamFormat *fmt, std::string *error,
                    std::unique_ptr<net::SegmentReader> prebuilt = nullptr) {
         const Rendition &r = pres.renditions[static_cast<size_t>(lane.rendition)];
         const bool hls = pres.format == Presentation::Format::Hls;
         for (int pass = 0; pass < 2; ++pass) {
-            auto reader = prebuilt ? std::move(prebuilt) : make_reader(r, first);
-            net::SegmentReader *raw = reader.get();
-            auto src = std::make_unique<FfmpegSource>(FfmpegSourceOptions{nullptr, {}, opt.ac3_encode});
-            src->set_time_origin(hls ? hls_origin_us : r.time_origin_us);
-            FfmpegSource *s = src.get();
+            std::unique_ptr<net::SegmentReader> reader;
+            FfmpegSource *s = nullptr;
+            std::string first_url;
+            int64_t first_start = 0;
             {
+                // The reader's parts and its registration in the lane under one lock, so a live
+                // refresh appends exactly what came after this snapshot.
+                std::lock_guard<std::mutex> plock(pres_mutex);
+                const bool waiting = pres.live && !live_ended && first == r.segments.size() && !r.segments.empty();
+                if (first >= r.segments.size() && !waiting) {
+                    *error = "rendition " + r.id + ": no segment " + std::to_string(first);
+                    return false;
+                }
+                reader = prebuilt ? std::move(prebuilt) : make_reader(r, first);
+                // A live reader that starts after the list's end waits for the refresher's appends.
+                const MediaSegment &at = waiting ? r.segments.back() : r.segments[first];
+                first_url = at.url;
+                first_start = waiting ? at.start_us + at.duration_us : at.start_us;
+                auto src = std::make_unique<FfmpegSource>(FfmpegSourceOptions{nullptr, {}, opt.ac3_encode});
+                src->set_time_origin(hls ? hls_origin_us : r.time_origin_us);
+                s = src.get();
                 std::lock_guard<std::mutex> lock(lanes_mutex);
                 lane.src = std::move(src);
-                lane.reader = raw;
+                lane.reader = reader.get();
                 lane.first = first;
                 lane.pending.reset();
                 lane.ended = false;
                 if (interrupted) s->interrupt();
             }
-            if (!s->open_reader(std::move(reader), r.segments[first].url, error)) {
+            if (!s->open_reader(std::move(reader), first_url, error)) {
                 *error = "rendition " + r.id + ": " + *error;
                 return false;
             }
             if (hls && hls_origin_us == kNoTime) {
                 // All HLS renditions share the timeline of the video's first segment.
-                hls_origin_us = s->time_origin() - r.segments[first].start_us;
+                hls_origin_us = s->time_origin() - first_start;
                 if (first != 0 && pass == 0) continue;  // opened with the container's start: again
             }
             break;
@@ -387,6 +436,198 @@ struct AdaptiveSource::Impl {
         }
         if (fmt->audio && fmt->audio->codec == CodecId::Eac3 && r.atmos) fmt->audio->atmos = true;
         return true;
+    }
+
+    // ---- live -------------------------------------------------------------------------------
+
+    int64_t now_us() const {
+        return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
+                   .count() +
+               clock_offset_us;
+    }
+
+    // DASH: presentation times from the window start at open, so a live timeline reads like a VOD one.
+    void normalize(Presentation &p) const {
+        for (Rendition &r : p.renditions) {
+            for (MediaSegment &s : r.segments) s.start_us -= zero_us;
+            if (r.time_origin_us != kNoTime) r.time_origin_us += zero_us;
+        }
+    }
+
+    // HLS: a live rendition's playlist times start at its own first segment; line them up with the
+    // video's through a segment number both lists have. pres_mutex held.
+    void align_to_video(long index, Rendition &fresh) {
+        if (pres.format != Presentation::Format::Hls || video < 0 || index == video) return;
+        const auto &ref = pres.renditions[static_cast<size_t>(video)].segments;
+        for (const MediaSegment &s : fresh.segments) {
+            auto it = std::find_if(ref.begin(), ref.end(), [&](const MediaSegment &v) { return v.number == s.number; });
+            if (it == ref.end()) continue;
+            const int64_t delta = it->start_us - s.start_us;
+            for (MediaSegment &f : fresh.segments) f.start_us += delta;
+            return;
+        }
+    }
+
+    // Appends segments newer than `cur`'s last to it (HLS: timed on from its end) and to every
+    // reader registered for that rendition; finishes them when the list has ended. pres_mutex held.
+    void merge(long index, std::vector<MediaSegment> fresh, bool ended) {
+        Rendition &cur = pres.renditions[static_cast<size_t>(index)];
+        if (!fresh.empty()) window_first[index] = fresh.front().number;
+        std::vector<net::SegmentPart> added;
+        const int64_t last = cur.segments.empty() ? INT64_MIN : cur.segments.back().number;
+        for (MediaSegment &s : fresh) {
+            if (s.number <= last) continue;
+            if (pres.format == Presentation::Format::Hls && !cur.segments.empty()) {
+                s.start_us = cur.segments.back().start_us + cur.segments.back().duration_us;
+            }
+            added.push_back({s.url, s.range.offset, s.range.length});
+            cur.segments.push_back(std::move(s));
+        }
+        std::lock_guard<std::mutex> lock(lanes_mutex);
+        for (Lane &l : lanes) {
+            if (l.rendition == index && l.reader != nullptr) {
+                if (!added.empty()) l.reader->append(added);
+                if (ended) l.reader->finish();
+            }
+            if (l.next && l.next->rendition == index && l.next->reader) {
+                if (!added.empty()) l.next->reader->append(added);
+                if (ended) l.next->reader->finish();
+            }
+        }
+    }
+
+    // HLS: reloads one rendition's media playlist and merges it.
+    bool refresh_rendition(long index, Ctx ctx, std::string *error) {
+        Rendition fresh;
+        std::string url;
+        {
+            std::lock_guard<std::mutex> lock(pres_mutex);
+            fresh = pres.renditions[static_cast<size_t>(index)];
+            url = fresh.playlist_url;
+        }
+        if (url.empty()) return true;
+        std::string body, final_url;
+        if (!fetch(url, nullptr, &body, &final_url, error, ctx)) return false;
+        bool live = true;
+        if (!parse_hls_media(body, final_url, &fresh, &live, error)) return false;
+        std::lock_guard<std::mutex> lock(pres_mutex);
+        if (pres.renditions[static_cast<size_t>(index)].segments.empty()) align_to_video(index, fresh);
+        pres.renditions[static_cast<size_t>(index)].target_duration_us = fresh.target_duration_us;
+        merge(index, std::move(fresh.segments), !live);
+        if (!live && index == video) live_ended = true;
+        return true;
+    }
+
+    // DASH: reloads the MPD and merges the renditions in use.
+    bool refresh_dash(const std::vector<long> &active, std::string *error) {
+        std::string body, final_url;
+        if (!fetch(pres.url, nullptr, &body, &final_url, error, Ctx::Refresh)) return false;
+        Presentation fresh;
+        if (!parse_mpd(body, final_url, &fresh, error, now_us())) return false;
+        normalize(fresh);
+        std::lock_guard<std::mutex> lock(pres_mutex);
+        for (long i : active) {
+            const Rendition &cur = pres.renditions[static_cast<size_t>(i)];
+            auto it = std::find_if(fresh.renditions.begin(), fresh.renditions.end(),
+                                   [&](const Rendition &r) { return r.id == cur.id && r.group == cur.group; });
+            if (it == fresh.renditions.end()) continue;
+            merge(i, std::move(it->segments), !fresh.live);
+        }
+        if (!fresh.live) live_ended = true;
+        return true;
+    }
+
+    void refresh_loop() {
+        while (!refresh_stop) {
+            int64_t period;
+            {
+                std::lock_guard<std::mutex> lock(pres_mutex);
+                int64_t seg = 0;
+                if (video >= 0) {
+                    for (const MediaSegment &s : pres.renditions[static_cast<size_t>(video)].segments) seg = std::max(seg, s.duration_us);
+                    if (pres.format == Presentation::Format::Hls && pres.renditions[static_cast<size_t>(video)].target_duration_us > 0) {
+                        seg = pres.renditions[static_cast<size_t>(video)].target_duration_us;
+                    }
+                }
+                period = pres.format == Presentation::Format::Dash && pres.update_period_us != kNoTime && pres.update_period_us > 0
+                             ? pres.update_period_us
+                             : (seg > 0 ? seg : 2000000);
+                period = std::clamp<int64_t>(period, 500000, 30000000);
+            }
+            {
+                std::unique_lock<std::mutex> lock(refresh_mutex);
+                refresh_cv.wait_for(lock, std::chrono::microseconds(period), [&] { return refresh_stop.load(); });
+            }
+            if (refresh_stop) return;
+            std::vector<long> active;
+            {
+                std::lock_guard<std::mutex> lock(lanes_mutex);
+                for (const Lane &l : lanes) {
+                    active.push_back(l.rendition);
+                    if (l.next) active.push_back(l.next->rendition);
+                }
+            }
+            std::string error;
+            bool ok = true;
+            if (pres.format == Presentation::Format::Dash) {
+                ok = refresh_dash(active, &error);
+            } else {
+                for (long i : active) ok = refresh_rendition(i, Ctx::Refresh, &error) && ok;
+            }
+            if (!ok && !refresh_stop) WNK_LOGW(kCat, "live refresh: %s", error.c_str());
+            std::lock_guard<std::mutex> lock(pres_mutex);
+            if (live_ended) {
+                WNK_LOGI(kCat, "the live presentation has ended");
+                return;
+            }
+        }
+    }
+
+    void start_refresh() {
+        if (!pres.live || live_ended || refresh_thread.joinable()) return;
+        refresh_stop = false;
+        {
+            std::lock_guard<std::mutex> lock(fetch_mutex);
+            refresh_cancel = std::make_shared<async::CancellationSource>();
+        }
+        refresh_thread = std::thread([this] { refresh_loop(); });
+    }
+
+    void stop_refresh() {
+        {
+            std::lock_guard<std::mutex> lock(refresh_mutex);
+            refresh_stop = true;
+            refresh_cv.notify_all();
+        }
+        {
+            std::lock_guard<std::mutex> lock(fetch_mutex);
+            refresh_cancel->cancel();
+        }
+        if (refresh_thread.joinable()) refresh_thread.join();
+    }
+
+    // DASH UTCTiming: the server's clock, so "now" matches what it publishes (http-xsdate, http-iso,
+    // direct). The request's latency is not corrected for.
+    void sync_clock() {
+        const std::string &scheme = pres.utc_timing_scheme;
+        std::string text;
+        if (scheme.find(":http-xsdate:") != std::string::npos || scheme.find(":http-iso:") != std::string::npos) {
+            std::string error;
+            if (!fetch(resolve_url(pres.url, pres.utc_timing_value), nullptr, &text, nullptr, &error)) {
+                WNK_LOGW(kCat, "UTCTiming: %s; using this device's clock", error.c_str());
+                return;
+            }
+        } else if (scheme.find(":direct:") != std::string::npos) {
+            text = pres.utc_timing_value;
+        } else {
+            return;
+        }
+        int64_t server = 0;
+        if (!parse_iso_datetime(text, &server)) return;
+        const int64_t local =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        clock_offset_us = server - local;
+        WNK_LOGI(kCat, "server clock %+lld ms from this device's", static_cast<long long>(clock_offset_us / 1000));
     }
 
     // Video renditions that can stand in for `base` mid-stream, bandwidth ascending.
@@ -431,24 +672,46 @@ struct AdaptiveSource::Impl {
         const int64_t estimate = estimator.estimate_bps();
         const int target = choose_rung(bws, current, estimate, limit);
         if (target == current || target < 0) return;
-        Rendition &to = pres.renditions[static_cast<size_t>(active_ladder[static_cast<size_t>(target)])];
+        const int to_index = active_ladder[static_cast<size_t>(target)];
+        Rendition &to = pres.renditions[static_cast<size_t>(to_index)];
         std::string why;
         if (!ensure_segments(to, &why)) {
             WNK_LOGW(kCat, "cannot switch to %s: %s", to.id.c_str(), why.c_str());
             return;
         }
+        if (pres.live && pres.format == Presentation::Format::Hls && !refresh_rendition(to_index, Ctx::Playback, &why)) {
+            WNK_LOGW(kCat, "cannot switch to %s: %s", to.id.c_str(), why.c_str());
+            return;
+        }
+        std::lock_guard<std::mutex> plock(pres_mutex);
         const Rendition &from = pres.renditions[static_cast<size_t>(v.rendition)];
+        // Live HLS: the boundary must exist in the target's list too (by number) before cutting.
         const size_t delivered = v.reader->stop_after_current();
         const size_t init = from.init ? 1 : 0;
         const size_t boundary = v.first + (delivered > init ? delivered - init : 0);  // first segment not read
-        if (boundary >= from.segments.size()) return;  // the old one plays to the end
-        const size_t first = from.segments.size() == to.segments.size()
-                                 ? boundary
-                                 : segment_at(to.segments, from.segments[boundary].start_us + 1000);
+        if (boundary >= from.segments.size()) {
+            if (!pres.live || live_ended) return;  // the old one plays to the end
+        }
+        size_t first;
+        if (boundary < from.segments.size() && from.segments[boundary].number >= 0 && pres.live) {
+            const int64_t want = from.segments[boundary].number;
+            auto it = std::find_if(to.segments.begin(), to.segments.end(), [&](const MediaSegment &s) { return s.number == want; });
+            first = it != to.segments.end() ? static_cast<size_t>(it - to.segments.begin())
+                                            : segment_at(to.segments, from.segments[boundary].start_us + 1000);
+        } else if (boundary >= from.segments.size()) {
+            // Live, caught up with the list: the target continues after the last segment read.
+            const int64_t want = from.segments.empty() ? -1 : from.segments.back().number + 1;
+            auto it = std::find_if(to.segments.begin(), to.segments.end(), [&](const MediaSegment &s) { return s.number == want; });
+            first = it != to.segments.end() ? static_cast<size_t>(it - to.segments.begin()) : to.segments.size();
+        } else {
+            first = from.segments.size() == to.segments.size() ? boundary
+                                                               : segment_at(to.segments, from.segments[boundary].start_us + 1000);
+        }
         Lane::Switch sw;
-        sw.rendition = active_ladder[static_cast<size_t>(target)];
+        sw.rendition = to_index;
         sw.first = first;
         sw.reader = make_reader(to, first);  // prefetches while the old rendition plays out
+        std::lock_guard<std::mutex> lock(lanes_mutex);
         v.next = std::move(sw);
         WNK_LOGI(kCat, "throughput %s: switching video %s -> %s at segment %zu", mbps(estimate).c_str(),
                  mbps(from.bandwidth).c_str(), mbps(to.bandwidth).c_str(), boundary);
@@ -469,10 +732,17 @@ struct AdaptiveSource::Impl {
             const MediaSource::Read r = lane.src->read(&p, error);
             if (r == MediaSource::Read::EndOfStream && lane.next) {
                 // The old rendition ended at the switch boundary: the new one continues from there.
-                Lane::Switch sw = std::move(*lane.next);
-                lane.next.reset();
+                Lane::Switch sw;
                 const int from = lane.rendition;
-                lane.rendition = sw.rendition;
+                {
+                    // Keep the new reader reachable by the refresher while it changes hands.
+                    std::lock_guard<std::mutex> plock(pres_mutex);
+                    std::lock_guard<std::mutex> lock(lanes_mutex);
+                    sw = std::move(*lane.next);
+                    lane.next.reset();
+                    lane.rendition = sw.rendition;
+                    lane.reader = sw.reader.get();
+                }
                 StreamFormat fmt;
                 if (!open_lane(lane, sw.first, &fmt, error, std::move(sw.reader))) {
                     if (interrupted) return MediaSource::Read::Interrupted;
@@ -509,12 +779,17 @@ struct AdaptiveSource::Impl {
         int64_t main_first_pts = kNoTime;
         for (size_t i = 0; i < lanes.size(); ++i) {
             Lane &lane = lanes[i];
-            const auto &segs = pres.renditions[static_cast<size_t>(lane.rendition)].segments;
-            // The first lane leads (video if any); the others start at or before its segment.
-            const size_t first = i == 0 ? segment_at(segs, t) : segment_at(segs, main_start);
-            if (i == 0) main_start = segs[first].start_us;
+            size_t first;
+            {
+                std::lock_guard<std::mutex> plock(pres_mutex);
+                const auto &segs = pres.renditions[static_cast<size_t>(lane.rendition)].segments;
+                // The first lane leads (video if any); the others start at or before its segment.
+                first = i == 0 ? segment_at(segs, t) : segment_at(segs, main_start);
+                if (i == 0 && first < segs.size()) main_start = segs[first].start_us;
+                std::lock_guard<std::mutex> lock(lanes_mutex);
+                lane.next.reset();
+            }
             StreamFormat fmt;
-            lane.next.reset();
             if (!open_lane(lane, first, &fmt, error)) return false;
             if (out != nullptr) {
                 if (fmt.video) out->video = fmt.video;
@@ -568,7 +843,7 @@ struct AdaptiveSource::Impl {
     void load_vtt(const SubtitleChoice &c) {
         Rendition &r = pres.renditions[static_cast<size_t>(c.rendition)];
         std::string error;
-        if (!ensure_segments(r, &error, true)) {
+        if (!ensure_segments(r, &error, Ctx::Subtitles)) {
             if (!subs_stop) WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
             return;
         }
@@ -577,7 +852,7 @@ struct AdaptiveSource::Impl {
         for (const MediaSegment &seg : r.segments) {
             if (subs_stop) return;
             std::string body;
-            if (!fetch(seg.url, &seg.range, &body, nullptr, &error, true)) {
+            if (!fetch(seg.url, &seg.range, &body, nullptr, &error, Ctx::Subtitles)) {
                 if (!subs_stop) WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
                 return;
             }
@@ -610,9 +885,9 @@ struct AdaptiveSource::Impl {
         auto fail = [&] {
             if (!subs_stop) WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
         };
-        if (!ensure_segments(r, &error, true)) return fail();
+        if (!ensure_segments(r, &error, Ctx::Subtitles)) return fail();
         uint32_t timescale = 0;
-        if (!r.init || !fetch(r.init->url, &r.init->range, &body, nullptr, &error, true) ||
+        if (!r.init || !fetch(r.init->url, &r.init->range, &body, nullptr, &error, Ctx::Subtitles) ||
             !parse_wvtt_init(reinterpret_cast<const uint8_t *>(body.data()), body.size(), &timescale, &error)) {
             if (error.empty()) error = "no initialisation segment";
             return fail();
@@ -622,7 +897,7 @@ struct AdaptiveSource::Impl {
         size_t cues = 0;
         for (const MediaSegment &seg : r.segments) {
             if (subs_stop) return;
-            if (!fetch(seg.url, &seg.range, &body, nullptr, &error, true)) return fail();
+            if (!fetch(seg.url, &seg.range, &body, nullptr, &error, Ctx::Subtitles)) return fail();
             std::vector<SubtitleCue> got;
             if (!parse_wvtt_fragment(reinterpret_cast<const uint8_t *>(body.data()), body.size(), timescale, &got, &error)) {
                 return fail();
@@ -693,8 +968,8 @@ struct AdaptiveSource::Impl {
         info = MediaInfo{};
         info.uri = uri;
         info.container = pres.format == Presentation::Format::Dash ? "dash" : "hls";
-        info.duration_us = pres.duration_us;
-        info.seekable = true;
+        info.duration_us = pres.live ? kNoTime : pres.duration_us;
+        info.seekable = true;  // live: within the time-shift window
         const Rendition &v = pres.renditions[static_cast<size_t>(video)];
         TrackInfo vt;
         vt.index = 0;
@@ -781,7 +1056,7 @@ struct AdaptiveSource::Impl {
             SubtitleChoice c;
             c.rendition = static_cast<int>(i);
             c.track = static_cast<int>(info.tracks.size());
-            c.kind = subtitle_kind_of(r);
+            c.kind = pres.live ? SubKind::None : subtitle_kind_of(r);  // live subtitle lists are not followed yet
             TrackInfo t;
             t.index = c.track;
             t.type = TrackType::Subtitle;
@@ -803,6 +1078,7 @@ AdaptiveSource::AdaptiveSource(AdaptiveSourceOptions options) : impl_(std::make_
 
 AdaptiveSource::~AdaptiveSource() {
     impl_->stop_subtitles();
+    impl_->stop_refresh();
     impl_->close_lanes();
 }
 
@@ -830,7 +1106,12 @@ int AdaptiveSource::switches() const { return impl_->switch_count.load(); }
 bool AdaptiveSource::open(const std::string &uri, std::string *error) {
     Impl &m = *impl_;
     m.stop_subtitles();
+    m.stop_refresh();
     m.close_lanes();
+    m.live_ended = false;
+    m.zero_us = 0;
+    m.clock_offset_us = 0;
+    m.window_first.clear();
     m.pres = Presentation{};
     m.info = MediaInfo{};
     m.video = -1;
@@ -844,10 +1125,13 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
     if (!m.fetch(uri, nullptr, &body, &final_url, error)) return false;
     const size_t start = body.find_first_not_of(" \t\r\n\xEF\xBB\xBF");
     const bool hls = start != std::string::npos && body.compare(start, 7, "#EXTM3U") == 0;
-    if (!(hls ? parse_hls(body, final_url, &m.pres, error) : parse_mpd(body, final_url, &m.pres, error))) return false;
-    if (m.pres.live) {
-        *error = "live presentations are not supported yet";
+    if (!(hls ? parse_hls(body, final_url, &m.pres, error) : parse_mpd(body, final_url, &m.pres, error, m.now_us()))) {
         return false;
+    }
+    if (!hls && m.pres.live && !m.pres.utc_timing_scheme.empty()) {
+        // A live MPD is read against the server's clock where it names one.
+        m.sync_clock();
+        if (m.clock_offset_us != 0 && !parse_mpd(body, final_url, &m.pres, error, m.now_us())) return false;
     }
     m.video = choose_video(m.pres, m.opt);
     if (m.video < 0) {
@@ -865,9 +1149,33 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
         }
         m.video = start;
     }
+    if (!hls && m.pres.live) {
+        // The timeline starts at the window's first segment.
+        const auto &segs = m.pres.renditions[static_cast<size_t>(m.video)].segments;
+        if (segs.empty()) {
+            *error = "the live presentation has no segments yet";
+            return false;
+        }
+        m.zero_us = segs.front().start_us;
+        m.normalize(m.pres);
+        for (size_t i = 0; i < m.pres.renditions.size(); ++i) {
+            if (!m.pres.renditions[i].segments.empty()) m.window_first[static_cast<long>(i)] = m.pres.renditions[i].segments.front().number;
+        }
+    }
     Rendition &v = m.pres.renditions[static_cast<size_t>(m.video)];
     if (!m.ensure_segments(v, error)) return false;
-    if (m.pres.duration_us == kNoTime) {
+    if (m.pres.live) {
+        // Join a few segments behind the newest (HLS: three target durations; DASH: the suggested
+        // presentation delay, else three segments), which leaves room for the next refresh.
+        int64_t seg = v.target_duration_us;
+        for (const MediaSegment &s : v.segments) seg = std::max(seg, s.duration_us);
+        const int64_t delay = !hls && m.pres.live_delay_us != kNoTime ? m.pres.live_delay_us : 3 * seg;
+        const MediaSegment &last = v.segments.back();
+        m.position_us = std::max(v.segments.front().start_us, last.start_us + last.duration_us - delay);
+        m.pres.duration_us = kNoTime;
+        WNK_LOGI(kCat, "live: %zu segments listed, joining at %.1f s of %.1f s", v.segments.size(), m.position_us / 1e6,
+                 (last.start_us + last.duration_us) / 1e6);
+    } else if (m.pres.duration_us == kNoTime) {
         int64_t total = 0;
         for (const MediaSegment &s : v.segments) total = std::max(total, s.start_us + s.duration_us);
         m.pres.duration_us = total;
@@ -934,6 +1242,7 @@ bool AdaptiveSource::select(int video_track, int audio_track, const BackendCaps 
         return false;
     }
     m.start_subtitles();  // after the video is open: HLS cue times need its timeline origin
+    m.start_refresh();    // live: follow what the server publishes
     return out->video || out->audio;
 }
 
@@ -994,7 +1303,25 @@ MediaSource::Read AdaptiveSource::read(Packet *out, std::string *error) {
 
 bool AdaptiveSource::seek(int64_t pts_us, std::string *error) {
     Impl &m = *impl_;
-    const int64_t t = std::max<int64_t>(0, pts_us);
+    int64_t t = std::max<int64_t>(0, pts_us);
+    if (m.pres.live && m.video >= 0) {
+        // Live: within what the server still lists, and not past the newest segment.
+        std::lock_guard<std::mutex> lock(m.pres_mutex);
+        const auto &segs = m.pres.renditions[static_cast<size_t>(m.video)].segments;
+        if (!segs.empty()) {
+            int64_t lo = segs.front().start_us;
+            const auto wf = m.window_first.find(m.video);
+            if (wf != m.window_first.end()) {
+                for (const MediaSegment &s : segs) {
+                    if (s.number == wf->second) {
+                        lo = s.start_us;
+                        break;
+                    }
+                }
+            }
+            t = std::clamp(t, lo, std::max(lo, segs.back().start_us));
+        }
+    }
     if (m.lanes.empty()) {
         m.position_us = t;
         return true;

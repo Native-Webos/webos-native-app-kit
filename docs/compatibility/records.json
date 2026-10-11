@@ -683,6 +683,15 @@
       "method": "Example D 0.11.0 AdaptiveSource subtitle loader: Apple bipbop HEVC HLS (WebVTT segments with X-TIMESTAMP-MAP MPEGTS:900000), Shaka angel-one DASH (wvtt in MP4 behind a sidx, four languages)",
       "evidence": "Apple: English track chosen as default, 600 cues from 75 files; cues in time with the picture's bip/bop and Down toggles them (owner); Shaka: dialogue subtitles shown and Down cycles languages (owner)",
       "limitations": "files are fetched one at a time in playback order (Apple: ~55 s for 600 s of cues), so a far seek soon after opening may show none for a while; TTML not readable; Greek and other non-Latin scripts depend on the bundled fonts"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "media.adaptive_live",
+      "result": "supported",
+      "method": "Example D 0.12.1 AdaptiveSource live on Starfish: DASH-IF livesim2 testpic_2s (dynamic MPD, SegmentTemplate @duration, 1 min time-shift, UTCTiming http-xsdate) and Unified Streaming live HLS (MPEG-TS, separate renditions)",
+      "evidence": "livesim2: server clock +1035 ms from the TV's, joined at 54 s of a 60 s window, position advancing 1 s/s with displayed-frame callbacks once the first packet was mapped near 0 (0.12.0 held the first frame); smooth with sound, LIVE label, Left/Right seeks within the window; Unified HLS live also plays (owner)",
+      "limitations": "startup about 4.5 s from launch to first frame on livesim2; live subtitles not loaded; Akamai's public HLS live test master pointed at a missing variant (404) on 2026-10-12"
     }
   ]
 }

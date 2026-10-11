@@ -300,3 +300,44 @@ TEST("segment reader: max_parts_ahead keeps the download a few parts ahead of th
     CHECK_EQ(read_all(r, &rc).size(), size_t{8 * 5000 - 5001});
     CHECK_EQ(rc, int64_t{0});
 }
+
+TEST("segment reader: open-ended (live) readers wait for appended parts until finish()") {
+    auto t = std::make_shared<MultiTransport>();
+    for (int i = 0; i < 5; ++i) t->files["https://h/" + std::to_string(i)] = pattern(3000, static_cast<uint8_t>(i));
+    SegmentReaderOptions o;
+    o.open_ended = true;
+    SegmentReader r(t, {{"https://h/0", 0, -1}}, o);
+    uint8_t buf[3000];
+    int64_t got = 0;
+    while (got < 3000) got += r.read(buf, sizeof buf - static_cast<size_t>(got));
+    std::atomic<int64_t> next{-2};
+    std::thread reader([&] {
+        uint8_t one;
+        next = r.read(&one, 1);  // blocks: nothing more yet
+    });
+    std::this_thread::sleep_for(50ms);
+    CHECK_EQ(next.load(), int64_t{-2});
+    r.append({{"https://h/1", 0, -1}, {"https://h/2", 0, -1}});
+    reader.join();
+    CHECK_EQ(next.load(), int64_t{1});
+    CHECK_EQ(r.part_count(), size_t{3});
+    int64_t rc = 0;
+    r.finish();
+    CHECK_EQ(read_all(r, &rc).size(), size_t{2 * 3000 - 1});
+    CHECK_EQ(rc, int64_t{0});
+    r.append({{"https://h/3", 0, -1}});  // after finish: ignored
+    CHECK_EQ(r.part_count(), size_t{3});
+
+    // A live reader that has caught up can still be stopped at its boundary (a bitrate switch).
+    SegmentReader live(t, {{"https://h/0", 0, -1}, {"https://h/1", 0, -1}}, o);
+    got = 0;
+    std::vector<uint8_t> all;
+    while (all.size() < 6000) {
+        const int64_t n = live.read(buf, sizeof buf);
+        REQUIRE(n > 0);
+        all.insert(all.end(), buf, buf + n);
+    }
+    std::this_thread::sleep_for(20ms);
+    CHECK_EQ(live.stop_after_current(), size_t{2});
+    CHECK_EQ(live.read(buf, sizeof buf), int64_t{0});  // a clean end, not a wait
+}

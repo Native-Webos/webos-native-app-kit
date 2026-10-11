@@ -15,6 +15,9 @@
 // waiting for room in the buffer excluded), so a caller can estimate throughput (adaptive bitrate).
 // stop_after_current() ends the stream at the end of the part being downloaded: the demuxer then
 // meets a clean end exactly at a segment boundary, where another rendition can take over.
+//
+// Live: with `open_ended` the list grows through append() and the stream ends only after finish();
+// until then a reader that has caught up waits for the next part.
 #pragma once
 
 #include "wnk/net/byte_reader.hpp"
@@ -42,6 +45,7 @@ struct SegmentReaderOptions {
     // Parts fetched beyond the one being read (0: only bytes limit read-ahead). Bounds how much
     // old-quality media a bitrate switch must play out first.
     size_t max_parts_ahead = 0;
+    bool open_ended = false;  // live: more parts follow through append() until finish()
     int max_retries = 3;              // consecutive failed attempts on one part
     int retry_backoff_ms = 300;       // doubled per consecutive failure, capped at 3 s
     int max_redirects = 5;
@@ -77,6 +81,10 @@ class SegmentReader final : public ByteReader {
     size_t download_part() const;
     // Ends the stream after the part being downloaded; returns how many parts will be delivered.
     size_t stop_after_current();
+    // Any thread. Open-ended readers: more parts, and the end of the list.
+    void append(std::vector<SegmentPart> parts);
+    void finish();
+    size_t part_count() const;
     SegmentReaderStats stats() const;
 
     struct Impl;

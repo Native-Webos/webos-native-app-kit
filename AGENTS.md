@@ -36,6 +36,9 @@
 - Never add `Co-Authored-By:`, tool attribution or session-id lines to commits.
 - Commit as soon as a task is complete, before starting the next task.
 
+- New apps use the `app/` shell (`wnk::app::run` with a `Delegate`) rather than their own SDL loop;
+  Example A keeps its own loop on purpose as the raw diagnostic app.
+
 ## Threading rules
 - Only the main thread touches SDL, GL, UI and focus. Blocking work goes to `async::WorkerPool`.
 - Workers return results with `MainDispatcher::post`; they never wait on the main thread.

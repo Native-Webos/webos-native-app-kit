@@ -47,6 +47,8 @@ add_subdirectory(async)
 add_subdirectory(net)
 add_subdirectory(image)
 add_subdirectory(ui)
+add_subdirectory(diagnostics)
+add_subdirectory(app)
 
 if (WNK_BUILD_EXAMPLES)
     include(WebOSPackage)

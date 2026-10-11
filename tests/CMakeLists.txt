@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http image ui)
+foreach (t log platform input focus font storage async http image ui lifecycle)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -14,6 +14,7 @@ target_link_libraries(test_async PRIVATE wnk_async)
 target_link_libraries(test_http PRIVATE wnk_net)
 target_link_libraries(test_image PRIVATE wnk_image)
 target_link_libraries(test_ui PRIVATE wnk_ui)
+target_link_libraries(test_lifecycle PRIVATE wnk_lifecycle wnk_diagnostics)
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 
 # curl transport against a local HTTP/HTTPS server started by http_server.py (needs python3 + openssl).
@@ -97,4 +98,15 @@ if (TARGET wnk-tvui)
     # two lines down puts item 8 under a stationary pointer). Positions in logical 1920x1080 units.
     wnk_tvui_e2e(pointer_click_opens_details "move@904:230,click@904:230" "open details for item 1")
     wnk_tvui_e2e(pointer_wheel_scrolls_grid "Left,Down,move@556:292,wheel@-2" "focus grid.item8")
+endif ()
+if (TARGET wnk-tvui)
+    # Lifecycle: input while backgrounded is ignored, and drawing resumes after the foreground events.
+    add_test(NAME e2e.tvui.background_foreground COMMAND wnk-tvui)
+    set_tests_properties(e2e.tvui.background_foreground PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_TVUI_KEYS=bg,Right,fg,Right"
+            PASS_REGULAR_EXPRESSION "Resuming -> Running \\(FramePresented\\).*focus rail0.item1"
+            FAIL_REGULAR_EXPRESSION "focus rail0.item2|${WNK_SANITIZER_FAIL}"
+            TIMEOUT 30)
+    # Every step of the shutdown sequence runs and is timed.
+    wnk_tvui_e2e(shutdown_sequence "Escape,Escape" "SDL_Quit: [0-9.]+ ms.*shutdown complete in")
 endif ()

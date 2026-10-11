@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The app shell: everything a native webOS app needs around its UI, in the order the research
+// established (docs/research/APPLICATION-LIFECYCLE.md):
+//
+//   process env, logs → SDL_Init(0) (SAM registration) → webOS hints → video, window, GLES2 context →
+//   renderer, fonts → worker pool, dispatcher, storage, images → Ui → delegate.on_start → main loop
+//
+// The main loop polls SDL, maps keys to actions and pointer events to the Ui, drives the lifecycle
+// state machine (Running ⇄ Suspended), stops drawing while backgrounded, and records frame timing.
+// Shutdown is a fixed sequence of timed steps under a watchdog, because how long SAM waits between
+// SIGTERM and SIGKILL is unknown:
+//
+//   on_stop (save state) → dispatcher.close → pool.shutdown(deadline) → delegate and UI destroyed →
+//   image service, textures → renderer (GL objects) → GL context, window → SDL_Quit → log flush
+//
+// Apps implement Delegate and call run() from main(). Everything here runs on the main thread except
+// the pool's workers and the shutdown watchdog.
+#pragma once
+
+#include "wnk/app/lifecycle.hpp"
+#include "wnk/async/async.hpp"
+#include "wnk/diagnostics/metrics.hpp"
+#include "wnk/image/image.hpp"
+#include "wnk/input/input.hpp"
+#include "wnk/net/http.hpp"
+#include "wnk/platform/process.hpp"
+#include "wnk/render/renderer.hpp"
+#include "wnk/storage/kv.hpp"
+#include "wnk/ui/ui.hpp"
+
+#include <functional>
+#include <memory>
+#include <string>
+
+namespace wnk::app {
+
+struct AppConfig {
+    std::string fallback_app_id;  // used when $APPID is not set (host runs)
+    std::string title = "wnk app";
+    size_t worker_threads = 2;
+    bool http = false;        // create the libcurl transport (dlopen) for HTTP(S) and image URLs
+    bool images = true;       // image service + texture cache + ui::ImageSource
+    size_t image_memory_bytes = 48u << 20;
+    size_t texture_bytes = 64u << 20;
+    bool storage = false;     // open the platform key/value store (DB8 on the TV; needs database.operation)
+    bool double_back_exit = true;  // unhandled Back at the root: "Press Back again to exit"
+    int cursor_sleep_ms = 5000;
+    int shutdown_deadline_ms = 3000;  // the watchdog ends the process if teardown takes longer
+    ui::Theme theme;          // fonts are filled in by the shell
+    std::string font_regular = "fonts/AtkinsonHyperlegible-Regular.ttf";  // relative to the app dir
+    std::string font_bold = "fonts/AtkinsonHyperlegible-Bold.ttf";
+    // Scripted input for host tests: <prefix>_KEYS and <prefix>_SHOT (see Script in app.cpp).
+    std::string script_env_prefix = "WNK";
+};
+
+// What the delegate can reach. Valid from on_start until on_stop returns.
+class Context {
+ public:
+    virtual ~Context() = default;
+    virtual ui::Ui &ui() = 0;
+    virtual render::Renderer &renderer() = 0;
+    virtual async::WorkerPool &pool() = 0;
+    virtual async::MainDispatcher &dispatcher() = 0;
+    virtual image::ImageService *images() = 0;              // nullptr unless AppConfig::images
+    virtual std::shared_ptr<net::HttpTransport> http() = 0;  // nullptr unless AppConfig::http and available
+    virtual storage::KeyValueStore *store() = 0;             // nullptr unless AppConfig::storage and opened
+    virtual const platform::LaunchInfo &launch() = 0;
+    virtual const std::string &runtime_dir() = 0;            // empty if unavailable
+    virtual State state() const = 0;
+    virtual const diagnostics::FrameMetrics &frame_metrics() const = 0;
+    // Ends the main loop after the current iteration; the shutdown sequence then runs.
+    virtual void quit(const char *reason) = 0;
+};
+
+class Delegate {
+ public:
+    virtual ~Delegate() = default;
+    // Build the UI. The first frame is drawn after this returns.
+    virtual void on_start(Context &ctx) = 0;
+    // Actions the Ui did not consume. Return true to stop the shell's default handling
+    // (Exit quits; Back at the root asks for a second Back).
+    virtual bool on_action(Context &ctx, const input::ActionEvent &e);
+    // After every lifecycle transition (Suspended: pause media and timers; Resuming: refresh).
+    virtual void on_lifecycle(Context &ctx, const Lifecycle::Transition &t);
+    // Once per drawn frame, after the Ui has been updated.
+    virtual void on_frame(Context &ctx, float dt);
+    // Shutdown has begun: save state. Workers and the dispatcher still run; the UI still exists.
+    virtual void on_stop(Context &ctx);
+};
+
+using DelegateFactory = std::function<std::unique_ptr<Delegate>()>;
+
+// Runs the app; returns the process exit code.
+int run(int argc, char **argv, const AppConfig &config, const DelegateFactory &factory);
+
+}  // namespace wnk::app

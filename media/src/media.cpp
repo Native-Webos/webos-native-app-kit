@@ -122,6 +122,7 @@ bool adts_header(const std::vector<uint8_t> &asc, size_t payload_size, uint8_t o
 int64_t PtsSplice::map(int64_t pts_us, int64_t clock_out_us) {
     if (pts_us == kNoTime) return kNoTime;
     if (pending_ || segments_.empty()) {
+        if (segments_.empty() && !pending_ && start_us_ != kNoTime) shift_us_ = start_us_ - pts_us;
         if (pending_) {
             int64_t after = max_out_us_;
             if (clock_out_us != kNoTime && (after == kNoTime || clock_out_us > after)) after = clock_out_us;

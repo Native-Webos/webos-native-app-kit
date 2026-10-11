@@ -618,6 +618,18 @@ TEST("ndl splice: PTS after a seek continue just after the highest one fed, forw
     CHECK_EQ(s.map(7000000), int64_t{7000000});
 }
 
+TEST("splice: a start offset moves the first packet after a reset to the start of the decoder's timeline") {
+    PtsSplice s(200000, 100000);
+    CHECK_EQ(s.map(54066667), int64_t{100000});     // a live stream joined 54 s in
+    CHECK_EQ(s.map(54000000), int64_t{33333});      // audio slightly ahead stays positive
+    CHECK_EQ(s.map(55066667), int64_t{1100000});
+    CHECK_EQ(s.unmap(1100000), int64_t{55066667});  // positions read back in content time
+    s.splice();
+    CHECK_EQ(s.map(80000000), int64_t{1300000});    // a seek continues after what was fed
+    s.reset();
+    CHECK_EQ(s.map(7000000), int64_t{100000});
+}
+
 TEST("splice: new content never lands behind the decoder's clock (a burst of seeks fed nothing for a while)") {
     PtsSplice s(200000);
     s.map(0);

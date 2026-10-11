@@ -17,8 +17,11 @@ namespace wnk::media {
 
 class PtsSplice {
  public:
-    explicit PtsSplice(int64_t gap_us) : gap_us_(gap_us) {}
-    void reset() { *this = PtsSplice(gap_us_); }
+    // `start_us`: where the first packet after a reset lands (kNoTime: where it is). Starfish's clock
+    // starts at 0 and holds the first frame until it reaches its PTS, so a live stream joined 54 s
+    // into its window must be moved to the start of the decoder's timeline.
+    explicit PtsSplice(int64_t gap_us, int64_t start_us = kNoTime) : gap_us_(gap_us), start_us_(start_us) {}
+    void reset() { *this = PtsSplice(gap_us_, start_us_); }
     void splice() { pending_ = true; }
     // kNoTime stays kNoTime. `clock_out_us`: where the decoder's clock is now, if known (only used
     // for the first packet after a splice).
@@ -32,6 +35,7 @@ class PtsSplice {
         int64_t shift;
     };
     int64_t gap_us_;
+    int64_t start_us_;
     int64_t shift_us_ = 0;
     bool pending_ = false;
     int64_t max_out_us_ = kNoTime;

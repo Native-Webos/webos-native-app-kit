@@ -208,7 +208,11 @@ bool StarfishBackend::available(std::string *why) {
     return ok;
 }
 
-StarfishBackend::StarfishBackend(StarfishOptions options) : options_(std::move(options)), splice_(kSpliceGapUs) {
+// The first packet of a load goes to 100 ms on the decoder's timeline (audio may run a little ahead
+// of the first video frame): the pipeline's clock starts at 0 (a live stream joined at 54 s held its
+// first frame, measured on the OLED65C1PTB).
+StarfishBackend::StarfishBackend(StarfishOptions options)
+    : options_(std::move(options)), splice_(kSpliceGapUs, 100000) {
     if (options_.app_id.empty()) {
         const char *id = std::getenv("APPID");
         options_.app_id = id != nullptr ? id : "";

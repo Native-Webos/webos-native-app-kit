@@ -62,6 +62,7 @@ void PlaybackController::post(Command c) {
 void PlaybackController::open(const std::string &uri) { post({Cmd::Open, uri, 0}); }
 void PlaybackController::play() { post({Cmd::Play, {}, 0}); }
 void PlaybackController::pause() { post({Cmd::Pause, {}, 0}); }
+void PlaybackController::pause_and_release() { post({Cmd::Pause, {}, 0, true}); }
 
 void PlaybackController::toggle_pause() {
     const PlayState s = state();
@@ -123,13 +124,18 @@ PlayState PlaybackController::state() const {
     return snap_.state;
 }
 
-int64_t PlaybackController::estimated_position() const {
+int64_t PlaybackController::raw_position() const {
     if (paused_at_us_ != kNoTime) return paused_at_us_;
     if (!clock_running_ || clock_base_us_ == kNoTime) return clock_base_us_;
     const auto elapsed = std::chrono::steady_clock::now() - clock_start_;
     int64_t pos = clock_base_us_ + std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
     if (snap_.duration_us != kNoTime) pos = std::min(pos, snap_.duration_us);
     return pos;
+}
+
+int64_t PlaybackController::estimated_position() const {
+    const int64_t pos = raw_position();
+    return pos != kNoTime && clock_base_us_ != kNoTime && clock_running_ ? std::max(pos, clock_base_us_) : pos;
 }
 
 // ---- playback thread --------------------------------------------------------------------------------
@@ -175,7 +181,7 @@ void PlaybackController::on_backend_event(BackendEvent e, const std::string &det
         cv_.notify_all();
     } else if (e == BackendEvent::ResourceLost) {
         // Treat like a pause: the decoder must be loaded again before more packets go in.
-        post({Cmd::Pause, {}, 0});
+        post({Cmd::Pause, {}, 0, true});
     }
 }
 
@@ -214,7 +220,14 @@ bool PlaybackController::apply(const Command &c) {
             break;
         }
         case Cmd::Pause:
-            if (state() == PlayState::Playing || state() == PlayState::Seeking) do_pause();
+            if (state() == PlayState::Playing || state() == PlayState::Seeking) {
+                do_pause(c.release);
+            } else if (c.release && state() == PlayState::Paused && loaded_) {
+                // Already held on a frame: give the decoder back; resume reloads and seeks back.
+                pending_.reset();
+                backend_->unload();
+                loaded_ = false;
+            }
             break;
         case Cmd::Seek: do_seek(c.pts_us); break;
         case Cmd::Stop:
@@ -247,6 +260,8 @@ void PlaybackController::do_open(const std::string &uri) {
         std::lock_guard<std::mutex> lock(mutex_);
         snap_ = PlaybackSnapshot{};
         last_primary_pts_ = kNoTime;
+        last_any_pts_ = kNoTime;
+        splice_delay_us_ = 0;
         clock_running_ = false;
         clock_base_us_ = kNoTime;
         paused_at_us_ = kNoTime;
@@ -308,6 +323,15 @@ void PlaybackController::do_seek(int64_t pts_us) {
         return;
     }
     const bool resume = before != PlayState::Paused;
+    const BackendCaps caps = backend_->caps();
+    int64_t splice_delay = 0;
+    if (loaded_ && caps.seek_splices) {
+        // What the decoder still holds plays first: from the clock's position to the last PTS fed.
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int64_t pos = raw_position();
+        if (resume && pos != kNoTime && last_any_pts_ != kNoTime) splice_delay = std::max<int64_t>(0, last_any_pts_ - pos);
+        splice_delay += caps.splice_gap_us;
+    }
     set_state(PlayState::Seeking);
     source_->reset_interrupt();
     pending_.reset();
@@ -329,6 +353,8 @@ void PlaybackController::do_seek(int64_t pts_us) {
         clock_running_ = false;
         clock_base_us_ = pts_us;
         last_primary_pts_ = kNoTime;
+        last_any_pts_ = kNoTime;
+        splice_delay_us_ = splice_delay;
         paused_at_us_ = resume ? kNoTime : pts_us;
     }
     if (resume) {
@@ -338,7 +364,7 @@ void PlaybackController::do_seek(int64_t pts_us) {
     } else {
         // Stay paused at the new position; the decoder is reloaded on resume.
         feeding_ = false;
-        if (loaded_ && !backend_->caps().pause) {
+        if (loaded_ && !caps.pause) {
             backend_->unload();
             loaded_ = false;
         }
@@ -346,15 +372,21 @@ void PlaybackController::do_seek(int64_t pts_us) {
     }
 }
 
-void PlaybackController::do_pause() {
-    int64_t at;
+void PlaybackController::do_pause(bool release) {
+    const BackendCaps caps = backend_->caps();
+    const bool hold = caps.pause && !release;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        at = estimated_position();
+        int64_t at = raw_position();
+        // A draining pause stops the picture where feeding stopped, not where the clock is now;
+        // resuming from the clock would leave the decoder that much short of data.
+        if (hold && caps.pause_drains && loaded_ && last_primary_pts_ != kNoTime) {
+            at = std::max(at, last_primary_pts_);
+        }
         paused_at_us_ = at;
         clock_running_ = false;
     }
-    if (backend_->caps().pause && loaded_ && backend_->pause(true)) {
+    if (hold && loaded_ && backend_->pause(true)) {
         feeding_ = false;
     } else {
         // No real pause: stop feeding and release the decoder; resume reloads and seeks back.
@@ -378,7 +410,8 @@ void PlaybackController::do_resume() {
         std::lock_guard<std::mutex> lock(mutex_);
         paused_at_us_ = kNoTime;
         clock_base_us_ = at;
-        clock_start_ = std::chrono::steady_clock::now();
+        clock_start_ = std::chrono::steady_clock::now() + std::chrono::microseconds(splice_delay_us_);
+        splice_delay_us_ = 0;
         clock_running_ = true;
         feeding_ = true;
     } else {
@@ -408,7 +441,7 @@ void PlaybackController::feed_one() {
             bool ended = eos_seen_;
             if (!ended) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                const int64_t pos = estimated_position();
+                const int64_t pos = raw_position();
                 // The estimate is capped at the duration, so the target must be too.
                 int64_t end = last_primary_pts_ == kNoTime ? 0 : last_primary_pts_ + kEndSlackUs;
                 if (snap_.duration_us != kNoTime) end = std::min(end, snap_.duration_us);
@@ -443,7 +476,7 @@ void PlaybackController::feed_one() {
     if (options_.max_lead_us > 0 && pending_->pts_us != kNoTime) {
         std::unique_lock<std::mutex> lock(mutex_);
         if (clock_running_) {
-            const int64_t ahead = pending_->pts_us - estimated_position() - options_.max_lead_us;
+            const int64_t ahead = pending_->pts_us - raw_position() - options_.max_lead_us;
             if (ahead > 0) {
                 const auto wait = std::chrono::microseconds(std::min<int64_t>(ahead, 20000));
                 cv_.wait_for(lock, wait, [this] { return !commands_.empty(); });
@@ -465,9 +498,13 @@ void PlaybackController::feed_one() {
             if (primary && pending_->pts_us != kNoTime) {
                 last_primary_pts_ = std::max(last_primary_pts_ == kNoTime ? pending_->pts_us : last_primary_pts_, pending_->pts_us);
             }
+            if (pending_->pts_us != kNoTime) {
+                last_any_pts_ = last_any_pts_ == kNoTime ? pending_->pts_us : std::max(last_any_pts_, pending_->pts_us);
+            }
             if (!clock_running_ && primary && pending_->pts_us != kNoTime) {
                 clock_base_us_ = pending_->pts_us;
-                clock_start_ = std::chrono::steady_clock::now();
+                clock_start_ = std::chrono::steady_clock::now() + std::chrono::microseconds(splice_delay_us_);
+                splice_delay_us_ = 0;
                 clock_running_ = true;
             }
             pending_.reset();

@@ -64,6 +64,17 @@ NDL_DirectMediaQuit()
   downmixed by the app). MP3 passed through (mono 48 kHz) loaded but played **silently**.
 - `NDL_DirectMediaSetAppState(FOREGROUND)` right after init returned -1.
 - PTS unit: µs and ms fed in real time looked identical, so the question below stays open.
+- **Pause and seek without the black picture (2026-10-11):** unloading NDL blanks the video plane until
+  the next load presents a frame. Stopping the feed instead keeps the decoder loaded: the ~1 s queued
+  plays out, the picture holds on the last frame, and feeding again later resumes in sync (NDL's clock
+  waits for data). A seek that flushes nothing and shifts later PTS to continue 200 ms after the last one
+  fed shows the new content once the queue has played out (0.5-0.8 s at a 1 s lead), with sound in sync,
+  through bursts of quick seeks. `NDL_DirectVideoFlushRenderBuffer` (webOS 5.3.1+) flushed video in
+  4-15 ms, but **sound was gone for the rest of the session**, as punktfunk warned for flushes.
+  `NDL_DirectAudioPause`/`Resume` exist only in the v1 library (webOS 4.x firmware), not in v2.
+- PlxNative (Starfish) has a real `Pause()`, but on webOS 5+ it seeks by a full Unload + Load: its
+  in-place seek relies on structure offsets read off webOS 4.5 binaries and is disabled elsewhere
+  (`rust-modules/media/src/player/engine.rs`) `[SRC]`.
 
 ### Disputed: v2 PTS unit `[UNK]`
 

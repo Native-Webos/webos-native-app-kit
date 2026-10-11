@@ -9,13 +9,15 @@
 // second, so on the TV picture/sound sync and the NDL PTS unit can be judged by eye and ear.
 //
 // Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Stop or Back leaves. Any key
-// shows the controls; they hide after 4 s of playback. Backgrounding the app pauses playback and
-// releases the decoder.
+// shows the controls; they hide after 4 s of playback. Pause and seek keep the decoder loaded, so the
+// picture holds; backgrounding the app pauses playback and releases the decoder.
 //
 // Launch params (ares-launch --params):
 //   {"uri": "file:///path/to/file.mkv"}   play that file straight away; http(s):// URIs stream through
 //                                          the kit's HTTP client (byte ranges make them seekable)
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
+//   {"ndlReload": 1}                       pause and seek by reloading NDL (black picture; comparison)
+//   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"autoplay": 0}                        open the first clip at start (used by scripted runs: 0..2)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
@@ -29,6 +31,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -50,6 +53,8 @@ struct Clip {
 struct Settings {
     std::string clips_dir;
     PtsUnit pts_unit = PtsUnit::Microseconds;
+    bool ndl_reload = false;
+    int lead_ms = 1000;
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
 };
 
@@ -66,6 +71,7 @@ std::unique_ptr<MediaBackend> make_backend(const Settings &s) {
     if (wnk::platform::kIsWebOS && NdlBackend::available(&why)) {
         NdlOptions o;
         o.pts_unit = s.pts_unit;
+        o.reload_to_pause_and_seek = s.ndl_reload;
         return std::make_unique<NdlBackend>(o);
     }
     if (wnk::platform::kIsWebOS) WNK_LOGW(kCat, "NDL unavailable (%s): no picture", why.c_str());
@@ -99,8 +105,10 @@ class PlayerScreen : public Screen {
 
         auto backend = make_backend(s);
         backend_name_ = backend->name();
+        PlaybackOptions po;
+        po.max_lead_us = static_cast<int64_t>(s.lead_ms) * 1000;
         controller_ = std::make_unique<PlaybackController>(std::make_unique<FfmpegSource>(FfmpegSourceOptions{s.http, {}}),
-                                                           std::move(backend), ctx.dispatcher());
+                                                           std::move(backend), ctx.dispatcher(), po);
         controller_->set_state_callback([this](PlayState from, PlayState to, const PlaybackSnapshot &snap) {
             WNK_LOGI(kCat, "player state %s -> %s%s%s", play_state_name(from), play_state_name(to),
                      snap.error.empty() ? "" : ": ", snap.error.c_str());
@@ -135,8 +143,9 @@ class PlayerScreen : public Screen {
         }
     }
 
-    void pause() {
-        if (controller_ && controller_->state() == PlayState::Playing) controller_->pause();
+    // Leaving the app: pause and give the decoder back (a held pause would keep it).
+    void pause_for_background() {
+        if (controller_ != nullptr) controller_->pause_and_release();
     }
 
  protected:
@@ -274,10 +283,15 @@ class Player : public wnk::app::Delegate {
         const auto params = nlohmann::json::parse(ctx.launch().params_json.empty() ? "{}" : ctx.launch().params_json, nullptr, false);
         if (params.is_object()) {
             if (params.contains("ptsUnit") && params["ptsUnit"] == "ms") s.pts_unit = PtsUnit::Milliseconds;
+            if (params.contains("ndlReload") && params["ndlReload"] == 1) s.ndl_reload = true;
+            if (params.contains("leadMs") && params["leadMs"].is_number_integer()) {
+                s.lead_ms = std::clamp(params["leadMs"].get<int>(), 100, 5000);
+            }
             if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
             if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
         }
-        WNK_LOGI(kCat, "%s; PTS unit %s", FfmpegSource::version().c_str(), s.pts_unit == PtsUnit::Milliseconds ? "ms" : "us");
+        WNK_LOGI(kCat, "%s; PTS unit %s; NDL pause/seek by %s; lead %d ms", FfmpegSource::version().c_str(),
+                 s.pts_unit == PtsUnit::Milliseconds ? "ms" : "us", s.ndl_reload ? "reload" : "hold/splice", s.lead_ms);
         const std::vector<Clip> clips = {
             {"H.264 + AAC", "MP4 · 1080p25 · AAC decoded to PCM", "h264-aac.mp4"},
             {"HEVC + AC-3 5.1", "MKV · 1080p25 · AC-3 downmixed to PCM stereo", "hevc-ac3-5.1.mkv"},
@@ -294,9 +308,9 @@ class Player : public wnk::app::Delegate {
     }
 
     void on_lifecycle(wnk::app::Context &, const wnk::app::Lifecycle::Transition &t) override {
-        // Leaving the app: stop decoding (the controller releases NDL on pause) and tell NDL.
+        // Leaving the app: stop decoding, release NDL and tell it.
         if (t.to == wnk::app::State::Suspended) {
-            if (auto *p = dynamic_cast<PlayerScreen *>(nav_->top())) p->pause();
+            if (auto *p = dynamic_cast<PlayerScreen *>(nav_->top())) p->pause_for_background();
             if (wnk::platform::kIsWebOS) NdlBackend::set_app_foreground(false);
         } else if (t.to == wnk::app::State::Resuming && wnk::platform::kIsWebOS) {
             NdlBackend::set_app_foreground(true);

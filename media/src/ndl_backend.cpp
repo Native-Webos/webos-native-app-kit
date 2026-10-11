@@ -4,6 +4,7 @@
 #include "wnk/diagnostics/crash.hpp"
 #include "wnk/log.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -18,6 +19,8 @@ namespace {
 
 constexpr const char *kCat = "ndl";
 constexpr const char *kLib = "libNDL_directmedia.so.1";
+// After a splice the new content starts this far after the last PTS fed.
+constexpr int64_t kSpliceGapUs = 200000;
 
 struct Api {
     void *handle = nullptr;
@@ -30,6 +33,8 @@ struct Api {
     int (*audio_play)(void *, unsigned int, long long) = nullptr;
     int (*set_area)(int, int, int, int) = nullptr;
     const char *(*get_error)() = nullptr;
+    // Optional (webOS 5.3.1+ per the firmware inventory), for logs only.
+    int (*render_length)(int *) = nullptr;
     std::string why;
 };
 
@@ -66,8 +71,10 @@ bool load_api() {
     if (!ok) {
         dlclose(g_api.handle);
         g_api.handle = nullptr;
+        return false;
     }
-    return ok;
+    g_api.render_length = reinterpret_cast<int (*)(int *)>(dlsym(g_api.handle, "NDL_DirectVideoGetRenderBufferLength"));
+    return true;
 }
 
 std::string last_error() {
@@ -105,7 +112,18 @@ void at_exit_release() {
 
 }  // namespace
 
-NdlBackend::NdlBackend(NdlOptions options) : options_(std::move(options)) {
+int64_t PtsSplice::map(int64_t pts_us) {
+    if (pts_us == kNoTime) return kNoTime;
+    if (pending_) {
+        pending_ = false;
+        shift_us_ = (max_out_us_ == kNoTime ? pts_us : max_out_us_ + gap_us_) - pts_us;
+    }
+    const int64_t out = pts_us + shift_us_;
+    max_out_us_ = max_out_us_ == kNoTime ? out : std::max(max_out_us_, out);
+    return out;
+}
+
+NdlBackend::NdlBackend(NdlOptions options) : options_(std::move(options)), splice_(kSpliceGapUs) {
     if (options_.app_id.empty()) {
         const char *id = std::getenv("APPID");
         options_.app_id = id != nullptr ? id : "";
@@ -143,7 +161,11 @@ BackendCaps NdlBackend::caps() const {
     // PCM only: MP3 passed through loaded fine but played silently on an OLED65C1PTB (webOS 6.5.3,
     // mono 48 kHz), so sources decode MP3 to PCM like everything else.
     c.audio_codecs = {CodecId::PcmS16};
-    c.pause = false;
+    const bool hold = !options_.reload_to_pause_and_seek;
+    c.pause = hold;
+    c.pause_drains = hold;
+    c.seek_splices = hold;
+    c.splice_gap_us = hold ? kSpliceGapUs : 0;
     c.position = false;
     return c;
 }
@@ -277,6 +299,7 @@ bool NdlBackend::load_locked(const StreamFormat &format, std::string *error) {
     loaded_ = true;
     format_ = format;
     video_fed_ = audio_fed_ = 0;
+    splice_.reset();
     const Rect a = area_set_ ? area_ : Rect{0, 0, 1920, 1080};
     const int ar = g_api.set_area(static_cast<int>(a.x), static_cast<int>(a.y), static_cast<int>(a.w), static_cast<int>(a.h));
     WNK_LOGI(kCat, "NDL_DirectVideoSetArea(%.0f, %.0f, %.0f, %.0f) -> %d", a.x, a.y, a.w, a.h, ar);
@@ -289,7 +312,13 @@ MediaBackend::Feed NdlBackend::feed(const Packet &p) {
     const bool video = p.type == TrackType::Video;
     if (video && !format_.video) return Feed::Accepted;  // not loaded with that stream: drop
     if (!video && !format_.audio) return Feed::Accepted;
-    const long long pts = convert_pts(p.pts_us, options_.pts_unit);
+    const int64_t before = splice_.shift_us();
+    const int64_t out_us = splice_.map(p.pts_us);
+    if (splice_.shift_us() != before) {
+        WNK_LOGI(kCat, "after seek: content %lld us continues at %lld us", static_cast<long long>(p.pts_us),
+                 static_cast<long long>(out_us));
+    }
+    const long long pts = convert_pts(out_us, options_.pts_unit);
     void *data = const_cast<uint8_t *>(p.data.data());  // NDL takes void*, does not write
     const auto size = static_cast<unsigned int>(p.data.size());
     const int rc = video ? g_api.video_play(data, size, pts) : g_api.audio_play(data, size, pts);
@@ -302,9 +331,26 @@ MediaBackend::Feed NdlBackend::feed(const Packet &p) {
     return Feed::Accepted;
 }
 
+bool NdlBackend::pause(bool paused) {
+    if (options_.reload_to_pause_and_seek) return false;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    int len = -1;
+    const int rc = g_api.render_length != nullptr ? g_api.render_length(&len) : -2;
+    WNK_LOGI(kCat, "%s by %s feeding (decoder stays loaded); render buffer %d (rc %d)", paused ? "pause" : "resume",
+             paused ? "stopping" : "restarting", len, rc);
+    return loaded_;
+}
+
 bool NdlBackend::flush(std::string *error) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!loaded_) return true;
+    if (!options_.reload_to_pause_and_seek) {
+        int len = -1;
+        if (g_api.render_length != nullptr) g_api.render_length(&len);
+        WNK_LOGI(kCat, "splice seek: nothing flushed (render buffer %d); later packets continue the timeline", len);
+        splice_.splice();
+        return true;
+    }
     const StreamFormat f = format_;
     unload_locked();
     return load_locked(f, error);

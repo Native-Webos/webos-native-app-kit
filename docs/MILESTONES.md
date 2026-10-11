@@ -278,7 +278,9 @@ plays `{"uri": "http://..."}` (0.2.0).
 
 On hardware (OLED65C1PTB, webOS 6.5.3, 2026-10-11): 180 s 1080p MP4 (index at the end) and MPEG-TS over LAN
 HTTP play in sync; the MP4 opens in 78 ms; seeks are back to playing in 170–440 ms and TS seeks start on a
-keyframe. The picture goes black during every seek and pause because NDL v2 is unloaded and reloaded.
+keyframe. The picture went black during every seek and pause because NDL v2 was unloaded and reloaded;
+since player 0.3.0 pause only stops feeding and seeks splice the timeline (no black, sound in sync,
+measured on the same TV; `docs/research/NATIVE-MEDIA.md`).
 
 Found on the way and fixed: MPEG-TS has no keyframe index, so FFmpeg's seek lands near the timestamp (before
 or after it) and video was dropped until the next keyframe. `FfmpegSource::seek` now reads forward to the
@@ -286,7 +288,7 @@ target and replays from the last keyframe before it, starting 1–16 s further b
 when there is none.
 
 Open: subtitles, HDR metadata, VP9/AV1 on the TV,
-Opus passthrough, resampling for sample rates NDL lacks, seek/pause without a black screen, video-only files (reported to need an audio prime),
+Opus passthrough, resampling for sample rates NDL lacks, pause and seek latency (the queued lead, up to 1 s), video-only files (reported to need an audio prime),
 a decoder-side position, real pause via Starfish, and a PTS-unit test that does not feed in real time.
 
 ## M8–M10

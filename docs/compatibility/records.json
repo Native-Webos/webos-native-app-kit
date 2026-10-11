@@ -494,6 +494,33 @@
       "method": "Example D 0.2.0, same server: 180 s 1080p25 H.264 + AAC MPEG-TS (186 MB)",
       "evidence": "plays from 0.02 s; every seek starts at a video keyframe (16.02, 27.02, 37.02, 47.02, 57.02 s) after 310-380 ms, 2-3 range requests each while stepping back",
       "limitations": "the picture goes black during each seek and pause: NDL v2 is unloaded and reloaded (no safe flush or pause)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.ndl.pause_by_starving",
+      "result": "supported",
+      "method": "Example D 0.2.1-0.3.0: pause stops feeding NDL v2 and keeps it loaded; 180 s 1080p H.264 + PCM over LAN HTTP",
+      "evidence": "no black picture; the picture holds after the ~1 s queue plays out; resumed with beeps in sync with the flashes (owner, several pause/resume cycles)",
+      "limitations": "the pause takes effect only after the queued lead (up to 1 s) has played"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.ndl.seek_by_pts_splice",
+      "result": "supported",
+      "method": "Example D 0.2.2-0.3.0: nothing flushed on seek; later PTS shifted to continue 200 ms after the last fed; controller clock starts after the backlog",
+      "evidence": "no black picture, sound in sync after live and paused seeks and a burst of 5 quick seeks; the continuation point tracked real time (no backlog growth)",
+      "limitations": "old content keeps playing for 0.5-0.8 s after the key press at a 1 s feeding lead"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.ndl.flush_render_buffer",
+      "result": "unsupported",
+      "method": "Example D 0.2.1: NDL_DirectVideoFlushRenderBuffer on seek, decoder kept loaded, PTS continued monotonically",
+      "evidence": "returned 0 in 4-15 ms, no black picture, but no sound for the rest of the session although audio packets kept being accepted",
+      "limitations": "not usable for seeking while it kills audio; whether a reload restores audio was not tested"
     }
   ]
 }

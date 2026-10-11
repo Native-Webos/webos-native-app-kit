@@ -131,6 +131,9 @@ class PacedBackend : public MediaBackend {
         std::atomic<int> video{0}, audio{0};
         std::atomic<int64_t> first_video_after_flush{kNoTime};
         std::atomic<bool> first_was_key{false};
+        std::atomic<bool> pause_drains{false};
+        std::atomic<bool> seek_splices{false};
+        std::atomic<int64_t> last_video_pts{kNoTime};
         AudioFormat audio_format;
         std::mutex m;
     };
@@ -143,6 +146,9 @@ class PacedBackend : public MediaBackend {
         c.video_codecs = {CodecId::H264};
         c.audio_codecs = {CodecId::PcmS16};
         c.pause = can_pause_;
+        c.pause_drains = log_->pause_drains;
+        c.seek_splices = log_->seek_splices;
+        c.splice_gap_us = log_->seek_splices ? 100000 : 0;
         return c;
     }
     void set_event_callback(EventFn fn) override { events_ = std::move(fn); }
@@ -169,6 +175,7 @@ class PacedBackend : public MediaBackend {
                 log_->first_video_after_flush = p.pts_us;
                 log_->first_was_key = p.key;
             }
+            log_->last_video_pts = p.pts_us;
             ++log_->video;
         } else {
             ++log_->audio;
@@ -230,7 +237,8 @@ struct Rig {
         return pred();
     }
     bool wait_state(PlayState s, std::chrono::milliseconds timeout = 5000ms) {
-        return wait([&] { return pc->state() == s; }, timeout);
+        // The state is published before its callback is posted: wait for the callback too.
+        return wait([&] { return pc->state() == s && !transitions.empty() && transitions.back().second == s; }, timeout);
     }
     bool saw(PlayState from, PlayState to) const {
         for (const auto &t : transitions) {
@@ -329,6 +337,53 @@ TEST("controller: with backend pause the decoder stays loaded") {
     r.pc->stop();
 }
 
+TEST("controller: a draining pause stops the clock at the last fed frame and resumes from there") {
+    PlaybackOptions o;
+    o.max_lead_us = 2000000;  // well ahead of the clock, so the difference is visible
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/true, o);
+    r.log->pause_drains = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.pc->pause();
+    REQUIRE(r.wait_state(PlayState::Paused));
+    const int64_t fed = r.log->video.load();
+    const int64_t paused_at = r.pc->snapshot().position_us;
+    CHECK_EQ(paused_at, r.log->last_video_pts.load());
+    std::this_thread::sleep_for(50ms);
+    CHECK_EQ(r.log->video.load(), fed);  // nothing fed while paused
+    r.pc->play();
+    REQUIRE(r.wait_state(PlayState::Playing));
+    REQUIRE(r.wait([&] { return r.log->video.load() > fed; }));
+    CHECK(r.pc->snapshot().position_us >= paused_at);
+    CHECK_EQ(r.log->unloads.load(), 0);
+    CHECK_EQ(r.source->seeks.load(), 0);
+    r.pc->stop();
+}
+
+TEST("controller: pause_and_release unloads even a pausing backend, also when already paused; resume seeks back") {
+    Rig r(std::make_unique<ScriptedSource>(20000000), /*can_pause=*/true);
+    r.log->pause_drains = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    r.pc->pause_and_release();
+    REQUIRE(r.wait_state(PlayState::Paused));
+    CHECK_EQ(r.log->unloads.load(), 1);
+    r.pc->play();
+    REQUIRE(r.wait_state(PlayState::Playing));
+    CHECK_EQ(r.log->loads.load(), 2);
+    CHECK_EQ(r.source->seeks.load(), 1);
+    // Held pause first, then released (the app goes to the background while paused).
+    r.pc->pause();
+    REQUIRE(r.wait_state(PlayState::Paused));
+    CHECK_EQ(r.log->unloads.load(), 1);
+    r.pc->pause_and_release();
+    REQUIRE(r.wait([&] { return r.log->unloads.load() == 2; }));
+    r.pc->play();
+    REQUIRE(r.wait_state(PlayState::Playing));
+    CHECK_EQ(r.log->loads.load(), 3);
+    r.pc->stop();
+}
+
 TEST("controller: seek flushes, restarts at a keyframe, and only the latest of a burst runs") {
     Rig r(std::make_unique<ScriptedSource>(60000000));  // 60 s
     r.pc->open("x");
@@ -369,8 +424,9 @@ TEST("controller: stop interrupts a blocked open and joins quickly") {
     CHECK_EQ(r.pc->state(), PlayState::Stopped);
 }
 
-TEST("controller: losing the decoder resource pauses and unloads") {
-    Rig r(std::make_unique<ScriptedSource>(20000000));
+TEST("controller: losing the decoder resource pauses and unloads, even with a pausing backend") {
+    Rig r(std::make_unique<ScriptedSource>(20000000), /*can_pause=*/true);
+    r.log->pause_drains = true;
     r.pc->open("x");
     REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
     r.backend->emit(BackendEvent::ResourceLost);
@@ -429,5 +485,47 @@ TEST("ndl backend: PTS conversion, PCM rate table, and a clear failure where NDL
     const BackendCaps c = NdlBackend().caps();
     CHECK(c.accepts(CodecId::Hevc));
     CHECK(!c.accepts(CodecId::Aac));  // decoded to PCM by the source
-    CHECK(!c.pause);
+    CHECK(c.pause && c.pause_drains && c.seek_splices);
+    CHECK(c.splice_gap_us > 0);
+    NdlOptions reload;
+    reload.reload_to_pause_and_seek = true;
+    const BackendCaps r = NdlBackend(reload).caps();
+    CHECK(!r.pause && !r.seek_splices);
+}
+
+TEST("ndl splice: PTS after a seek continue just after the highest one fed, forwards and backwards") {
+    PtsSplice s(200000);
+    CHECK_EQ(s.map(0), int64_t{0});
+    CHECK_EQ(s.map(40000), int64_t{40000});
+    CHECK_EQ(s.map(1000000), int64_t{1000000});  // audio ahead of video
+    CHECK_EQ(s.map(kNoTime), kNoTime);
+    s.splice();                                  // seek forward to 30 s
+    CHECK_EQ(s.map(30000000), int64_t{1200000});
+    CHECK_EQ(s.map(30040000), int64_t{1240000});
+    CHECK_EQ(s.map(29990000), int64_t{1190000}); // audio slightly before the keyframe keeps the offset
+    s.splice();                                  // and back to 5 s
+    CHECK_EQ(s.map(5000000), int64_t{1440000});
+    CHECK_EQ(s.map(5040000), int64_t{1480000});
+    s.reset();
+    CHECK_EQ(s.map(7000000), int64_t{7000000});
+}
+
+TEST("controller: a splicing backend's new content waits for the backlog; the shown position holds at the target") {
+    PlaybackOptions o;
+    o.max_lead_us = 600000;
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/true, o);
+    r.log->pause_drains = true;
+    r.log->seek_splices = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.pc->seek(20000000);
+    REQUIRE(r.wait([&] { return r.log->flushes.load() == 1 && r.log->first_video_after_flush.load() != kNoTime; }));
+    const int64_t base = r.log->first_video_after_flush.load();
+    // About 0.6 s queued before the seek plus a 0.1 s gap: the clock holds at the new base meanwhile.
+    std::this_thread::sleep_for(250ms);
+    CHECK_EQ(r.pc->snapshot().position_us, base);
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us > base + 100000; }, 3000ms));
+    CHECK_EQ(r.log->unloads.load(), 0);
+    CHECK_EQ(r.log->flushes.load(), 1);
+    r.pc->stop();
 }

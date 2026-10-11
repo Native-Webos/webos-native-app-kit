@@ -95,6 +95,13 @@ struct BackendCaps {
     std::vector<CodecId> video_codecs;
     std::vector<CodecId> audio_codecs;
     bool pause = false;    // can hold playback without being re-fed (NDL v2 cannot)
+    // With pause: the backend cannot stop presenting what it already holds, so the picture stops
+    // only after the queued packets have played out, at the last PTS fed.
+    bool pause_drains = false;
+    // flush() drops nothing: packets after a seek are queued behind what the decoder still holds,
+    // separated by splice_gap_us, so the new content shows once that has played out.
+    bool seek_splices = false;
+    int64_t splice_gap_us = 0;
     bool position = false;  // reports the presented position
     bool accepts(CodecId c) const;
 };

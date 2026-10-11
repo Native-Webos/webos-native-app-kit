@@ -7,9 +7,13 @@
 //   * NDL_DirectMediaInit runs lazily in the first load(): warm init at startup reportedly makes the
 //     first load fail (punktfunk). NDL_DirectMediaQuit runs when the last backend is destroyed, at
 //     exit, and from the crash handler, so the decoder is never left acquired.
-//   * flush() is unload + load: an NDL flush can silently kill audio for the session (punktfunk), and
-//     must not happen before load completed.
-//   * NDL v2 has no pause and no position query (caps say so); the controller handles both.
+//   * NDL v2 has no pause, no usable flush and no position query. Pause therefore only stops
+//     feeding: what is queued plays out and the picture holds on the last frame (pause_drains).
+//     A seek drops nothing: later packets get PTS shifted to continue 200 ms after the last one
+//     fed, so the queue plays out and the new content follows (seek_splices). Both keep the
+//     decoder loaded, so there is no black picture and audio survives; measured on an OLED65C1PTB
+//     (webOS 6.5.3). NDL_DirectVideoFlushRenderBuffer was tried for seeks: video flushed in 4-15 ms
+//     but sound was gone for the rest of the session, as punktfunk warned for NDL flushes.
 //   * Audio: PCM S16 stereo only (measured: AAC and AC-3 decoded to PCM play in sync). MP3 passed
 //     through played silently, so it is decoded too. Opus is in the v2 header but unverified.
 //
@@ -29,9 +33,31 @@ namespace wnk::media {
 
 enum class PtsUnit : uint8_t { Microseconds, Milliseconds };
 
+// The PTS mapping behind splice seeks: after splice(), the next packet with a PTS is placed `gap_us`
+// after the highest PTS mapped so far and everything after it keeps that offset, so the decoder's
+// timeline only moves forward. Pure, for tests.
+class PtsSplice {
+ public:
+    explicit PtsSplice(int64_t gap_us) : gap_us_(gap_us) {}
+    void reset() { *this = PtsSplice(gap_us_); }
+    void splice() { pending_ = true; }
+    // kNoTime stays kNoTime.
+    int64_t map(int64_t pts_us);
+    int64_t shift_us() const { return shift_us_; }
+
+ private:
+    int64_t gap_us_;
+    int64_t shift_us_ = 0;
+    bool pending_ = false;
+    int64_t max_out_us_ = kNoTime;
+};
+
 struct NdlOptions {
     PtsUnit pts_unit = PtsUnit::Microseconds;
     std::string app_id;  // $APPID when empty
+    // Unload and reload the decoder to pause and to seek, as before pause/splice were measured.
+    // The picture goes black each time; kept for comparison and as a fallback.
+    bool reload_to_pause_and_seek = false;
 };
 
 class NdlBackend : public MediaBackend {
@@ -52,6 +78,7 @@ class NdlBackend : public MediaBackend {
     bool flush(std::string *error) override;
     void unload() override;
     void set_area(const Rect &pixels) override;
+    bool pause(bool paused) override;
 
     // NDL wants an enum, not a rate; 0 if the rate has no enum value.
     static int pcm_rate_enum(int hertz);
@@ -72,6 +99,7 @@ class NdlBackend : public MediaBackend {
     std::mutex events_mutex_;
     EventFn events_;
     uint64_t video_fed_ = 0, audio_fed_ = 0;
+    PtsSplice splice_;
 };
 
 }  // namespace wnk::media

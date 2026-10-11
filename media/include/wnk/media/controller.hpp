@@ -13,9 +13,12 @@
 // would otherwise receive the whole file at once). Commands from the main thread are queued and applied
 // between packets; a blocked read or open is interrupted for stop and seek.
 //
-// Pause: when the backend cannot pause (NDL v2 has no pause call) the controller stops feeding,
-// unloads the decoder and, on resume, reloads and seeks back to where playback stopped. That is
-// slower than a real pause but never lets the decoder run on and desynchronise.
+// Pause: when the backend cannot pause at all the controller stops feeding, unloads the decoder
+// and, on resume, reloads and seeks back to where playback stopped. A backend whose pause drains
+// (NDL: it only stops being fed) stops on the last frame fed, so that is where the clock stops.
+//
+// Seek: the source repositions and the backend is flushed. A backend that splices instead keeps
+// presenting what it holds first, so the clock for the new content starts only after that backlog.
 //
 // Position: from the backend if it reports one, else estimated on a clock started at the first
 // packet after load/seek (offset by that packet's PTS) and frozen while paused. The estimate is
@@ -85,6 +88,9 @@ class PlaybackController {
     void open(const std::string &uri);
     void play();
     void pause();
+    // Pauses and gives the decoder back even if the backend could hold it (app backgrounded, decoder
+    // reclaimed). Resuming reloads it and seeks back.
+    void pause_and_release();
     void toggle_pause();
     void seek(int64_t pts_us);
     void seek_relative(int64_t delta_us);
@@ -103,19 +109,21 @@ class PlaybackController {
         Cmd cmd;
         std::string uri;
         int64_t pts_us = 0;
+        bool release = false;  // Pause: unload the decoder even if the backend can pause
     };
     void post(Command c);
     void run();
     bool apply(const Command &c);  // false: leave the loop
     void do_open(const std::string &uri);
     void do_seek(int64_t pts_us);
-    void do_pause();
+    void do_pause(bool release);
     void do_resume();
     bool load_backend();
     void feed_one();
     void set_state(PlayState s, const std::string &error = {});
     void fail(const std::string &error);
-    int64_t estimated_position() const;  // lock held
+    int64_t estimated_position() const;  // lock held; never before the clock's base (for display)
+    int64_t raw_position() const;        // lock held; before the base while a splice backlog plays
     void on_backend_event(BackendEvent e, const std::string &detail);
 
     std::unique_ptr<MediaSource> source_;
@@ -141,6 +149,8 @@ class PlaybackController {
     bool feeding_ = false;
     bool source_done_ = false;
     int64_t last_primary_pts_ = kNoTime;  // last PTS fed on the stream that drives the clock (guarded by mutex_)
+    int64_t last_any_pts_ = kNoTime;      // last PTS fed on any stream (guarded by mutex_)
+    int64_t splice_delay_us_ = 0;         // the next clock start waits this long (guarded by mutex_)
     std::optional<Packet> pending_;
     std::atomic<bool> eos_seen_{false};
     std::thread thread_;

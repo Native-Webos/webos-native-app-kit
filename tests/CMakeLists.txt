@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http image ui lifecycle crash capabilities media secret)
+foreach (t log platform input focus font storage async http image ui lifecycle crash capabilities media secret websocket)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -19,10 +19,14 @@ target_link_libraries(test_crash PRIVATE wnk_diagnostics)
 target_link_libraries(test_capabilities PRIVATE wnk_diagnostics)
 target_link_libraries(test_media PRIVATE wnk_media wnk_media_ndl)
 target_link_libraries(test_secret PRIVATE wnk_storage)
+target_link_libraries(test_websocket PRIVATE wnk_net)
 target_include_directories(test_secret SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 
 # curl transport against a local HTTP/HTTPS server started by http_server.py (needs python3 + openssl).
+add_executable(test_websocket_curl integration/test_websocket_curl.cpp)
+target_include_directories(test_websocket_curl PRIVATE unit)
+target_link_libraries(test_websocket_curl PRIVATE wnk_net)
 add_executable(test_http_curl integration/test_http_curl.cpp)
 target_include_directories(test_http_curl PRIVATE unit)
 target_link_libraries(test_http_curl PRIVATE wnk_net)
@@ -43,6 +47,9 @@ if (Python3_FOUND)
     add_test(NAME integration.http_curl
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
                     "$<TARGET_FILE:test_http_curl>")
+    add_test(NAME integration.websocket_curl
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                    "$<TARGET_FILE:test_websocket_curl>")
     add_test(NAME tools.packaging
             COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/tools" -v)
 endif ()

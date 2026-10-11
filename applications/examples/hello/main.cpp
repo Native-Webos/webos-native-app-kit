@@ -26,6 +26,7 @@
 #include "wnk/storage/secret.hpp"
 #include "wnk/async/async.hpp"
 #include "wnk/net/http.hpp"
+#include "wnk/net/websocket.hpp"
 #include "wnk/image/image.hpp"
 #include "wnk/image/textures.hpp"
 
@@ -745,6 +746,46 @@ int main(int argc, char **argv) {
                         if (b.rfind("http://", 0) == 0 || b.rfind("https://", 0) == 0) image_base = b;
                     }
                 }
+                // WebSocket probe: launch params {"wsUrl":"ws://host:port/ws/echo"} connect, send one message,
+                // expect the echo, then close (tests/integration/http_server.py --serve provides the server).
+                std::unique_ptr<wnk::net::WebSocketClient> ws_probe;
+                static SDL_TimerID ws_probe_timer = 0;  // removed before the client is destroyed
+                if (!launch.params_json.empty()) {
+                    const auto params = nlohmann::json::parse(launch.params_json, nullptr, false);
+                    if (params.is_object() && params.contains("wsUrl") && params["wsUrl"].is_string()) {
+                        const std::string url = params["wsUrl"];
+                        wnk::net::WebSocketOptions wo;
+                        wo.ping_interval_ms = 2000;
+                        ws_probe = std::make_unique<wnk::net::WebSocketClient>(dispatcher, wo);
+                        auto *client = ws_probe.get();
+                        const auto started = std::make_shared<Uint32>(SDL_GetTicks());
+                        client->on_open = [client, started](const std::string &) {
+                            WNK_LOGI("ws", "probe open after %u ms", SDL_GetTicks() - *started);
+                            client->send_text("wnk-probe-\xc3\xa9");
+                            client->send_text("fragment-me");
+                            client->send_text("ping-me");
+                            client->send_text("big");
+                        };
+                        client->on_message = [client, started](std::string data, bool binary) {
+                            WNK_LOGI("ws", "probe message %s %zu bytes: %s", binary ? "binary" : "text", data.size(),
+                                     binary ? "" : data.substr(0, 40).c_str());
+                            if (binary) {
+                                // Keep the connection 5 s more so keepalive pings run, then close.
+                                if (ws_probe_timer == 0) ws_probe_timer = SDL_AddTimer(5000, [](Uint32, void *c) -> Uint32 {
+                                    static_cast<wnk::net::WebSocketClient *>(c)->close(1000, "probe done");
+                                    return 0;
+                                }, client);
+                            }
+                        };
+                        client->on_close = [started](int code, const std::string &reason, bool clean) {
+                            WNK_LOGI("ws", "probe closed code %d reason '%s' %s after %u ms", code, reason.c_str(),
+                                     clean ? "clean" : "NOT clean", SDL_GetTicks() - *started);
+                        };
+                        client->on_error = [](const std::string &e) { WNK_LOGW("ws", "probe error: %s", e.c_str()); };
+                        std::string err;
+                        if (!client->connect(url, &err)) WNK_LOGW("ws", "probe not started: %s", err.c_str());
+                    }
+                }
                 wnk::image::ImageServiceConfig image_cfg;
                 image_cfg.memory_bytes = 32u << 20;
                 image_cfg.disk_bytes = 64u << 20;
@@ -842,6 +883,8 @@ int main(int argc, char **argv) {
                              static_cast<unsigned long long>(is.failures), is.memory_bytes / 1048576.0, is.memory_entries,
                              is.disk_bytes / 1048576.0, is.disk_entries, textures.count());
                 }
+                if (ws_probe_timer != 0) SDL_RemoveTimer(ws_probe_timer);
+                ws_probe.reset();  // closes and joins before the dispatcher goes away
                 dispatcher.close();
                 if (!pool.shutdown(std::chrono::milliseconds(2000))) {
                     WNK_LOGW(kCat, "a worker ignored cancellation; detached");

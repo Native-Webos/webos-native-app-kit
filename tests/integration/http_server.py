@@ -3,6 +3,7 @@
 """Local HTTP + HTTPS test server for the curl transport tests, then run the test binary.
 
     http_server.py TEST_BINARY
+    http_server.py --serve HOST:PORT     plain HTTP/WebSocket only, until interrupted (device tests)
 
 Generates a throwaway CA and a server certificate for "localhost" with the openssl CLI, starts an
 HTTP server and an HTTPS server on 127.0.0.1 (ephemeral ports), and runs TEST_BINARY with:
@@ -11,6 +12,14 @@ HTTP server and an HTTPS server on 127.0.0.1 (ephemeral ports), and runs TEST_BI
     WNK_TEST_HTTPS_IP    https://127.0.0.1:<port>   (same server, name not in the certificate)
     WNK_TEST_CA          path of the CA certificate (PEM)
 Exits with the test binary's exit code. Stdlib + openssl CLI only; nothing leaves the machine.
+
+WebSocket routes (GET with Upgrade: websocket), for tests/integration/test_websocket_curl.cpp:
+    /ws/echo     echoes messages; text commands: ping-me (server ping), close-me (server close 1000
+                 "bye"), fragment-me (3-fragment text), big (200000-byte binary), bad-frame (masked
+                 server frame), header (echoes X-Test); answers pings; offers "chat" if asked
+    /ws/reject   403 instead of 101
+    /ws/drop     handshake, then the TCP connection is closed (counts connections in /ws/count)
+    /ws/silent   handshake, then reads and ignores everything (no pongs)
 """
 from __future__ import annotations
 
@@ -26,6 +35,45 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import base64
+import hashlib
+import struct
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_DROPS = {"n": 0}
+
+
+def ws_send(w, op: int, payload: bytes, fin: bool = True, mask: bool = False):
+    head = bytes([(0x80 if fin else 0) | op])
+    n = len(payload)
+    m = 0x80 if mask else 0
+    if n < 126:
+        head += bytes([m | n])
+    elif n <= 0xFFFF:
+        head += bytes([m | 126]) + struct.pack(">H", n)
+    else:
+        head += bytes([m | 127]) + struct.pack(">Q", n)
+    if mask:
+        key = b"\x01\x02\x03\x04"
+        payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+        head += key
+    w.write(head + payload)
+    w.flush()
+
+
+def ws_read(r):
+    h = r.read(2)
+    if len(h) < 2:
+        return None
+    op = h[0] & 0x0F
+    n = h[1] & 0x7F
+    if n == 126:
+        n = struct.unpack(">H", r.read(2))[0]
+    elif n == 127:
+        n = struct.unpack(">Q", r.read(8))[0]
+    key = r.read(4) if h[1] & 0x80 else b"\0\0\0\0"
+    data = r.read(n)
+    return op, bytes(b ^ key[i % 4] for i, b in enumerate(data))
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -43,8 +91,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _websocket(self, path: str):
+        if path == "/ws/reject":
+            return self._send(403, b"no")
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        if "chat" in self.headers.get("Sec-WebSocket-Protocol", ""):
+            self.send_header("Sec-WebSocket-Protocol", "chat")
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        if path == "/ws/drop":
+            WS_DROPS["n"] += 1
+            return
+        while True:
+            f = ws_read(self.rfile)
+            if f is None:
+                return
+            op, data = f
+            if path == "/ws/silent":
+                continue
+            if op == 0x8:
+                ws_send(self.wfile, 0x8, data[:2] if len(data) >= 2 else b"")
+                return
+            if op == 0x9:
+                ws_send(self.wfile, 0xA, data)
+                continue
+            if op == 0x1 and data == b"ping-me":
+                ws_send(self.wfile, 0x9, b"srv")
+                continue
+            if op == 0x1 and data == b"close-me":
+                ws_send(self.wfile, 0x8, struct.pack(">H", 1000) + b"bye")
+                f = ws_read(self.rfile)  # the client's answering close
+                return
+            if op == 0x1 and data == b"fragment-me":
+                ws_send(self.wfile, 0x1, b"frag", fin=False)
+                ws_send(self.wfile, 0x0, b"ment", fin=False)
+                ws_send(self.wfile, 0x0, b"ed", fin=True)
+                continue
+            if op == 0x1 and data == b"big":
+                ws_send(self.wfile, 0x2, bytes(range(256)) * 781 + b"x" * 64)
+                continue
+            if op == 0x1 and data == b"bad-frame":
+                ws_send(self.wfile, 0x1, b"masked", mask=True)
+                continue
+            if op == 0x1 and data == b"header":
+                ws_send(self.wfile, 0x1, self.headers.get("X-Test", "").encode())
+                continue
+            if op == 0x1 and data == b"count":
+                ws_send(self.wfile, 0x1, str(WS_DROPS["n"]).encode())
+                continue
+            ws_send(self.wfile, op, data)
+
     def _route(self):
         url = urllib.parse.urlparse(self.path)
+        if self.headers.get("Upgrade", "").lower() == "websocket" and url.path.startswith("/ws/"):
+            return self._websocket(url.path)
         q = urllib.parse.parse_qs(url.query)
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
@@ -114,6 +220,13 @@ def serve(server: http.server.ThreadingHTTPServer):
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--serve":
+        # Manual/device testing: plain HTTP + WebSocket on HOST:PORT until interrupted.
+        host, port = sys.argv[2].rsplit(":", 1)
+        srv = QuietServer((host, int(port)), Handler)
+        print(f"serving http/ws on {host}:{port}", flush=True)
+        srv.serve_forever()
+        return 0
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2

@@ -5,10 +5,7 @@
 // older curl in webOS 5/6 firmware works too (curl_multi_wait: 7.28; CURLOPT_PROTOCOLS: 7.19).
 #include "wnk/net/http.hpp"
 
-// CURLOPT_PROTOCOLS is deprecated since curl 7.85 in favour of CURLOPT_PROTOCOLS_STR, which the older
-// curl in webOS 5/6 firmware does not have. The numeric form keeps working in new curl too.
-#define CURL_DISABLE_DEPRECATION 1
-#include <curl/curl.h>
+#include "curl_api.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -19,79 +16,6 @@
 
 namespace wnk::net {
 namespace {
-
-struct CurlApi {
-    CURLcode (*global_init)(long) = nullptr;
-    CURL *(*easy_init)() = nullptr;
-    CURLcode (*easy_setopt)(CURL *, CURLoption, ...) = nullptr;
-    CURLcode (*easy_getinfo)(CURL *, CURLINFO, ...) = nullptr;
-    void (*easy_cleanup)(CURL *) = nullptr;
-    const char *(*easy_strerror)(CURLcode) = nullptr;
-    curl_slist *(*slist_append)(curl_slist *, const char *) = nullptr;
-    void (*slist_free_all)(curl_slist *) = nullptr;
-    CURLM *(*multi_init)() = nullptr;
-    CURLMcode (*multi_add_handle)(CURLM *, CURL *) = nullptr;
-    CURLMcode (*multi_remove_handle)(CURLM *, CURL *) = nullptr;
-    CURLMcode (*multi_perform)(CURLM *, int *) = nullptr;
-    CURLMcode (*multi_wait)(CURLM *, curl_waitfd *, unsigned int, int, int *) = nullptr;
-    CURLMsg *(*multi_info_read)(CURLM *, int *) = nullptr;
-    CURLMcode (*multi_cleanup)(CURLM *) = nullptr;
-    curl_version_info_data *(*version_info)(CURLversion) = nullptr;
-    std::string error;
-    std::string version;
-};
-
-const CurlApi &api() {
-    static CurlApi a = [] {
-        CurlApi c;
-        void *lib = dlopen("libcurl.so.4", RTLD_NOW | RTLD_LOCAL);
-        if (lib == nullptr) {
-            const char *e = dlerror();
-            c.error = e != nullptr ? e : "dlopen libcurl.so.4 failed";
-            return c;
-        }
-        bool ok = true;
-        auto sym = [&](auto &fn, const char *name) {
-            fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(dlsym(lib, name));
-            if (fn == nullptr) {
-                ok = false;
-                c.error += std::string(c.error.empty() ? "libcurl.so.4 lacks " : ", ") + name;
-            }
-        };
-        sym(c.global_init, "curl_global_init");
-        sym(c.easy_init, "curl_easy_init");
-        sym(c.easy_setopt, "curl_easy_setopt");
-        sym(c.easy_getinfo, "curl_easy_getinfo");
-        sym(c.easy_cleanup, "curl_easy_cleanup");
-        sym(c.easy_strerror, "curl_easy_strerror");
-        sym(c.slist_append, "curl_slist_append");
-        sym(c.slist_free_all, "curl_slist_free_all");
-        sym(c.multi_init, "curl_multi_init");
-        sym(c.multi_add_handle, "curl_multi_add_handle");
-        sym(c.multi_remove_handle, "curl_multi_remove_handle");
-        sym(c.multi_perform, "curl_multi_perform");
-        sym(c.multi_wait, "curl_multi_wait");
-        sym(c.multi_info_read, "curl_multi_info_read");
-        sym(c.multi_cleanup, "curl_multi_cleanup");
-        sym(c.version_info, "curl_version_info");
-        if (!ok) {
-            c.easy_init = nullptr;
-            return c;
-        }
-        // curl_global_init is not thread-safe; done once here, before any worker uses curl.
-        if (c.global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
-            c.error = "curl_global_init failed";
-            c.easy_init = nullptr;
-            return c;
-        }
-        if (const curl_version_info_data *v = c.version_info(CURLVERSION_NOW)) {
-            c.version = std::string("libcurl/") + (v->version ? v->version : "?");
-            if (v->ssl_version != nullptr) c.version += std::string(" ") + v->ssl_version;
-        }
-        return c;
-    }();
-    return a;
-}
 
 struct Transfer {
     HttpResponse *response;

@@ -539,8 +539,13 @@ bool FfmpegSource::open(const std::string &uri, std::string *error) {
         m.close();
         return false;
     }
-    // With custom I/O the name only hints the format (by extension); the query string would hide it.
-    const std::string name = network ? uri.substr(0, uri.find_first_of("?#")) : path;
+    // With custom I/O the name only hints the format (by extension): pass the file name alone, as a
+    // query would hide the extension and an http(s) URL makes FFmpeg look for network protocols.
+    std::string name = path;
+    if (network) {
+        name = uri.substr(0, uri.find_first_of("?#"));
+        name = name.substr(name.find_last_of('/') + 1);
+    }
     int rc = avformat_open_input(&m.fmt, name.c_str(), nullptr, nullptr);
     if (rc < 0) {
         // avformat_open_input frees the context on failure (but not a custom AVIOContext).

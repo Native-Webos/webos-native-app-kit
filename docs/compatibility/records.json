@@ -539,6 +539,42 @@
       "method": "Example D 0.4.0, bundled MKV with two SubRip tracks (English default, French two-line cues), drawn by SubtitleView over the NDL video plane",
       "evidence": "cues shown every 1.00 s in time with the flash and beep, switching English/French/off, seeks with subtitles on; readable size and outline (owner); frame interval 20 ms",
       "limitations": "text tracks only; bitmap subtitles (PGS/DVD/DVB), external files, ASS styling and non-Latin fonts untested on the TV"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.http.https_internet",
+      "result": "supported",
+      "method": "Example D 0.4.0-0.4.1, https://uploads.video-commander.com/sample/BigBuckBunny.mp4 (158 MB, 720p H.264 + AAC 44.1 kHz) and an AV1 clip from test-videos.co.uk, via the kit's HttpStream over the TV's libcurl",
+      "evidence": "certificates verified with the system CA store; seekable (206), opened in ~0.5 s, feeding kept 0.5-1 s ahead with no reconnects; seeks worked",
+      "limitations": "the 24 fps BBB judders on this TV (see media.ndl.frame_rate_24p); one internet server and one CDN only"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.ndl.pcm_44100",
+      "result": "supported",
+      "method": "Example D, 30 s 1080p25 test pattern with AAC 44.1 kHz decoded to PCM, NDL rate enum 2",
+      "evidence": "smooth, beeps in sync with the flashes, same 1 kHz pitch (owner)",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.ndl.av1",
+      "result": "supported",
+      "method": "Example D 0.4.1, Big Buck Bunny 360p AV1 MP4 (video only, no audio track) over HTTPS",
+      "evidence": "NDL_DirectMediaLoad(av1 640x360) -> 0, load/playing callbacks, played properly without an audio stream (owner)",
+      "limitations": "10 s 360p only; video-only playback was smooth here although earlier reports said NDL needs audio to pace"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.ndl.frame_rate_24p",
+      "result": "unsupported",
+      "method": "Example D: 24 fps BBB (internet and LAN), a 24 fps test pattern, the same BBB retimed to 25 fps; NDL video.unknown1 set to 24",
+      "evidence": "24 fps BBB judders on camera pans (internet and LAN alike, feeding never starved); retimed to 25 fps it is smooth; the 24 fps test pattern looked smooth (little motion); unknown1=24 was accepted and changed nothing",
+      "limitations": "NDL v2 has no frame-rate field; PlxNative declares Starfish adaptiveStreaming.maxFrameRate and measured 13 fps presented for 24p declared at 60 vs 24.1 declared at 24. The TV's Real Cinema setting could not be found on this unit"
     }
   ]
 }

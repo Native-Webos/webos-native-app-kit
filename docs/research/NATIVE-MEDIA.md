@@ -72,6 +72,12 @@ NDL_DirectMediaQuit()
   through bursts of quick seeks. `NDL_DirectVideoFlushRenderBuffer` (webOS 5.3.1+) flushed video in
   4-15 ms, but **sound was gone for the rest of the session**, as punktfunk warned for flushes.
   `NDL_DirectAudioPause`/`Resume` exist only in the v1 library (webOS 4.x firmware), not in v2.
+- **24 fps judders, 25 fps does not (2026-10-11):** the same Big Buck Bunny footage played at 24 fps shows
+  pulldown judder on pans and is smooth retimed to 25 fps; the network was ruled out (LAN and internet
+  alike, feeding never starved). NDL v2 has no frame-rate field; `video.unknown1 = 24` was accepted and
+  changed nothing. PlxNative avoids this on Starfish by declaring `adaptiveStreaming.maxFrameRate` as the
+  stream's rate class (it measured 13 fps presented for 24p declared at 60, 24.1 declared at 24) `[SRC]`.
+- AV1 (360p, no audio track) and AAC 44.1 kHz decoded to PCM play correctly on this TV.
 - PlxNative (Starfish) has a real `Pause()`, but on webOS 5+ it seeks by a full Unload + Load: its
   in-place seek relies on structure offsets read off webOS 4.5 binaries and is disabled elsewhere
   (`rust-modules/media/src/player/engine.rs`) `[SRC]`.

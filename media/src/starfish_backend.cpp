@@ -233,6 +233,7 @@ BackendCaps StarfishBackend::caps() const {
     c.video_codecs = {CodecId::H264, CodecId::Hevc};
     c.audio_codecs = {CodecId::Aac, CodecId::Ac3, CodecId::Eac3};
     c.aac_adts = true;
+    c.adaptive_resolution = true;  // Load declares adaptiveResolution and the 4K/FHD envelope
     c.pause = true;
     c.position = true;
     c.seek_splices = true;

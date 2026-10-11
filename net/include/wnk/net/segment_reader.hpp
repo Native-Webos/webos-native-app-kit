@@ -11,13 +11,17 @@
 // before the range are skipped. Any other status fails the stream at that point: read() returns what
 // came before it, then -1.
 //
-// Stats report per-part download times so a caller can estimate throughput (adaptive bitrate).
+// Each completed part is reported through `on_part_done` with its size and transfer time (time spent
+// waiting for room in the buffer excluded), so a caller can estimate throughput (adaptive bitrate).
+// stop_after_current() ends the stream at the end of the part being downloaded: the demuxer then
+// meets a clean end exactly at a segment boundary, where another rendition can take over.
 #pragma once
 
 #include "wnk/net/byte_reader.hpp"
 #include "wnk/net/http.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,9 +39,14 @@ struct SegmentReaderOptions {
     int connect_timeout_ms = 5000;
     int stall_timeout_ms = 15000;     // no bytes for this long: retry
     size_t buffer_bytes = 16u << 20;  // read-ahead
+    // Parts fetched beyond the one being read (0: only bytes limit read-ahead). Bounds how much
+    // old-quality media a bitrate switch must play out first.
+    size_t max_parts_ahead = 0;
     int max_retries = 3;              // consecutive failed attempts on one part
     int retry_backoff_ms = 300;       // doubled per consecutive failure, capped at 3 s
     int max_redirects = 5;
+    // Download thread: a part arrived whole (`bytes` in `seconds` of transfer).
+    std::function<void(size_t part, int64_t bytes, double seconds)> on_part_done;
 };
 
 struct SegmentReaderStats {
@@ -45,7 +54,7 @@ struct SegmentReaderStats {
     int retries = 0;
     int parts_done = 0;
     int64_t bytes_received = 0;
-    double download_seconds = 0;  // time spent in transfers (not waiting for room)
+    double download_seconds = 0;  // transfer time, waiting for room in the buffer excluded
 };
 
 class SegmentReader final : public ByteReader {
@@ -66,6 +75,8 @@ class SegmentReader final : public ByteReader {
 
     // Index of the part being downloaded (== parts.size() when all are in).
     size_t download_part() const;
+    // Ends the stream after the part being downloaded; returns how many parts will be delivered.
+    size_t stop_after_current();
     SegmentReaderStats stats() const;
 
     struct Impl;

@@ -60,6 +60,16 @@ bool make_presentations() {
             if (std::system(c.c_str()) != 0) return false;
         }
         if (std::system(misaligned.c_str()) != 0) return false;
+        // A three-rung ladder (same keyframes), 20 s, for bitrate switching.
+        const std::string ladder =
+            "cd '" + d + "' && ffmpeg -hide_banner -loglevel error -y "
+            "-f lavfi -i testsrc2=size=640x480:rate=25:duration=20 "
+            "-f lavfi -i sine=frequency=440:sample_rate=48000:duration=20 -map 0:v -map 0:v -map 0:v -map 1:a "
+            "-c:v libx264 -g 25 -keyint_min 25 -sc_threshold 0 -c:a aac "
+            "-s:v:0 160x120 -b:v:0 100k -s:v:1 320x240 -b:v:1 400k -s:v:2 640x480 -b:v:2 1500k "
+            "-f dash -seg_duration 2 -adaptation_sets 'id=0,streams=v id=1,streams=a' "
+            "-init_seg_name 'l-init-$RepresentationID$.m4s' -media_seg_name 'l-$RepresentationID$-$Number%05d$.m4s' l.mpd";
+        if (std::system(ladder.c_str()) != 0) return false;
         return true;
     }();
     return ok;
@@ -88,6 +98,7 @@ BackendCaps starfish_like() {
     c.video_codecs = {CodecId::H264, CodecId::Hevc};
     c.audio_codecs = {CodecId::Aac, CodecId::Ac3, CodecId::Eac3};
     c.aac_adts = true;
+    c.adaptive_resolution = true;
     return c;
 }
 
@@ -271,6 +282,89 @@ TEST("adaptive source: missing and malformed manifests, live, interrupt") {
     REQUIRE(!d.video.empty());
     CHECK(d.video[0].key);
     CHECK_EQ(d.video[0].pts_us, int64_t{4000000});
+}
+
+TEST("throughput estimate: needs 128 KiB, ignores small transfers, falls fast and rises slowly") {
+    ThroughputEstimator e;
+    CHECK_EQ(e.estimate_bps(), int64_t{0});
+    e.add(8 << 10, 0.001);  // too small to count
+    CHECK_EQ(e.samples(), 0);
+    e.add(100 << 10, 0.1);  // 8.2 Mb/s, not enough data yet
+    CHECK_EQ(e.estimate_bps(), int64_t{0});
+    e.add(100 << 10, 0.1);
+    const int64_t steady = e.estimate_bps();
+    CHECK(std::llabs(steady - 8192000) < 100000);  // bias-corrected: the true rate, not a ramp from 0
+    e.add(1 << 20, 4.0);  // a slow patch at 2 Mb/s for 4 s
+    const int64_t after_drop = e.estimate_bps();
+    CHECK(after_drop < 5000000);  // the fast average pulls it down at once
+    for (int i = 0; i < 3; ++i) e.add(1 << 20, 0.5);  // 16.8 Mb/s bursts for 1.5 s
+    CHECK(e.estimate_bps() < 12000000);  // the slow average does not trust them yet
+}
+
+TEST("rung choice: hysteresis between going up and staying; limits always apply") {
+    const std::vector<int64_t> bw = {500000, 1500000, 3000000, 6000000};
+    CHECK_EQ(choose_rung(bw, 1, 0, 0), 1);                  // no estimate: stay
+    CHECK_EQ(choose_rung(bw, 0, 10000000, 0), 3);           // 6 <= 0.7 * 10: top
+    CHECK_EQ(choose_rung(bw, 1, 4000000, 0), 1);            // up needs 3 <= 2.8: no; 1.5 <= 3.4: stay
+    CHECK_EQ(choose_rung(bw, 2, 3600000, 0), 2);            // 3 <= 0.85 * 3.6 = 3.06: stay
+    CHECK_EQ(choose_rung(bw, 2, 3000000, 0), 1);            // 3 > 2.55: down to 1.5
+    CHECK_EQ(choose_rung(bw, 3, 100000, 0), 0);             // nothing fits: the lowest
+    CHECK_EQ(choose_rung(bw, 3, 0, 2000000), 1);            // a limit without an estimate
+    CHECK_EQ(choose_rung(bw, 0, 100000000, 3000000), 2);    // a limit caps going up
+    CHECK_EQ(choose_rung({}, 0, 1, 0), -1);
+}
+
+TEST("adaptive source: bitrate switches up on a fast link and down under a limit, seamlessly") {
+    SKIP_UNLESS_READY();
+    AdaptiveSourceOptions o = options();
+    o.initial_bandwidth = 500000;  // starts on the 400 kb/s rung
+    o.max_ahead_us = 4000000;      // two segments: the switches land soon after they are decided
+    AdaptiveSource s(o);
+    std::string err;
+    REQUIRE(s.open(url("l.mpd"), &err));
+    const Presentation &pres = s.presentation();
+    auto height = [&](int r) { return pres.renditions[static_cast<size_t>(r)].height; };
+    CHECK_EQ(s.info().tracks[0].height, 240);
+    StreamFormat f;
+    REQUIRE(s.select(0, 1, starfish_like(), &f, &err));  // adaptive_resolution set below
+    Packet p;
+    std::vector<Packet> video;
+    int64_t last_dts = INT64_MIN;
+    bool monotonic = true;
+    int keys = 0;
+    while (s.read(&p, &err) == MediaSource::Read::Packet) {
+        if (p.type != TrackType::Video) continue;
+        monotonic = monotonic && p.dts_us > last_dts;
+        last_dts = p.dts_us;
+        keys += p.key ? 1 : 0;
+        video.push_back(p);
+        if (video.size() == 300) s.set_bandwidth_limit(150000);  // halfway: only the lowest rung fits
+    }
+    CHECK_EQ(video.size(), size_t{500});  // every frame once: no gap or overlap at the switches
+    CHECK(monotonic);
+    CHECK_EQ(keys, 20);
+    CHECK(s.switches() >= 2);
+    CHECK_EQ(height(s.video_rendition()), 120);  // ended on the lowest rung
+    CHECK(s.throughput_estimate() > 1500000);   // localhost is fast
+}
+
+TEST("adaptive source: a backend without adaptive resolution keeps the picture size") {
+    SKIP_UNLESS_READY();
+    AdaptiveSourceOptions o = options();
+    o.initial_bandwidth = 500000;
+    AdaptiveSource s(o);
+    std::string err;
+    REQUIRE(s.open(url("l.mpd"), &err));
+    BackendCaps caps = starfish_like();
+    caps.adaptive_resolution = false;
+    StreamFormat f;
+    REQUIRE(s.select(0, 1, caps, &f, &err));
+    Packet p;
+    size_t n = 0;
+    while (s.read(&p, &err) == MediaSource::Read::Packet) n += p.type == TrackType::Video ? 1 : 0;
+    CHECK_EQ(n, size_t{500});
+    CHECK_EQ(s.switches(), 0);
+    CHECK_EQ(s.presentation().renditions[static_cast<size_t>(s.video_rendition())].height, 240);
 }
 
 TEST("adaptive source: the video rendition follows codec preference, size and bandwidth limits") {

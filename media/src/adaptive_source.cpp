@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <mutex>
 #include <optional>
@@ -73,6 +74,57 @@ size_t segment_at(const std::vector<MediaSegment> &segs, int64_t t) {
 
 }  // namespace
 
+void ThroughputEstimator::add(int64_t bytes, double seconds) {
+    if (bytes < (16 << 10) || seconds <= 0) return;
+    const double bps = static_cast<double>(bytes) * 8 / seconds;
+    std::lock_guard<std::mutex> lock(m_);
+    // Each sample weighs by its transfer time: alpha = 1 - 0.5^(seconds / half-life).
+    const double af = 1 - std::pow(0.5, seconds / 3.0), as = 1 - std::pow(0.5, seconds / 10.0);
+    fast_ = af * bps + (1 - af) * fast_;
+    slow_ = as * bps + (1 - as) * slow_;
+    fast_weight_ = af + (1 - af) * fast_weight_;  // how much of the average is real (bias correction)
+    slow_weight_ = as + (1 - as) * slow_weight_;
+    bytes_ += bytes;
+    ++samples_;
+}
+
+int64_t ThroughputEstimator::estimate_bps() const {
+    std::lock_guard<std::mutex> lock(m_);
+    if (bytes_ < (128 << 10) || fast_weight_ <= 0 || slow_weight_ <= 0) return 0;
+    return static_cast<int64_t>(std::min(fast_ / fast_weight_, slow_ / slow_weight_));
+}
+
+int ThroughputEstimator::samples() const {
+    std::lock_guard<std::mutex> lock(m_);
+    return samples_;
+}
+
+int choose_rung(const std::vector<int64_t> &bw, int current, int64_t estimate, int64_t limit) {
+    const int n = static_cast<int>(bw.size());
+    if (n == 0) return -1;
+    current = std::clamp(current, 0, n - 1);
+    auto highest_within = [&](double budget) {
+        int best = 0;
+        for (int i = 0; i < n; ++i) {
+            if (static_cast<double>(bw[static_cast<size_t>(i)]) <= budget) best = i;
+        }
+        return best;
+    };
+    const double cap = limit > 0 ? static_cast<double>(limit) : 1e300;
+    int target = current;
+    if (estimate > 0) {
+        const double up = std::min(0.70 * static_cast<double>(estimate), cap);
+        const double stay = std::min(0.85 * static_cast<double>(estimate), cap);
+        if (static_cast<double>(bw[static_cast<size_t>(current)]) > stay) {
+            target = highest_within(stay);
+        } else {
+            target = std::max(current, highest_within(up));
+        }
+    }
+    if (static_cast<double>(bw[static_cast<size_t>(target)]) > cap) target = highest_within(cap);
+    return target;
+}
+
 int choose_video(const Presentation &p, const AdaptiveSourceOptions &o) {
     bool any_plain = false;
     for (const Rendition &r : p.renditions) {
@@ -134,6 +186,15 @@ struct AdaptiveSource::Impl {
         std::unique_ptr<FfmpegSource> src;
         std::optional<Packet> pending;
         bool ended = false;
+        net::SegmentReader *reader = nullptr;  // owned by src
+        size_t first = 0;                      // segment the reader started at
+        // A bitrate switch in progress: `reader` ends at a segment boundary, then this takes over.
+        struct Switch {
+            int rendition = -1;
+            size_t first = 0;
+            std::unique_ptr<net::SegmentReader> reader;
+        };
+        std::optional<Switch> next;
         // Packets ending before this are dropped: an audio lane reopened at its own segment boundary
         // may start well before the video's keyframe (segment lengths differ, and HLS EXTINF values
         // are only approximate).
@@ -146,6 +207,13 @@ struct AdaptiveSource::Impl {
     int64_t position_us = 0;   // where the next select() starts
     bool reopen = false;       // a seek was interrupted while reopening: reopen at position_us first
     int64_t hls_origin_us = kNoTime;
+    std::vector<int> ladder;        // video renditions that can replace each other, bandwidth ascending
+    std::vector<int> active_ladder; // the part of it the backend can follow (select)
+    ThroughputEstimator estimator;
+    std::atomic<int64_t> limit_bps{0};
+    int decided_samples = 0;
+    int64_t decided_limit = 0;
+    std::atomic<int> switch_count{0};
     std::atomic<bool> interrupted{false};
     std::mutex fetch_mutex;
     std::shared_ptr<async::CancellationSource> fetch_cancel = std::make_shared<async::CancellationSource>();
@@ -249,19 +317,32 @@ struct AdaptiveSource::Impl {
 
     // Opens `lane` on its rendition from segment `first`, delivering what it wants; `fmt` gets what
     // the inner source will deliver.
-    bool open_lane(Lane &lane, size_t first, StreamFormat *fmt, std::string *error) {
+    std::unique_ptr<net::SegmentReader> make_reader(const Rendition &r, size_t first) {
+        net::SegmentReaderOptions so = opt.segments;
+        so.headers = opt.headers;
+        so.on_part_done = [this](size_t, int64_t bytes, double seconds) { estimator.add(bytes, seconds); };
+        int64_t seg_us = 0;
+        for (const MediaSegment &s : r.segments) seg_us = std::max(seg_us, s.duration_us);
+        so.max_parts_ahead = seg_us > 0 ? static_cast<size_t>(std::max<int64_t>(2, (opt.max_ahead_us + seg_us - 1) / seg_us))
+                                        : 0;
+        return std::make_unique<net::SegmentReader>(opt.http, parts_from(r, first), so);
+    }
+
+    bool open_lane(Lane &lane, size_t first, StreamFormat *fmt, std::string *error,
+                   std::unique_ptr<net::SegmentReader> prebuilt = nullptr) {
         const Rendition &r = pres.renditions[static_cast<size_t>(lane.rendition)];
         const bool hls = pres.format == Presentation::Format::Hls;
         for (int pass = 0; pass < 2; ++pass) {
-            net::SegmentReaderOptions so = opt.segments;
-            so.headers = opt.headers;
-            auto reader = std::make_unique<net::SegmentReader>(opt.http, parts_from(r, first), so);
+            auto reader = prebuilt ? std::move(prebuilt) : make_reader(r, first);
+            net::SegmentReader *raw = reader.get();
             auto src = std::make_unique<FfmpegSource>(FfmpegSourceOptions{nullptr, {}, opt.ac3_encode});
             src->set_time_origin(hls ? hls_origin_us : r.time_origin_us);
             FfmpegSource *s = src.get();
             {
                 std::lock_guard<std::mutex> lock(lanes_mutex);
                 lane.src = std::move(src);
+                lane.reader = raw;
+                lane.first = first;
                 lane.pending.reset();
                 lane.ended = false;
                 if (interrupted) s->interrupt();
@@ -299,6 +380,71 @@ struct AdaptiveSource::Impl {
         return true;
     }
 
+    // Video renditions that can stand in for `base` mid-stream, bandwidth ascending.
+    void build_ladder(int base) {
+        ladder.clear();
+        const Rendition &b = pres.renditions[static_cast<size_t>(base)];
+        for (size_t i = 0; i < pres.renditions.size(); ++i) {
+            const Rendition &r = pres.renditions[i];
+            if (r.type != TrackType::Video || r.encrypted || is_webm(r)) continue;
+            if (video_codec(r) != video_codec(b) || r.dolby_vision != b.dolby_vision) continue;
+            if (r.height > opt.max_height || r.frame_rate > opt.max_frame_rate + 0.01) continue;
+            if (opt.max_bandwidth > 0 && r.bandwidth > opt.max_bandwidth) continue;
+            if (pres.format == Presentation::Format::Dash ? r.group != b.group : r.muxed_audio != b.muxed_audio) continue;
+            // HLS lists one video playlist once per audio group: keep it once.
+            const bool dup = std::any_of(ladder.begin(), ladder.end(), [&](int k) {
+                const Rendition &o = pres.renditions[static_cast<size_t>(k)];
+                return pres.format == Presentation::Format::Hls ? o.playlist_url == r.playlist_url : o.id == r.id;
+            });
+            if (!dup) ladder.push_back(static_cast<int>(i));
+        }
+        std::stable_sort(ladder.begin(), ladder.end(), [&](int x, int y) {
+            return pres.renditions[static_cast<size_t>(x)].bandwidth < pres.renditions[static_cast<size_t>(y)].bandwidth;
+        });
+        if (std::find(ladder.begin(), ladder.end(), base) == ladder.end()) ladder = {base};
+    }
+
+    // Starts a switch of the video lane when the estimate calls for another rung.
+    void maybe_switch() {
+        if (!opt.adaptive_bitrate || active_ladder.size() < 2 || lanes.empty()) return;
+        Lane &v = lanes[0];
+        if (!v.want_video || v.next || v.reader == nullptr || v.ended) return;
+        const int samples = estimator.samples();
+        const int64_t limit = limit_bps.load();
+        if (samples == decided_samples && limit == decided_limit) return;  // nothing new to decide on
+        decided_samples = samples;
+        decided_limit = limit;
+        const auto at = std::find(active_ladder.begin(), active_ladder.end(), v.rendition);
+        if (at == active_ladder.end()) return;
+        std::vector<int64_t> bws;
+        for (int k : active_ladder) bws.push_back(pres.renditions[static_cast<size_t>(k)].bandwidth);
+        const int current = static_cast<int>(at - active_ladder.begin());
+        const int64_t estimate = estimator.estimate_bps();
+        const int target = choose_rung(bws, current, estimate, limit);
+        if (target == current || target < 0) return;
+        Rendition &to = pres.renditions[static_cast<size_t>(active_ladder[static_cast<size_t>(target)])];
+        std::string why;
+        if (!ensure_segments(to, &why)) {
+            WNK_LOGW(kCat, "cannot switch to %s: %s", to.id.c_str(), why.c_str());
+            return;
+        }
+        const Rendition &from = pres.renditions[static_cast<size_t>(v.rendition)];
+        const size_t delivered = v.reader->stop_after_current();
+        const size_t init = from.init ? 1 : 0;
+        const size_t boundary = v.first + (delivered > init ? delivered - init : 0);  // first segment not read
+        if (boundary >= from.segments.size()) return;  // the old one plays to the end
+        const size_t first = from.segments.size() == to.segments.size()
+                                 ? boundary
+                                 : segment_at(to.segments, from.segments[boundary].start_us + 1000);
+        Lane::Switch sw;
+        sw.rendition = active_ladder[static_cast<size_t>(target)];
+        sw.first = first;
+        sw.reader = make_reader(to, first);  // prefetches while the old rendition plays out
+        v.next = std::move(sw);
+        WNK_LOGI(kCat, "throughput %s: switching video %s -> %s at segment %zu", mbps(estimate).c_str(),
+                 mbps(from.bandwidth).c_str(), mbps(to.bandwidth).c_str(), boundary);
+    }
+
     void close_lanes() {
         std::vector<Lane> gone;
         {
@@ -312,6 +458,25 @@ struct AdaptiveSource::Impl {
         while (!lane.pending && !lane.ended) {
             Packet p;
             const MediaSource::Read r = lane.src->read(&p, error);
+            if (r == MediaSource::Read::EndOfStream && lane.next) {
+                // The old rendition ended at the switch boundary: the new one continues from there.
+                Lane::Switch sw = std::move(*lane.next);
+                lane.next.reset();
+                const int from = lane.rendition;
+                lane.rendition = sw.rendition;
+                StreamFormat fmt;
+                if (!open_lane(lane, sw.first, &fmt, error, std::move(sw.reader))) {
+                    if (interrupted) return MediaSource::Read::Interrupted;
+                    return MediaSource::Read::Error;
+                }
+                ++switch_count;
+                if (lane.want_video) video = sw.rendition;  // a later select() keeps this quality
+                const Rendition &a = pres.renditions[static_cast<size_t>(from)];
+                const Rendition &b = pres.renditions[static_cast<size_t>(sw.rendition)];
+                WNK_LOGI(kCat, "video %s (%dx%d %s) -> %s (%dx%d %s) at segment %zu", a.id.c_str(), a.width, a.height,
+                         mbps(a.bandwidth).c_str(), b.id.c_str(), b.width, b.height, mbps(b.bandwidth).c_str(), sw.first);
+                continue;
+            }
             if (r == MediaSource::Read::EndOfStream) {
                 lane.ended = true;
             } else if (r != MediaSource::Read::Packet) {
@@ -340,6 +505,7 @@ struct AdaptiveSource::Impl {
             const size_t first = i == 0 ? segment_at(segs, t) : segment_at(segs, main_start);
             if (i == 0) main_start = segs[first].start_us;
             StreamFormat fmt;
+            lane.next.reset();
             if (!open_lane(lane, first, &fmt, error)) return false;
             if (out != nullptr) {
                 if (fmt.video) out->video = fmt.video;
@@ -464,6 +630,9 @@ int AdaptiveSource::video_rendition() const {
 }
 
 int AdaptiveSource::audio_rendition() const { return impl_->sel_audio; }
+void AdaptiveSource::set_bandwidth_limit(int64_t bps) { impl_->limit_bps = std::max<int64_t>(0, bps); }
+int64_t AdaptiveSource::throughput_estimate() const { return impl_->estimator.estimate_bps(); }
+int AdaptiveSource::switches() const { return impl_->switch_count.load(); }
 
 bool AdaptiveSource::open(const std::string &uri, std::string *error) {
     Impl &m = *impl_;
@@ -474,6 +643,9 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
     m.sel_audio = -1;
     m.position_us = 0;
     m.hls_origin_us = kNoTime;
+    m.ladder.clear();
+    m.active_ladder.clear();
+    m.switch_count = 0;
     std::string body, final_url;
     if (!m.fetch(uri, nullptr, &body, &final_url, error)) return false;
     const size_t start = body.find_first_not_of(" \t\r\n\xEF\xBB\xBF");
@@ -489,6 +661,15 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
                                            [](const Rendition &r) { return r.type == TrackType::Video && r.encrypted; });
         *error = encrypted ? "the video is encrypted (DRM is not supported)" : "no video rendition this device can play";
         return false;
+    }
+    m.build_ladder(m.video);
+    if (m.opt.adaptive_bitrate && m.ladder.size() > 1) {
+        // Start at the best rung the assumed bandwidth carries; measurements take it from there.
+        int start = m.ladder.front();
+        for (int k : m.ladder) {
+            if (m.pres.renditions[static_cast<size_t>(k)].bandwidth <= m.opt.initial_bandwidth) start = k;
+        }
+        m.video = start;
     }
     Rendition &v = m.pres.renditions[static_cast<size_t>(m.video)];
     if (!m.ensure_segments(v, error)) return false;
@@ -514,6 +695,16 @@ bool AdaptiveSource::select(int video_track, int audio_track, const BackendCaps 
     m.close_lanes();
     m.caps = caps;
     m.sel_audio = -1;
+    m.active_ladder.clear();
+    if (video_track == 0) {
+        const Rendition &cur = m.pres.renditions[static_cast<size_t>(m.video)];
+        for (int k : m.ladder) {
+            const Rendition &r = m.pres.renditions[static_cast<size_t>(k)];
+            if (caps.adaptive_resolution || (r.width == cur.width && r.height == cur.height)) m.active_ladder.push_back(k);
+        }
+    }
+    m.decided_samples = 0;
+    m.decided_limit = 0;
     if (video_track > 0 || audio_track == 0 ||
         (audio_track > 0 && static_cast<size_t>(audio_track - 1) >= m.audio_choices.size())) {
         *error = "no such track";
@@ -563,6 +754,7 @@ MediaSource::Read AdaptiveSource::read(Packet *out, std::string *error) {
             }
             m.reopen = false;
         }
+        m.maybe_switch();
         for (Impl::Lane &lane : m.lanes) {
             const Read r = m.pull(lane, error);
             if (r != Read::Packet) return r;

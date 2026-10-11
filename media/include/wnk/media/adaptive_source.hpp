@@ -12,6 +12,12 @@
 //   select()  opens one FfmpegSource per rendition on a SegmentReader (initialisation segment, then
 //             the media segments in order, prefetched) and merges their packets by timestamp; audio
 //             goes through FfmpegSource's own rules (passthrough, PCM or AC-3 re-encoding).
+//   bitrate   with adaptive_bitrate, the video rendition follows the measured throughput within a
+//             ladder of renditions that can replace each other (same codec and Dolby Vision status;
+//             DASH: same AdaptationSet; HLS: same audio arrangement; other sizes only when the
+//             backend has adaptive_resolution). A switch ends the current rendition's reader after
+//             the segment it is downloading, so its demuxer meets a clean end exactly at a segment
+//             boundary, and the next rendition, already prefetching from there, takes over.
 //   seek()    reopens each rendition at the segment holding the target (the audio one at or before the
 //             video's), so the first video packet is the segment's keyframe; nothing before the
 //             target is downloaded.
@@ -19,7 +25,7 @@
 // Timestamps are presentation time: DASH segments map through presentationTimeOffset and the Period
 // start; HLS renditions share the timeline of the first segment of the video rendition.
 //
-// Not yet: live presentations, bitrate switching during playback, subtitles from the manifest,
+// Not yet: live presentations, audio bitrate switching, subtitles from the manifest,
 // encrypted renditions (refused), WebM renditions (left out), more than the first DASH Period.
 #pragma once
 
@@ -28,7 +34,9 @@
 #include "wnk/net/http.hpp"
 #include "wnk/net/segment_reader.hpp"
 
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -45,7 +53,34 @@ struct AdaptiveSourceOptions {
     int64_t max_bandwidth = 0;                // bits per second; 0: no limit
     bool dolby_vision = false;                // prefer Dolby Vision renditions (else avoid them)
     std::string language;                     // preferred audio language ("de", "en-US"), else the default
+    bool adaptive_bitrate = true;             // switch video renditions with the measured throughput
+    int64_t initial_bandwidth = 6000000;      // assumed before the first measurement (bits per second)
+    // Media downloaded ahead of the demuxer, per rendition (rounded up to whole segments, at least
+    // two). A bitrate switch plays this much of the old rendition out first.
+    int64_t max_ahead_us = 12000000;
 };
+
+// Network throughput from completed downloads: two exponentially weighted averages over transfer
+// time (half-lives 3 s and 10 s, bias-corrected while young), the lower of the two, as Shaka Player
+// does: quick to fall, slow to trust a burst. Downloads under 16 KiB say more about latency than
+// throughput and are ignored. Thread-safe.
+class ThroughputEstimator {
+ public:
+    void add(int64_t bytes, double seconds);
+    int64_t estimate_bps() const;  // 0 until 128 KiB have been measured
+    int samples() const;
+
+ private:
+    mutable std::mutex m_;
+    double fast_ = 0, slow_ = 0, fast_weight_ = 0, slow_weight_ = 0;
+    int64_t bytes_ = 0;
+    int samples_ = 0;
+};
+
+// The rung of a ladder (bandwidths ascending) to play next from `current`: up only to a rung whose
+// bandwidth is at most 70 % of the estimate, down when the current one exceeds 85 % of it (to the
+// highest that does not), never above `limit_bps` (0: no limit). Without an estimate: `current`.
+int choose_rung(const std::vector<int64_t> &bandwidths, int current, int64_t estimate_bps, int64_t limit_bps);
 
 // The renditions open() would choose, exposed for tests and logs. Indices into p.renditions; -1 none.
 int choose_video(const Presentation &p, const AdaptiveSourceOptions &o);
@@ -71,6 +106,11 @@ class AdaptiveSource : public MediaSource {
     // Rendition indices in use (after select), -1 if none.
     int video_rendition() const;
     int audio_rendition() const;  // -1 also when the audio is muxed into the video rendition
+    // Any thread: caps the video bandwidth (bits per second, 0: none), e.g. a data-saver setting;
+    // takes effect at the next segment boundary.
+    void set_bandwidth_limit(int64_t bps);
+    int64_t throughput_estimate() const;  // bits per second, 0 while unknown
+    int switches() const;                 // bitrate switches since open()
 
     struct Impl;
 

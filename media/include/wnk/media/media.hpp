@@ -141,6 +141,9 @@ struct BackendCaps {
     int64_t splice_gap_us = 0;
     bool position = false;  // reports the presented position
     bool aac_adts = false;  // AAC passed through must carry ADTS headers (Starfish)
+    // The decoder follows a change of picture size mid-stream (new parameter sets at a keyframe), so
+    // an adaptive source may switch between renditions of different resolutions.
+    bool adaptive_resolution = false;
     bool accepts(CodecId c) const;
 };
 

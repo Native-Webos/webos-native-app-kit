@@ -56,6 +56,14 @@ struct SegmentReader::Impl {
     bool failed = false;  // the download stopped at write_pos for good
     bool interrupted = false;
     size_t part = 0;      // being downloaded
+    size_t limit = SIZE_MAX;  // parts to deliver (stop_after_current)
+    double waited = 0;    // seconds store() spent waiting for room, this transfer
+    std::vector<int64_t> part_end;  // stream offset after each completed part
+
+    // The part the reader is in: completed parts that end at or before read_pos.
+    size_t reading_part() const {
+        return static_cast<size_t>(std::upper_bound(part_end.begin(), part_end.end(), read_pos) - part_end.begin());
+    }
     NetError error = NetError::None;
     long status = 0;
     std::string detail;
@@ -77,7 +85,9 @@ struct SegmentReader::Impl {
             if (quit) return false;
             const size_t space = ring.size() - static_cast<size_t>(write_pos - read_pos);
             if (space == 0) {
+                const auto t0 = std::chrono::steady_clock::now();
                 cv.wait(lock);
+                waited += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 continue;
             }
             const size_t at = static_cast<size_t>(write_pos % static_cast<int64_t>(ring.size()));
@@ -93,14 +103,16 @@ struct SegmentReader::Impl {
     }
 
     // Downloads one part; true when it is complete.
-    bool fetch(const SegmentPart &p) {
+    bool fetch(size_t index, const SegmentPart &p) {
         int64_t got = 0;  // bytes of this part delivered
         int failures = 0;
+        double transfer_s = 0;
         for (;;) {
             {
                 std::lock_guard<std::mutex> lock(m);
                 if (quit) return false;
                 ++stats.requests;
+                waited = 0;
             }
             const int64_t off = p.offset + got;
             HttpRequest req;
@@ -162,9 +174,15 @@ struct SegmentReader::Impl {
             const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
             std::unique_lock<std::mutex> lock(m);
-            stats.download_seconds += secs;
+            const double active = std::max(0.0, secs - waited);
+            stats.download_seconds += active;
+            transfer_s += active;
             if (quit) return false;
-            if (complete || (r.error == NetError::None && bad_status == 0 && want < 0)) return true;
+            if (complete || (r.error == NetError::None && bad_status == 0 && want < 0)) {
+                lock.unlock();
+                if (opt.on_part_done) opt.on_part_done(index, got, transfer_s);
+                return true;
+            }
             std::string why;
             NetError e = NetError::Io;
             bool retry = false;
@@ -200,12 +218,18 @@ struct SegmentReader::Impl {
     void run() {
         for (size_t i = 0; i < parts.size(); ++i) {
             {
-                std::lock_guard<std::mutex> lock(m);
+                std::unique_lock<std::mutex> lock(m);
+                if (opt.max_parts_ahead > 0) {
+                    cv.wait(lock, [&] { return quit || i <= reading_part() + opt.max_parts_ahead; });
+                    if (quit) return;
+                }
+                if (i >= limit) break;
                 part = i;
             }
-            if (!fetch(parts[i])) return;
+            if (!fetch(i, parts[i])) return;
             std::lock_guard<std::mutex> lock(m);
             ++stats.parts_done;
+            part_end.push_back(write_pos);
         }
         std::lock_guard<std::mutex> lock(m);
         part = parts.size();
@@ -293,6 +317,14 @@ long SegmentReader::http_status() const {
 std::string SegmentReader::error_detail() const {
     std::lock_guard<std::mutex> lock(impl_->m);
     return impl_->detail;
+}
+
+size_t SegmentReader::stop_after_current() {
+    std::lock_guard<std::mutex> lock(impl_->m);
+    Impl &s = *impl_;
+    if (s.done || s.failed) return std::min(s.limit, s.parts.size());
+    s.limit = std::min(s.limit, s.part + 1);
+    return s.limit;
 }
 
 size_t SegmentReader::download_part() const {

@@ -244,3 +244,59 @@ TEST("segment reader: the buffer bounds read-ahead; interrupt unblocks; destruct
     }
     CHECK(std::chrono::steady_clock::now() - t0 < 500ms);
 }
+
+TEST("segment reader: parts are reported as they complete; stop_after_current ends at a part boundary") {
+    auto t = std::make_shared<MultiTransport>();
+    for (int i = 0; i < 6; ++i) t->files["https://h/" + std::to_string(i)] = pattern(20000, static_cast<uint8_t>(i));
+    std::vector<SegmentPart> parts;
+    for (int i = 0; i < 6; ++i) parts.push_back({"https://h/" + std::to_string(i), 0, -1});
+    std::mutex m;
+    std::vector<std::pair<size_t, int64_t>> done;
+    SegmentReaderOptions o;
+    o.buffer_bytes = 64u << 10;  // three parts fit; the fourth waits for the reader
+    o.on_part_done = [&](size_t part, int64_t bytes, double seconds) {
+        std::lock_guard<std::mutex> lock(m);
+        done.emplace_back(part, bytes);
+        CHECK(seconds >= 0);
+    };
+    SegmentReader r(t, parts, o);
+    uint8_t buf[1000];
+    CHECK(r.read(buf, sizeof buf) > 0);
+    const size_t n = r.stop_after_current();
+    CHECK(n >= 1 && n <= 6);
+    int64_t rc = 0;
+    const auto rest = read_all(r, &rc);
+    CHECK_EQ(rc, int64_t{0});  // a clean end, not a failure
+    CHECK_EQ(static_cast<int64_t>(rest.size()) + 1000, static_cast<int64_t>(n) * 20000);
+    CHECK_EQ(r.stop_after_current(), n);  // idempotent once ended
+    std::lock_guard<std::mutex> lock(m);
+    CHECK_EQ(done.size(), n);
+    for (size_t i = 0; i < done.size(); ++i) {
+        CHECK_EQ(done[i].first, i);
+        CHECK_EQ(done[i].second, int64_t{20000});
+    }
+}
+
+TEST("segment reader: max_parts_ahead keeps the download a few parts ahead of the reader") {
+    auto t = std::make_shared<MultiTransport>();
+    std::vector<SegmentPart> parts;
+    for (int i = 0; i < 8; ++i) {
+        t->files["https://h/" + std::to_string(i)] = pattern(5000, static_cast<uint8_t>(i));
+        parts.push_back({"https://h/" + std::to_string(i), 0, -1});
+    }
+    SegmentReaderOptions o;
+    o.max_parts_ahead = 2;
+    SegmentReader r(t, parts, o);
+    std::this_thread::sleep_for(50ms);
+    CHECK_EQ(r.stats().parts_done, 3);  // the part being read (0) and two more
+    uint8_t buf[5000];
+    int64_t got = 0;
+    while (got < 5000) got += r.read(buf, sizeof buf - static_cast<size_t>(got));  // part 0 read whole
+    uint8_t one;
+    CHECK_EQ(r.read(&one, 1), int64_t{1});  // now inside part 1
+    std::this_thread::sleep_for(50ms);
+    CHECK_EQ(r.stats().parts_done, 4);
+    int64_t rc = 0;
+    CHECK_EQ(read_all(r, &rc).size(), size_t{8 * 5000 - 5001});
+    CHECK_EQ(rc, int64_t{0});
+}

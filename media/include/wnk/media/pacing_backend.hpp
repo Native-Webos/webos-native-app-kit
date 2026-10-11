@@ -22,6 +22,7 @@ class PacingBackend : public MediaBackend {
         BackendCaps c;
         c.video_codecs = {CodecId::H264, CodecId::Hevc, CodecId::Vp9, CodecId::Av1};
         c.audio_codecs = {CodecId::PcmS16, CodecId::Mp3, CodecId::Opus};
+        c.adaptive_resolution = true;  // nothing is decoded
         return c;
     }
     void set_event_callback(EventFn) override {}

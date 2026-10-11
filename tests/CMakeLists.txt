@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http image ui lifecycle)
+foreach (t log platform input focus font storage async http image ui lifecycle crash)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -15,6 +15,7 @@ target_link_libraries(test_http PRIVATE wnk_net)
 target_link_libraries(test_image PRIVATE wnk_image)
 target_link_libraries(test_ui PRIVATE wnk_ui)
 target_link_libraries(test_lifecycle PRIVATE wnk_lifecycle wnk_diagnostics)
+target_link_libraries(test_crash PRIVATE wnk_diagnostics)
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 
 # curl transport against a local HTTP/HTTPS server started by http_server.py (needs python3 + openssl).
@@ -109,4 +110,28 @@ if (TARGET wnk-tvui)
             TIMEOUT 30)
     # Every step of the shutdown sequence runs and is timed.
     wnk_tvui_e2e(shutdown_sequence "Escape,Escape" "SDL_Quit: [0-9.]+ ms.*shutdown complete in")
+endif ()
+if (TARGET wnk-tvui)
+    # Crash record end to end: the first run crashes on purpose (launch params), the second reports it.
+    set(WNK_CRASH_RUNTIME "${CMAKE_CURRENT_BINARY_DIR}/crash-runtime")
+    add_test(NAME e2e.tvui.crash_reset COMMAND "${CMAKE_COMMAND}" -E rm -rf "${WNK_CRASH_RUNTIME}")
+    add_test(NAME e2e.tvui.crash_mkdir COMMAND "${CMAKE_COMMAND}" -E make_directory "${WNK_CRASH_RUNTIME}")
+    set_tests_properties(e2e.tvui.crash_reset PROPERTIES FIXTURES_SETUP crash_dir)
+    set_tests_properties(e2e.tvui.crash_mkdir PROPERTIES FIXTURES_SETUP crash_dir DEPENDS e2e.tvui.crash_reset)
+    # The process must die by SIGSEGV (shell status 139) and leave a record behind.
+    add_test(NAME e2e.tvui.crash_writes_record
+            COMMAND sh -c "\"$1\" '{\"wnkCrashTest\":\"segv\"}'; code=$?; echo \"exit status $code\"; \
+                           test $code -eq 139 && test -s \"$2/org.wnk.examples.tvui/crash.log\""
+                    sh "$<TARGET_FILE:wnk-tvui>" "${WNK_CRASH_RUNTIME}")
+    set_tests_properties(e2e.tvui.crash_writes_record PROPERTIES
+            FIXTURES_REQUIRED crash_dir FIXTURES_SETUP crashed RESOURCE_LOCK crash_dir
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;XDG_RUNTIME_DIR=${WNK_CRASH_RUNTIME};ASAN_OPTIONS=handle_segv=0"
+            TIMEOUT 30)
+    add_test(NAME e2e.tvui.crash_reported_next_launch COMMAND wnk-tvui)
+    set_tests_properties(e2e.tvui.crash_reported_next_launch PROPERTIES
+            FIXTURES_REQUIRED "crash_dir;crashed" RESOURCE_LOCK crash_dir
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_RUNTIME_DIR=${WNK_CRASH_RUNTIME};WNK_TVUI_KEYS=Escape,Escape"
+            PASS_REGULAR_EXPRESSION "previous run crashed: signal=11 \\(SIGSEGV\\) code=[0-9]+ addr=0x[0-9a-f]+.*state=Running"
+            FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
+            TIMEOUT 30)
 endif ()

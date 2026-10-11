@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "wnk/app/app.hpp"
 
+#include "wnk/diagnostics/crash.hpp"
 #include "wnk/image/textures.hpp"
 #include "wnk/input/sdl_input.hpp"
 #include "wnk/log.hpp"
@@ -8,15 +9,20 @@
 #include "wnk/ui/image_source.hpp"
 
 #include <SDL.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <sstream>
 #include <mutex>
 #include <thread>
 #include <vector>
 
+#include <sys/mman.h>
 #include <unistd.h>
 
 namespace wnk::app {
@@ -30,6 +36,34 @@ namespace {
 
 constexpr const char *kCat = "app";
 constexpr Uint32 kDoubleBackMs = 1500;
+
+// "version" from appinfo.json next to the executable (what SAM installed), or empty.
+std::string app_version(const std::string &app_dir) {
+    std::ifstream in(app_dir + "/appinfo.json");
+    if (!in) return {};
+    const auto j = nlohmann::json::parse(in, nullptr, false);
+    return j.is_object() && j.contains("version") && j["version"].is_string() ? j["version"].get<std::string>() : "";
+}
+
+// {"wnkCrashTest":"segv"|"abort"} in the launch params crashes on purpose a few seconds after start,
+// to prove the crash record works on a device. Returns "" when absent.
+std::string crash_test_kind(const std::string &params) {
+    if (params.empty()) return {};
+    const auto j = nlohmann::json::parse(params, nullptr, false);
+    if (!j.is_object() || !j.contains("wnkCrashTest") || !j["wnkCrashTest"].is_string()) return {};
+    const std::string k = j["wnkCrashTest"];
+    return k == "segv" || k == "abort" ? k : "";
+}
+
+__attribute__((noinline)) void crash_now(const std::string &kind) {
+    if (kind == "abort") std::abort();
+    // A write into an inaccessible page: a real SIGSEGV with a known fault address.
+    void *page = mmap(nullptr, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) std::abort();
+    WNK_LOGW("crash", "crash test: writing to %p", page);
+    if (auto *l = log::default_logger()) l->flush();
+    *static_cast<volatile int *>(page) = 1;
+}
 
 double ms_since(Uint64 t) {
     return static_cast<double>(SDL_GetPerformanceCounter() - t) * 1000.0 /
@@ -224,8 +258,10 @@ class Shell final : public Context {
     }
 
     int run(const DelegateFactory &factory) {
+        setup_crash_record();
         lifecycle_.set_listener([this](const Lifecycle::Transition &t) {
             WNK_LOGI("lifecycle", "%s -> %s (%s)", state_name(t.from), state_name(t.to), event_name(t.event));
+            diagnostics::set_crash_state(state_name(t.to));
             if (delegate_ && ui_) delegate_->on_lifecycle(*this, t);
         });
         lifecycle_.dispatch(Event::Start, SDL_GetTicks());
@@ -236,6 +272,35 @@ class Shell final : public Context {
     }
 
  private:
+    void setup_crash_record() {
+        if (runtime_.empty()) {
+            WNK_LOGW("crash", "no runtime directory: crash records disabled");
+            return;
+        }
+        const std::string path = runtime_ + "/crash.log";
+        const auto prev = diagnostics::take_previous_crash(path);
+        if (prev.found) {
+            WNK_LOGW("crash", "previous run crashed: %s (record kept as %s.prev)", prev.summary.c_str(), path.c_str());
+            std::istringstream lines(prev.text);
+            int n = 0;
+            for (std::string line; std::getline(lines, line) && n < 120; ++n) WNK_LOGW("crash", "| %s", line.c_str());
+        }
+        diagnostics::CrashConfig cc;
+        cc.path = path;
+        cc.app_id = launch_.app_id;
+        cc.version = app_version(launch_.app_dir);
+        cc.build_id = diagnostics::own_build_id();
+        std::string err;
+        if (diagnostics::install_crash_handler(cc, &err)) {
+            WNK_LOGI("crash", "handler installed: %s, version %s, build id %s", path.c_str(),
+                     cc.version.empty() ? "?" : cc.version.c_str(), cc.build_id.empty() ? "?" : cc.build_id.c_str());
+        } else {
+            WNK_LOGW("crash", "handler not installed: %s", err.c_str());
+        }
+        crash_test_ = crash_test_kind(launch_.params_json);
+        if (!crash_test_.empty()) WNK_LOGW("crash", "crash test requested: %s after 180 frames", crash_test_.c_str());
+    }
+
     int start(const DelegateFactory &factory) {
         // SDL_Init(0) first: SDL-webOS registers the app with SAM here. Access-policy hints must be
         // set before the window exists (moonlight-tv src/app/app.c).
@@ -366,6 +431,11 @@ class Shell final : public Context {
             if (lifecycle_.state() == State::Resuming) lifecycle_.dispatch(Event::FramePresented, SDL_GetTicks());
 
             if (frames > 1) metrics_.add({dt * 1000.0f, events_ms, update_ms, draw_ms, finish_ms, swap_ms});
+            if (!crash_test_.empty() && frames == 180) {
+                WNK_LOGW("crash", "crash test: triggering %s", crash_test_.c_str());
+                if (auto *l = log::default_logger()) l->flush();
+                crash_now(crash_test_);
+            }
             if (frames % 300 == 0) log_perf(frames);
 
             // If the swap did not block on vsync, sleep out the rest of a 60 Hz frame.
@@ -590,6 +660,7 @@ class Shell final : public Context {
     Uint32 last_move_log_ = 0;
     int moves_logged_ = 0;
     ui::ViewId last_focus_ = 0;
+    std::string crash_test_;
 };
 
 }  // namespace

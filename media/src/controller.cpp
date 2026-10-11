@@ -73,7 +73,12 @@ void PlaybackController::toggle_pause() {
     }
 }
 
-void PlaybackController::seek(int64_t pts_us) { post({Cmd::Seek, {}, std::max<int64_t>(0, pts_us)}); }
+void PlaybackController::seek(int64_t pts_us) {
+    last_seek_request_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+    post({Cmd::Seek, {}, std::max<int64_t>(0, pts_us)});
+}
 
 void PlaybackController::seek_relative(int64_t delta_us) {
     const PlaybackSnapshot s = snapshot();
@@ -538,6 +543,19 @@ void PlaybackController::feed_one() {
         if (!prime_done()) {
             read_one();
             return;
+        }
+        if (backend_->caps().seek_splices) {
+            // Let a burst of seeks settle before anything of this target reaches the decoder.
+            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count();
+            const int64_t wait_ms = last_seek_request_ms_.load() + options_.seek_settle.count() - now_ms;
+            if (wait_ms > 0) {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait_for(lock, std::chrono::milliseconds(std::min<int64_t>(wait_ms, 20)),
+                             [this] { return !commands_.empty(); });
+                return;
+            }
         }
         priming_ = false;
     }

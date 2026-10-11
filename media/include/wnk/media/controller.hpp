@@ -85,6 +85,9 @@ struct PlaybackOptions {
     int64_t prime_video_us = 700000;
     int64_t prime_audio_us = 300000;
     int64_t prime_video_max_us = 2500000;
+    // With a splicing backend nothing fed is ever dropped, so a burst of seeks would play a piece of
+    // every target. After a seek, feeding waits until no further seek has been asked for this long.
+    std::chrono::milliseconds seek_settle{400};
     std::chrono::milliseconds stop_deadline{2000};
 };
 
@@ -181,6 +184,7 @@ class PlaybackController {
     size_t lane_bytes_ = 0;
     bool priming_ = false;
     bool eos_sent_ = false;  // backend told everything is fed
+    std::atomic<int64_t> last_seek_request_ms_{0};  // steady clock, from seek() on the main thread
     SubtitleStore subtitles_;
     std::atomic<int> subtitle_track_{-1};
     std::atomic<bool> eos_seen_{false};

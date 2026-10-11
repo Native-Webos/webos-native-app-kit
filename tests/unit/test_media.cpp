@@ -164,6 +164,7 @@ class PacedBackend : public MediaBackend {
         std::atomic<int64_t> last_video_pts{kNoTime};
         const std::atomic<int> *source_video_read = nullptr;
         std::atomic<int> video_read_at_first_feed{-1};
+        std::atomic<int> starts{0};  // times a first video packet arrived after a load or flush
         AudioFormat audio_format;
         std::mutex m;
     };
@@ -204,6 +205,7 @@ class PacedBackend : public MediaBackend {
             if (log_->first_video_after_flush == kNoTime) {
                 log_->first_video_after_flush = p.pts_us;
                 log_->first_was_key = p.key;
+                ++log_->starts;
                 if (log_->source_video_read != nullptr) log_->video_read_at_first_feed = log_->source_video_read->load();
             }
             log_->last_video_pts = p.pts_us;
@@ -468,6 +470,23 @@ TEST("controller: after a seek nothing is fed until the lanes are primed") {
     // 0.7 s of 25 fps video (18 frames, the span counts the last frame's duration) had been read
     // since the seek when the first one went in.
     CHECK(r.log->video_read_at_first_feed.load() >= 17);
+    r.pc->stop();
+}
+
+TEST("controller: a burst of seeks on a splicing backend feeds only the last target") {
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/true);
+    r.log->pause_drains = true;
+    r.log->seek_splices = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    const int starts_before = r.log->starts.load();
+    for (int64_t t : {5000000, 10000000, 15000000, 20000000, 25000000}) {
+        r.pc->seek(t);
+        std::this_thread::sleep_for(100ms);
+    }
+    REQUIRE(r.wait([&] { return r.log->flushes.load() >= 1 && r.log->first_video_after_flush.load() == 25000000; }, 3000ms));
+    std::this_thread::sleep_for(100ms);
+    CHECK_EQ(r.log->starts.load() - starts_before, 1);  // no piece of 5, 10, 15 or 20 s was fed
     r.pc->stop();
 }
 

@@ -21,6 +21,7 @@
 // any thread. The destructor stops and joins the download thread (cancelling its transfer).
 #pragma once
 
+#include "wnk/net/byte_reader.hpp"
 #include "wnk/net/http.hpp"
 
 #include <cstdint>
@@ -47,33 +48,33 @@ struct HttpStreamStats {
     int64_t bytes_received = 0;
 };
 
-class HttpStream {
+class HttpStream final : public ByteReader {
  public:
     HttpStream(std::shared_ptr<HttpTransport> transport, std::string url, HttpStreamOptions options = {});
-    ~HttpStream();
+    ~HttpStream() override;
     HttpStream(const HttpStream &) = delete;
     HttpStream &operator=(const HttpStream &) = delete;
 
     // Blocking. False with error()/error_detail() set if the resource cannot be read.
     bool open();
 
-    int64_t size() const;     // -1 when the server did not say
-    bool seekable() const;    // server honours byte ranges
-    int64_t position() const;
+    int64_t size() const override;     // -1 when the server did not say
+    bool seekable() const override;    // server honours byte ranges
+    int64_t position() const override;
 
     // Blocking. Bytes copied (> 0), 0 at the end of the resource, -1 on failure or interrupt
     // (error() is Cancelled for an interrupt).
-    int64_t read(void *dst, size_t n);
+    int64_t read(void *dst, size_t n) override;
     // Moves the read position. False (position unchanged) if the stream is not seekable and `pos` is
     // outside the buffer, or if pos is negative. Seeking past the end is allowed; read() returns 0.
-    bool seek(int64_t pos);
+    bool seek(int64_t pos) override;
 
-    void interrupt();
-    void reset_interrupt();
+    void interrupt() override;
+    void reset_interrupt() override;
 
-    NetError error() const;
-    long http_status() const;  // of a failed response, 0 otherwise
-    std::string error_detail() const;
+    NetError error() const override;
+    long http_status() const override;  // of a failed response, 0 otherwise
+    std::string error_detail() const override;
     HttpStreamStats stats() const;
 
     struct Impl;

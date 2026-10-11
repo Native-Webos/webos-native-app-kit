@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket)
+foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -13,6 +13,7 @@ target_link_libraries(test_storage PRIVATE wnk_storage)
 target_link_libraries(test_async PRIVATE wnk_async)
 target_link_libraries(test_http PRIVATE wnk_net)
 target_link_libraries(test_http_stream PRIVATE wnk_net)
+target_link_libraries(test_segment_reader PRIVATE wnk_net)
 target_link_libraries(test_image PRIVATE wnk_image)
 target_link_libraries(test_ui PRIVATE wnk_ui)
 target_link_libraries(test_lifecycle PRIVATE wnk_lifecycle wnk_diagnostics)
@@ -167,6 +168,13 @@ if (TARGET wnk_media_ffmpeg)
         add_test(NAME integration.ffmpeg_source_http
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
                         "$<TARGET_FILE:test_ffmpeg_source>")
+        # DASH and HLS written by the ffmpeg CLI, served by the same local server.
+        add_executable(test_adaptive_source integration/test_adaptive_source.cpp)
+        target_include_directories(test_adaptive_source PRIVATE unit)
+        target_link_libraries(test_adaptive_source PRIVATE wnk_media_ffmpeg)
+        add_test(NAME integration.adaptive_source
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                        "$<TARGET_FILE:test_adaptive_source>")
     endif ()
 endif ()
 

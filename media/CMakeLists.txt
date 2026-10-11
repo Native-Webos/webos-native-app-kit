@@ -8,7 +8,7 @@ target_link_libraries(wnk_media PUBLIC wnk_core wnk_async wnk_logging PRIVATE wn
 
 # MediaSource on the bundled FFmpeg; network URIs go through the kit's HTTP client.
 if (TARGET wnk_ffmpeg)
-    add_library(wnk_media_ffmpeg STATIC src/ffmpeg_source.cpp)
+    add_library(wnk_media_ffmpeg STATIC src/ffmpeg_source.cpp src/adaptive_source.cpp)
     target_link_libraries(wnk_media_ffmpeg PUBLIC wnk_media wnk_net PRIVATE wnk_ffmpeg)
 endif ()
 

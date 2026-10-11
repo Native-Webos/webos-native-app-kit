@@ -281,6 +281,7 @@ bool dash_segments(const SegmentInfo &si, const std::string &base, const std::st
     const int64_t pto = i64_or(si.get("presentationTimeOffset"), 0);
     const int64_t start_number = i64_or(si.get("startNumber"), 1);
     const int64_t duration = i64_or(si.get("duration"), 0);
+    r->time_origin_us = ticks_to_us(pto, timescale) - period_start_us;
 
     auto add = [&](std::string url, ByteRange range, int64_t t, int64_t d) -> bool {
         if (r->segments.size() >= kMaxSegments) {

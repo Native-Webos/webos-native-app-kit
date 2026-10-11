@@ -24,6 +24,7 @@
 #pragma once
 
 #include "wnk/media/media.hpp"
+#include "wnk/net/byte_reader.hpp"
 #include "wnk/net/http_stream.hpp"
 
 #include <memory>
@@ -42,6 +43,14 @@ class FfmpegSource : public MediaSource {
     ~FfmpegSource() override;
 
     bool open(const std::string &uri, std::string *error) override;
+    // Opens a stream read from `reader` (not seekable unless it says so); `name` hints the format
+    // by its extension and becomes MediaInfo::uri.
+    bool open_reader(std::unique_ptr<net::ByteReader> reader, const std::string &name, std::string *error);
+    // The time subtracted from every timestamp, for the next open: the container's start time by
+    // default (kNoTime). A stream opened partway through (adaptive streaming after a seek) passes the
+    // origin of the first open so its times stay those of the presentation.
+    void set_time_origin(int64_t origin_us);
+    int64_t time_origin() const;  // in use since the last open
     const MediaInfo &info() const override;
     bool select(int video_track, int audio_track, const BackendCaps &caps, StreamFormat *out,
                 std::string *error) override;
@@ -56,6 +65,7 @@ class FfmpegSource : public MediaSource {
     struct Impl;
 
  private:
+    bool open_input(const std::string &name, const std::string &uri, std::string *error);
     std::unique_ptr<Impl> impl_;
 };
 

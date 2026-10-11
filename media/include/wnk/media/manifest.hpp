@@ -63,6 +63,9 @@ struct Rendition {
     std::string audio_group;   // HLS variant: the GROUP-ID of its audio renditions
     bool is_default = false;
     bool encrypted = false;
+    // Media time minus presentation time (DASH: presentationTimeOffset less the Period start);
+    // kNoTime when only the media can tell (HLS, where all renditions share one timeline).
+    int64_t time_origin_us = kNoTime;
     std::string dolby_vision;  // the DV codec string ("dvhe.08.06") when the rendition is Dolby Vision
     bool atmos = false;        // E-AC-3 with Joint Object Coding
 

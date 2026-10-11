@@ -142,8 +142,9 @@ struct FfmpegSource::Impl {
     FfmpegSourceOptions options;
     AVFormatContext *fmt = nullptr;
     AVIOContext *avio = nullptr;  // custom I/O for network URIs
-    std::mutex http_mutex;        // guards `http` against interrupt() from other threads
-    std::unique_ptr<net::HttpStream> http;
+    std::mutex reader_mutex;      // guards `reader` against interrupt() from other threads
+    std::unique_ptr<net::ByteReader> reader;  // network or caller-supplied bytes (custom I/O)
+    int64_t origin_us = kNoTime;  // set_time_origin(); kNoTime: the container's start time
     AVBSFContext *bsf = nullptr;
     AVCodecContext *dec = nullptr;
     AVPacket *pkt = nullptr;
@@ -381,10 +382,10 @@ struct FfmpegSource::Impl {
             avio_context_free(&avio);
         }
         {
-            std::unique_ptr<net::HttpStream> gone;
+            std::unique_ptr<net::ByteReader> gone;
             {
-                std::lock_guard<std::mutex> lock(http_mutex);
-                gone = std::move(http);
+                std::lock_guard<std::mutex> lock(reader_mutex);
+                gone = std::move(reader);
             }
         }
         av_packet_free(&pkt);
@@ -400,14 +401,14 @@ struct FfmpegSource::Impl {
 
     // AVIOContext callbacks over the HTTP stream (playback thread only).
     static int avio_read(void *opaque, uint8_t *buf, int size) {
-        auto *s = static_cast<net::HttpStream *>(opaque);
+        auto *s = static_cast<net::ByteReader *>(opaque);
         const int64_t n = s->read(buf, static_cast<size_t>(size));
         if (n > 0) return static_cast<int>(n);
         if (n == 0) return AVERROR_EOF;
         return s->error() == net::NetError::Cancelled ? AVERROR_EXIT : AVERROR(EIO);
     }
     static int64_t avio_seek(void *opaque, int64_t offset, int whence) {
-        auto *s = static_cast<net::HttpStream *>(opaque);
+        auto *s = static_cast<net::ByteReader *>(opaque);
         switch (whence & ~AVSEEK_FORCE) {
             case AVSEEK_SIZE: return s->size() >= 0 ? s->size() : AVERROR(ENOSYS);
             case SEEK_SET: break;
@@ -429,11 +430,7 @@ struct FfmpegSource::Impl {
         }
         auto stream = std::make_unique<net::HttpStream>(options.http, uri, options.http_stream);
         net::HttpStream *s = stream.get();
-        {
-            std::lock_guard<std::mutex> lock(http_mutex);
-            http = std::move(stream);
-            if (interrupted) s->interrupt();  // interrupt() came before the stream existed
-        }
+        adopt(std::move(stream));
         if (!s->open()) {
             const long st = s->http_status();
             *error = s->error() == net::NetError::Cancelled ? "interrupted"
@@ -441,6 +438,18 @@ struct FfmpegSource::Impl {
                                                             : s->error_detail();
             return false;
         }
+        return attach(s, error);
+    }
+
+    // Takes ownership of the reader (interruptible from now on).
+    void adopt(std::unique_ptr<net::ByteReader> r) {
+        std::lock_guard<std::mutex> lock(reader_mutex);
+        reader = std::move(r);
+        if (interrupted) reader->interrupt();  // interrupt() came before the reader existed
+    }
+
+    // Gives `fmt` a custom AVIOContext reading from `s`.
+    bool attach(net::ByteReader *s, std::string *error) {
         constexpr int kBufferSize = 64 * 1024;
         auto *buffer = static_cast<unsigned char *>(av_malloc(kBufferSize));
         avio = buffer != nullptr ? avio_alloc_context(buffer, kBufferSize, 0, s, &avio_read, nullptr,
@@ -461,10 +470,10 @@ struct FfmpegSource::Impl {
 
     // Prefers the HTTP stream's reason over FFmpeg's generic I/O error.
     std::string io_error(int rc) {
-        std::lock_guard<std::mutex> lock(http_mutex);
-        if (http && rc == AVERROR(EIO) && http->error() != net::NetError::None) {
-            const long st = http->http_status();
-            return st != 0 ? "HTTP " + std::to_string(st) : http->error_detail();
+        std::lock_guard<std::mutex> lock(reader_mutex);
+        if (reader && rc == AVERROR(EIO) && reader->error() != net::NetError::None) {
+            const long st = reader->http_status();
+            return st != 0 ? "HTTP " + std::to_string(st) : reader->error_detail();
         }
         return av_err(rc);
     }
@@ -701,6 +710,7 @@ struct FfmpegSource::Impl {
         v.key = key;
         v.data.assign(p->data, p->data + p->size);
         v.pts_us = to_us(p->pts != AV_NOPTS_VALUE ? p->pts : p->dts, tb);
+        v.dts_us = to_us(p->dts, tb);
         v.duration_us = p->duration > 0 ? av_rescale_q(p->duration, tb, kMicros) : 0;
         ready.push_back(std::move(v));
     }
@@ -727,13 +737,13 @@ std::string FfmpegSource::version() {
 const MediaInfo &FfmpegSource::info() const { return impl_->info; }
 void FfmpegSource::interrupt() {
     impl_->interrupted = true;
-    std::lock_guard<std::mutex> lock(impl_->http_mutex);
-    if (impl_->http) impl_->http->interrupt();
+    std::lock_guard<std::mutex> lock(impl_->reader_mutex);
+    if (impl_->reader) impl_->reader->interrupt();
 }
 void FfmpegSource::reset_interrupt() {
     impl_->interrupted = false;
-    std::lock_guard<std::mutex> lock(impl_->http_mutex);
-    if (impl_->http) impl_->http->reset_interrupt();
+    std::lock_guard<std::mutex> lock(impl_->reader_mutex);
+    if (impl_->reader) impl_->reader->reset_interrupt();
 }
 
 bool FfmpegSource::open(const std::string &uri, std::string *error) {
@@ -759,6 +769,29 @@ bool FfmpegSource::open(const std::string &uri, std::string *error) {
         name = uri.substr(0, uri.find_first_of("?#"));
         name = name.substr(name.find_last_of('/') + 1);
     }
+    return open_input(name, uri, error);
+}
+
+bool FfmpegSource::open_reader(std::unique_ptr<net::ByteReader> reader, const std::string &name, std::string *error) {
+    Impl &m = *impl_;
+    m.close();
+    m.fmt = avformat_alloc_context();
+    m.fmt->interrupt_callback = {&Impl::interrupt_cb, &m};
+    net::ByteReader *r = reader.get();
+    m.adopt(std::move(reader));
+    if (!m.attach(r, error)) {
+        m.close();
+        return false;
+    }
+    const std::string hint = name.substr(0, name.find_first_of("?#"));
+    return open_input(hint.substr(hint.find_last_of('/') + 1), name, error);
+}
+
+void FfmpegSource::set_time_origin(int64_t origin_us) { impl_->origin_us = origin_us; }
+int64_t FfmpegSource::time_origin() const { return impl_->start_us; }
+
+bool FfmpegSource::open_input(const std::string &name, const std::string &uri, std::string *error) {
+    Impl &m = *impl_;
     int rc = avformat_open_input(&m.fmt, name.c_str(), nullptr, nullptr);
     if (rc < 0) {
         // avformat_open_input frees the context on failure (but not a custom AVIOContext).
@@ -774,7 +807,7 @@ bool FfmpegSource::open(const std::string &uri, std::string *error) {
     }
     m.pkt = av_packet_alloc();
     m.frame = av_frame_alloc();
-    m.start_us = m.fmt->start_time != AV_NOPTS_VALUE ? m.fmt->start_time : 0;
+    m.start_us = m.origin_us != kNoTime ? m.origin_us : m.fmt->start_time != AV_NOPTS_VALUE ? m.fmt->start_time : 0;
     MediaInfo &info = m.info;
     info.uri = uri;
     info.container = m.fmt->iformat != nullptr ? m.fmt->iformat->name : "";

@@ -112,6 +112,7 @@ struct Packet {
     TrackType type = TrackType::Video;
     std::vector<uint8_t> data;
     int64_t pts_us = kNoTime;
+    int64_t dts_us = kNoTime;  // decode time, where it differs from pts (video with B-frames)
     int64_t duration_us = 0;
     bool key = false;
     std::shared_ptr<const SubtitleCue> subtitle;  // type == Subtitle: the decoded cue (data unused)

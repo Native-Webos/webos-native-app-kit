@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 #include <dlfcn.h>
 
@@ -111,6 +112,10 @@ class CurlTransport final : public HttpTransport {
  public:
     explicit CurlTransport(CurlOptions options) : options_(std::move(options)) {}
 
+    ~CurlTransport() override {
+        for (CURLM *m : idle_) api().multi_cleanup(m);
+    }
+
     std::string describe() const override { return api().version; }
 
     HttpResponse perform(const HttpRequest &req, const async::CancellationToken &token) override {
@@ -142,7 +147,7 @@ class CurlTransport final : public HttpTransport {
             return r;
         }
         CURL *h = c.easy_init();
-        CURLM *m = c.multi_init();
+        CURLM *m = take_multi();
         if (h == nullptr || m == nullptr) {
             if (h != nullptr) c.easy_cleanup(h);
             if (m != nullptr) c.multi_cleanup(m);
@@ -237,12 +242,41 @@ class CurlTransport final : public HttpTransport {
         }
         c.easy_getinfo(h, CURLINFO_TOTAL_TIME, &r.total_seconds);
         c.multi_remove_handle(m, h);
-        c.multi_cleanup(m);
+        give_multi(m);
         c.easy_cleanup(h);
         c.slist_free_all(headers);
         return r;
     }
 
+    // libcurl keeps connections (and TLS sessions on them) in the multi handle. Reusing idle ones
+    // saves a TCP and TLS handshake per request to the same server: segment after segment, about
+    // two round trips each (measured ~650 ms of a ~1 s request to a server 320 ms away).
+    CURLM *take_multi() {
+        {
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            if (!idle_.empty()) {
+                CURLM *m = idle_.back();
+                idle_.pop_back();
+                return m;
+            }
+        }
+        return api().multi_init();
+    }
+
+    void give_multi(CURLM *m) {
+        {
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            if (idle_.size() < kMaxIdle) {
+                idle_.push_back(m);
+                return;
+            }
+        }
+        api().multi_cleanup(m);
+    }
+
+    static constexpr size_t kMaxIdle = 8;  // concurrent users: playback lanes, refresher, subtitles, UI
+    std::mutex pool_mutex_;
+    std::vector<CURLM *> idle_;  // most recently used last
     CurlOptions options_;
 };
 

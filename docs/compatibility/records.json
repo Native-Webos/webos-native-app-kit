@@ -476,6 +476,24 @@
       "method": "Example A 0.7.1 probe against wss://ws.postman-echo.com/raw (public echo server)",
       "evidence": "TLS (OpenSSL 1.1.1t, system CA store) and handshake in 1.5 s over the internet; UTF-8 text echoed",
       "limitations": "close not exercised against that server (the probe closes after a binary reply, which it does not send)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.http.mp4",
+      "result": "supported",
+      "method": "Example D 0.2.0, {\"uri\": \"http://<LAN server>/files/...\"}: 180 s 1080p25 H.264 + AAC MP4 (181 MB, index at the end) from tests/integration/http_server.py --serve",
+      "evidence": "opened in 78 ms (range request to the index at the end, then back); picture and sound in sync (owner); 21 seeks of 10 s back to playing in 170-440 ms, backward ones with one range request each; frame interval 20.1 ms avg, no feed retries",
+      "limitations": "LAN only, plain HTTP; HTTPS media, slow links and reconnects after drops not exercised on the TV"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.http.mpegts",
+      "result": "supported",
+      "method": "Example D 0.2.0, same server: 180 s 1080p25 H.264 + AAC MPEG-TS (186 MB)",
+      "evidence": "plays from 0.02 s; every seek starts at a video keyframe (16.02, 27.02, 37.02, 47.02, 57.02 s) after 310-380 ms, 2-3 range requests each while stepping back",
+      "limitations": "the picture goes black during each seek and pause: NDL v2 is unloaded and reloaded (no safe flush or pause)"
     }
   ]
 }

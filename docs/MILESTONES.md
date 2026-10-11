@@ -276,13 +276,17 @@ plays `{"uri": "http://..."}` (0.2.0).
 | FFmpeg over HTTP = local file, packet for packet (MP4 index first and last, MKV, TS); 404 reported as "HTTP 404" | `[TEST]` |
 | ARM build: player 0.2.0 loads on 5.3.1–11.2.0, no new DT_NEEDED (libcurl stays dlopened) | `[BUILD]` `[FWDB]` |
 
+On hardware (OLED65C1PTB, webOS 6.5.3, 2026-10-11): 180 s 1080p MP4 (index at the end) and MPEG-TS over LAN
+HTTP play in sync; the MP4 opens in 78 ms; seeks are back to playing in 170–440 ms and TS seeks start on a
+keyframe. The picture goes black during every seek and pause because NDL v2 is unloaded and reloaded.
+
 Found on the way and fixed: MPEG-TS has no keyframe index, so FFmpeg's seek lands near the timestamp (before
 or after it) and video was dropped until the next keyframe. `FfmpegSource::seek` now reads forward to the
 target and replays from the last keyframe before it, starting 1–16 s further back (or at the first byte)
 when there is none.
 
 Open: subtitles, HDR metadata, VP9/AV1 on the TV,
-Opus passthrough, resampling for sample rates NDL lacks, video-only files (reported to need an audio prime),
+Opus passthrough, resampling for sample rates NDL lacks, seek/pause without a black screen, video-only files (reported to need an audio prime),
 a decoder-side position, real pause via Starfish, and a PTS-unit test that does not feed in real time.
 
 ## M8–M10

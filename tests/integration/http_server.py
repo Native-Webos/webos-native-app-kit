@@ -3,7 +3,8 @@
 """Local HTTP + HTTPS test server for the curl transport tests, then run the test binary.
 
     http_server.py TEST_BINARY
-    http_server.py --serve HOST:PORT     plain HTTP/WebSocket only, until interrupted (device tests)
+    http_server.py --serve HOST:PORT [DIR]   plain HTTP/WebSocket only, until interrupted (device
+                                             tests); DIR is served at /files/<name>
 
 Generates a throwaway CA and a server certificate for "localhost" with the openssl CLI, starts an
 HTTP server and an HTTPS server on 127.0.0.1 (ephemeral ports), and runs TEST_BINARY with:
@@ -11,7 +12,13 @@ HTTP server and an HTTPS server on 127.0.0.1 (ephemeral ports), and runs TEST_BI
     WNK_TEST_HTTPS_BASE  https://localhost:<port>
     WNK_TEST_HTTPS_IP    https://127.0.0.1:<port>   (same server, name not in the certificate)
     WNK_TEST_CA          path of the CA certificate (PEM)
+    WNK_TEST_FILES_DIR   a directory served at /files/<name> (byte ranges supported)
 Exits with the test binary's exit code. Stdlib + openssl CLI only; nothing leaves the machine.
+
+Byte-range routes (Range: bytes=FIRST- or FIRST-LAST, answered with 206/416), for streaming tests:
+    /range?n=N        N bytes, byte i = i % 251; &noranges=1 ignores Range (200, whole body);
+                      &drop=K closes every connection after K body bytes
+    /files/NAME       a file from the served directory
 
 WebSocket routes (GET with Upgrade: websocket), for tests/integration/test_websocket_curl.cpp:
     /ws/echo     echoes messages; text commands: ping-me (server ping), close-me (server close 1000
@@ -41,6 +48,22 @@ import struct
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 WS_DROPS = {"n": 0}
+FILES_DIR = {"path": None}
+RANGE_LOG: list[str] = []  # Range header of every /range and /files request, for /range-log
+
+
+def parse_range(value: str, size: int) -> tuple[int, int] | None | str:
+    """(first, last) for "bytes=FIRST-[LAST]", None without a usable header, "416" if unsatisfiable."""
+    if not value.startswith("bytes=") or "," in value:
+        return None
+    first, _, last = value[6:].strip().partition("-")
+    if not first.isdigit() or (last and not last.isdigit()):
+        return None
+    a = int(first)
+    b = min(int(last), size - 1) if last else size - 1
+    if a >= size or b < a:
+        return "416"
+    return a, b
 
 
 def ws_send(w, op: int, payload: bytes, fin: bool = True, mask: bool = False):
@@ -90,6 +113,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    def _ranged(self, size: int, read, ranges: bool = True, drop: int | None = None):
+        """Answers GET/HEAD for a resource of `size` bytes; read(first, n) returns bytes."""
+        RANGE_LOG.append(self.headers.get("Range", ""))
+        r = parse_range(self.headers.get("Range", ""), size) if ranges else None
+        if r == "416":
+            return self._send(416, b"", {"Content-Range": f"bytes */{size}"})
+        first, last = r if r else (0, size - 1)
+        self.send_response(206 if r else 200)
+        self.send_header("Accept-Ranges", "bytes" if ranges else "none")
+        if r:
+            self.send_header("Content-Range", f"bytes {first}-{last}/{size}")
+        self.send_header("Content-Length", str(last - first + 1))
+        self.send_header("Content-Type", "application/octet-stream")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        sent, at = 0, first
+        try:
+            while at <= last:
+                n = min(65536, last - at + 1)
+                if drop is not None:
+                    n = min(n, drop - sent)
+                    if n <= 0:
+                        self.close_connection = True
+                        self.connection.shutdown(2)
+                        return
+                self.wfile.write(read(at, n))
+                at += n
+                sent += n
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
 
     def _websocket(self, path: str):
         if path == "/ws/reject":
@@ -154,6 +209,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(url.query)
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
+        if url.path == "/range":
+            n = int(q.get("n", ["100000"])[0])
+            drop = int(q["drop"][0]) if "drop" in q else None
+            return self._ranged(n, lambda a, k: bytes((i % 251) for i in range(a, a + k)),
+                                ranges="noranges" not in q, drop=drop)
+        if url.path == "/range-log":
+            return self._send(200, "\n".join(RANGE_LOG).encode())
+        if url.path.startswith("/files/") and FILES_DIR["path"]:
+            name = urllib.parse.unquote(url.path[len("/files/"):])
+            path = os.path.join(FILES_DIR["path"], name)
+            if "/" in name or name.startswith(".") or not os.path.isfile(path):
+                return self._send(404, b"not found")
+            with open(path, "rb") as f:
+                def read(a, k, f=f):
+                    f.seek(a)
+                    return f.read(k)
+                return self._ranged(os.path.getsize(path), read)
         if url.path == "/ok":
             return self._send(200, b"hello", {"Content-Type": "text/plain", "X-Server": "wnk-test"})
         if url.path.startswith("/status/"):
@@ -220,9 +292,11 @@ def serve(server: http.server.ThreadingHTTPServer):
 
 
 def main() -> int:
-    if len(sys.argv) == 3 and sys.argv[1] == "--serve":
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--serve":
         # Manual/device testing: plain HTTP + WebSocket on HOST:PORT until interrupted.
         host, port = sys.argv[2].rsplit(":", 1)
+        if len(sys.argv) == 4:
+            FILES_DIR["path"] = os.path.abspath(sys.argv[3])
         srv = QuietServer((host, int(port)), Handler)
         print(f"serving http/ws on {host}:{port}", flush=True)
         srv.serve_forever()
@@ -236,6 +310,8 @@ def main() -> int:
     d = tempfile.mkdtemp(prefix="wnk-https-")
     try:
         ca, cert, key = make_certs(d)
+        FILES_DIR["path"] = os.path.join(d, "files")
+        os.mkdir(FILES_DIR["path"])
         http_srv = QuietServer(("127.0.0.1", 0), Handler)
         https_srv = QuietServer(("127.0.0.1", 0), Handler)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -247,7 +323,8 @@ def main() -> int:
                    WNK_TEST_HTTP_BASE=f"http://127.0.0.1:{http_srv.server_address[1]}",
                    WNK_TEST_HTTPS_BASE=f"https://localhost:{https_srv.server_address[1]}",
                    WNK_TEST_HTTPS_IP=f"https://127.0.0.1:{https_srv.server_address[1]}",
-                   WNK_TEST_CA=ca)
+                   WNK_TEST_CA=ca,
+                   WNK_TEST_FILES_DIR=FILES_DIR["path"])
         return subprocess.run([sys.argv[1]], env=env).returncode
     finally:
         shutil.rmtree(d, ignore_errors=True)

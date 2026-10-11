@@ -78,11 +78,27 @@ bool is_idempotent_method(const std::string &method);
 // Validates scheme (http/https), method token and header names/values (no CR/LF).
 bool validate_request(const HttpRequest &req, std::string *why);
 
+// Receives a response body as it arrives (HttpTransport::stream). Both callbacks run on the calling
+// thread; returning false from either ends the transfer with NetError::Cancelled. on_data may block
+// (that is how a reader applies backpressure), but then the token must be cancelled to unblock it.
+struct HttpStreamSink {
+    // Once, before any body bytes: status and lower-cased headers of the final response.
+    std::function<bool(long status, const Headers &headers)> on_response;
+    std::function<bool(const uint8_t *data, size_t size)> on_data;
+};
+
 class HttpTransport {
  public:
     virtual ~HttpTransport() = default;
     // Blocking. Must honour `token` promptly (within ~100 ms) and the request's limits.
     virtual HttpResponse perform(const HttpRequest &req, const async::CancellationToken &token) = 0;
+    // Blocking, for media and other large bodies. Differs from perform(): the body goes to `sink`
+    // instead of HttpResponse::body, max_response_bytes does not apply, timeout_ms is a stall limit
+    // (no bytes for that long → Timeout) rather than a limit on the whole transfer, and no content
+    // encoding is negotiated, so byte ranges stay exact. The default calls perform() and delivers the
+    // buffered body, which is enough for test doubles.
+    virtual HttpResponse stream(const HttpRequest &req, const async::CancellationToken &token,
+                                const HttpStreamSink &sink);
     virtual std::string describe() const = 0;  // e.g. "libcurl/7.87.0 OpenSSL/1.1.1"
 };
 

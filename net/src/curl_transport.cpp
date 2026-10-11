@@ -20,12 +20,33 @@ namespace {
 struct Transfer {
     HttpResponse *response;
     size_t max_bytes;
+    const CurlApi *api = nullptr;
+    CURL *handle = nullptr;
+    const HttpStreamSink *sink = nullptr;  // streaming: the body goes here instead of response->body
     bool too_large = false;
+    bool responded = false;  // sink->on_response has been called
+    bool stopped = false;    // the sink asked to stop
+
+    bool respond() {
+        responded = true;
+        long status = 0;
+        api->easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+        if (!sink->on_response(status, response->headers)) stopped = true;
+        return !stopped;
+    }
 };
 
 size_t on_body(char *data, size_t size, size_t n, void *userp) {
     auto *t = static_cast<Transfer *>(userp);
     const size_t bytes = size * n;
+    if (t->sink != nullptr) {
+        if (!t->responded && !t->respond()) return 0;
+        if (!t->sink->on_data(reinterpret_cast<const uint8_t *>(data), bytes)) {
+            t->stopped = true;
+            return 0;  // CURLE_WRITE_ERROR
+        }
+        return bytes;
+    }
     if (t->response->body.size() + bytes > t->max_bytes) {
         t->too_large = true;
         return 0;  // CURLE_WRITE_ERROR
@@ -93,6 +114,16 @@ class CurlTransport final : public HttpTransport {
     std::string describe() const override { return api().version; }
 
     HttpResponse perform(const HttpRequest &req, const async::CancellationToken &token) override {
+        return run(req, token, nullptr);
+    }
+
+    HttpResponse stream(const HttpRequest &req, const async::CancellationToken &token,
+                        const HttpStreamSink &sink) override {
+        return run(req, token, &sink);
+    }
+
+ private:
+    HttpResponse run(const HttpRequest &req, const async::CancellationToken &token, const HttpStreamSink *sink) {
         HttpResponse r;
         std::string why;
         if (!validate_request(req, &why)) {
@@ -119,7 +150,7 @@ class CurlTransport final : public HttpTransport {
             r.detail = "curl handle allocation failed";
             return r;
         }
-        Transfer t{&r, req.max_response_bytes};
+        Transfer t{&r, req.max_response_bytes, &c, h, sink};
         char errbuf[CURL_ERROR_SIZE] = {};
         curl_slist *headers = nullptr;
         for (const auto &[k, v] : req.headers) headers = c.slist_append(headers, (k + ": " + v).c_str());
@@ -132,13 +163,20 @@ class CurlTransport final : public HttpTransport {
         c.easy_setopt(h, CURLOPT_REDIR_PROTOCOLS, protocols);
         c.easy_setopt(h, CURLOPT_FOLLOWLOCATION, req.max_redirects > 0 ? 1L : 0L);
         c.easy_setopt(h, CURLOPT_MAXREDIRS, static_cast<long>(req.max_redirects));
-        c.easy_setopt(h, CURLOPT_TIMEOUT_MS, static_cast<long>(req.timeout_ms));
+        if (sink == nullptr) {
+            c.easy_setopt(h, CURLOPT_TIMEOUT_MS, static_cast<long>(req.timeout_ms));
+        } else {
+            // A stream may last for hours; give up only when nothing arrives for timeout_ms.
+            c.easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
+            c.easy_setopt(h, CURLOPT_LOW_SPEED_TIME, static_cast<long>(std::max(1, (req.timeout_ms + 999) / 1000)));
+        }
         c.easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(req.connect_timeout_ms));
         c.easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
         c.easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
         if (!options_.ca_bundle.empty()) c.easy_setopt(h, CURLOPT_CAINFO, options_.ca_bundle.c_str());
         c.easy_setopt(h, CURLOPT_USERAGENT, options_.user_agent.c_str());
-        c.easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");  // whatever this libcurl can decode
+        // Whatever this libcurl can decode; streams stay identity-encoded so byte ranges are exact.
+        if (sink == nullptr) c.easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
         c.easy_setopt(h, CURLOPT_ERRORBUFFER, errbuf);
         c.easy_setopt(h, CURLOPT_WRITEFUNCTION, &on_body);
         c.easy_setopt(h, CURLOPT_WRITEDATA, &t);
@@ -180,14 +218,18 @@ class CurlTransport final : public HttpTransport {
         while (CURLMsg *msg = c.multi_info_read(m, &left)) {
             if (msg->msg == CURLMSG_DONE && msg->easy_handle == h) result = msg->data.result;
         }
-        r.error = map_error(result, t.too_large, cancelled);
-        if (r.error == NetError::None) {
+        // An empty body never reaches on_body; the sink still gets the response.
+        if (sink != nullptr && result == CURLE_OK && !cancelled && !t.responded) t.respond();
+        r.error = map_error(result, t.too_large, cancelled || t.stopped);
+        if (t.stopped) r.detail = "stopped by the receiver";
+        if (r.error == NetError::None || t.stopped) {
             long status = 0;
             c.easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
             r.status = status;
-        } else {
+        }
+        if (r.error != NetError::None) {
             r.body.clear();
-            r.detail = errbuf[0] != '\0' ? errbuf : c.easy_strerror(result);
+            if (r.detail.empty()) r.detail = errbuf[0] != '\0' ? errbuf : c.easy_strerror(result);
         }
         char *effective = nullptr;
         if (c.easy_getinfo(h, CURLINFO_EFFECTIVE_URL, &effective) == CURLE_OK && effective != nullptr) {
@@ -201,7 +243,6 @@ class CurlTransport final : public HttpTransport {
         return r;
     }
 
- private:
     CurlOptions options_;
 };
 

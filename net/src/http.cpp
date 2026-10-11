@@ -67,6 +67,20 @@ bool validate_request(const HttpRequest &req, std::string *why) {
     return true;
 }
 
+HttpResponse HttpTransport::stream(const HttpRequest &req, const async::CancellationToken &token,
+                                   const HttpStreamSink &sink) {
+    HttpResponse r = perform(req, token);
+    if (r.error != NetError::None) return r;
+    std::string body = std::move(r.body);
+    r.body.clear();
+    if (!sink.on_response(r.status, r.headers) ||
+        (!body.empty() && !sink.on_data(reinterpret_cast<const uint8_t *>(body.data()), body.size()))) {
+        r.error = NetError::Cancelled;
+        r.detail = "stopped by the receiver";
+    }
+    return r;
+}
+
 bool RetryPolicy::should_retry(const HttpResponse &r, int attempt) const {
     if (attempt >= max_attempts) return false;
     switch (r.error) {

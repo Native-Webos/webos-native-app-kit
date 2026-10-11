@@ -6,6 +6,7 @@
 #include "wnk_test.hpp"
 
 #include "wnk/net/http.hpp"
+#include "wnk/net/http_stream.hpp"
 
 #include <cstdlib>
 #include <memory>
@@ -174,4 +175,129 @@ TEST("connection refused and invalid schemes") {
     REQUIRE(t);
     CHECK(t->perform(get("http://127.0.0.1:9/"), {}).error == NetError::Connect);  // discard port, closed
     CHECK(t->perform(get("ftp://127.0.0.1/"), {}).error == NetError::InvalidRequest);
+}
+
+// ---- streaming ---------------------------------------------------------------------------------
+
+namespace {
+
+bool is_pattern(const std::vector<uint8_t> &d, int64_t from) {
+    for (size_t i = 0; i < d.size(); ++i) {
+        if (d[i] != static_cast<uint8_t>((from + static_cast<int64_t>(i)) % 251)) return false;
+    }
+    return true;
+}
+
+std::vector<uint8_t> read_to_end(HttpStream &s) {
+    std::vector<uint8_t> out;
+    std::vector<uint8_t> buf(32768);
+    for (;;) {
+        const int64_t n = s.read(buf.data(), buf.size());
+        if (n <= 0) break;
+        out.insert(out.end(), buf.begin(), buf.begin() + n);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST("stream: body arrives in chunks without the response size limit; no content encoding") {
+    NEED_SERVER();
+    auto t = transport();
+    REQUIRE(t);
+    HttpRequest req = get(kHttp + "/range?n=3000000");
+    req.max_response_bytes = 1000;  // does not apply to streams
+    long status = 0;
+    size_t bytes = 0, chunks = 0;
+    std::string range_header;
+    HttpStreamSink sink;
+    sink.on_response = [&](long st, const Headers &h) {
+        status = st;
+        for (const auto &[k, v] : h) {
+            if (k == "accept-ranges") range_header = v;
+        }
+        return true;
+    };
+    sink.on_data = [&](const uint8_t *, size_t n) {
+        bytes += n;
+        ++chunks;
+        return true;
+    };
+    HttpResponse r = t->stream(req, {}, sink);
+    CHECK(r.error == NetError::None);
+    CHECK_EQ(status, 200);
+    CHECK_EQ(range_header, "bytes");
+    CHECK_EQ(bytes, 3000000u);
+    CHECK(chunks > 1);
+    CHECK(r.body.empty());
+
+    // The receiver can stop a transfer; that reads as Cancelled.
+    sink.on_data = [&](const uint8_t *, size_t) { return false; };
+    r = t->stream(req, {}, sink);
+    CHECK(r.error == NetError::Cancelled);
+    CHECK_EQ(r.status, 200);
+
+    // Empty bodies still deliver the response.
+    status = 0;
+    r = t->stream(get(kHttp + "/status/204"), {}, sink);
+    CHECK(r.error == NetError::None);
+    CHECK_EQ(status, 204);
+}
+
+TEST("stream: HttpStream over curl reads, seeks with range requests and resumes after drops") {
+    NEED_SERVER();
+    std::shared_ptr<HttpTransport> t = transport();
+    REQUIRE(t);
+    HttpStreamOptions o;
+    o.buffer_bytes = 256u << 10;
+    o.retry_backoff_ms = 10;
+    HttpStream s(t, kHttp + "/range?n=2000000", o);
+    REQUIRE(s.open());
+    CHECK(s.seekable());
+    CHECK_EQ(s.size(), 2000000);
+    std::vector<uint8_t> head(1000);
+    REQUIRE(s.read(head.data(), head.size()) > 0);
+    CHECK(is_pattern({head.begin(), head.begin() + 100}, 0));
+    REQUIRE(s.seek(1900000));
+    auto tail = read_to_end(s);
+    CHECK_EQ(tail.size(), 100000u);
+    CHECK(is_pattern(tail, 1900000));
+    CHECK_EQ(s.stats().requests, 2);
+
+    // Every connection is dropped after 300 kB: the stream reconnects at the right offsets.
+    HttpStream d(t, kHttp + "/range?n=1000000&drop=300000", o);
+    REQUIRE(d.open());
+    auto all = read_to_end(d);
+    CHECK_EQ(all.size(), 1000000u);
+    CHECK(is_pattern(all, 0));
+    CHECK(d.stats().reconnects >= 3);
+
+    // A server without ranges: forward only.
+    HttpStream n(t, kHttp + "/range?n=3000000&noranges=1", o);
+    REQUIRE(n.open());
+    CHECK(!n.seekable());
+    CHECK_EQ(n.size(), 3000000);
+    CHECK(!n.seek(2900000));
+    auto whole = read_to_end(n);
+    CHECK_EQ(whole.size(), 3000000u);
+    CHECK(is_pattern(whole, 0));
+
+    HttpStream missing(t, kHttp + "/status/404", o);
+    CHECK(!missing.open());
+    CHECK_EQ(missing.http_status(), 404);
+}
+
+TEST("stream: HTTPS with the kit's TLS rules") {
+    NEED_SERVER();
+    std::shared_ptr<HttpTransport> t = transport(true);
+    REQUIRE(t);
+    HttpStream s(t, kHttps + "/range?n=300000");
+    REQUIRE(s.open());
+    REQUIRE(s.seek(250000));
+    auto tail = read_to_end(s);
+    CHECK_EQ(tail.size(), 50000u);
+    CHECK(is_pattern(tail, 250000));
+    HttpStream bad(std::shared_ptr<HttpTransport>(transport(false)), kHttps + "/range?n=10");
+    CHECK(!bad.open());
+    CHECK(bad.error() == NetError::Tls);
 }

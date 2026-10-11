@@ -133,7 +133,7 @@
       "date": "2026-10-11",
       "method": "events.log",
       "evidence": "APP_WILLENTERFOREGROUND, APP_DIDENTERFOREGROUND after first frame",
-      "limitations": "background events not yet exercised"
+      "limitations": "background events: see lifecycle.background_resume"
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",
@@ -350,6 +350,42 @@
       "method": "Example B key log",
       "evidence": "the first arrow press while the pointer is shown is delivered (Right pointer=1) and moves focus immediately",
       "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "lifecycle.background_resume",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B 0.4.0 on the app shell; another app launched over it with ares-launch, then tvui launched again",
+      "evidence": "covered: SDL_WINDOWEVENT_MINIMIZED, SDL_APP_WILLENTERBACKGROUND, SDL_APP_DIDENTERBACKGROUND, focus lost (same ms); back: SDL_WINDOWEVENT_RESTORED, WILL/DIDENTERFOREGROUND, first frame 8 ms later, focus gained 0.5 s later; process stays alive (ares-launch -r lists it); no frames drawn while suspended",
+      "limitations": "only tested by launching another app, not with the Home key"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "lifecycle.shutdown_sequence",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B 0.4.0, ares-launch --close",
+      "evidence": "SDL_QUIT → on_stop, dispatcher close, worker join, UI, images, renderer, window, SDL_Quit: 11.3 ms in total, exit 0",
+      "limitations": "how long SAM waits before SIGKILL is still unknown; the watchdog (3 s) did not fire"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "diagnostics.crash_record",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B 0.4.0/0.4.1 with launch params {\"wnkCrashTest\":\"segv\"}, then a normal launch",
+      "evidence": "record written to /tmp/<id>/crash.log (signal 11, code 2, fault address, state Running, version, build id, pc/lr/sp); the 32-bit ARM backtrace unwinds through the signal frame (handler, crash_now, run, main); tools/symbolize-crash.py resolves it to source lines; the next launch logs it",
+      "limitations": "the firmware preloads /lib/libSegFault.so into the app; the kit's handler replaces its handlers"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "display.output_refresh_rate",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example B perf log, two builds (0.2.2 and 0.4.0) A/B on the idle home screen",
+      "evidence": "frame interval median 19.96-19.99 ms (50 Hz) in this session, versus 16.67 ms (60 Hz) in earlier sessions the same day; SDL_webOSGetRefreshRate kept reporting 120 (the panel's maximum, not the current output rate)",
+      "limitations": "what switched the output to 50 Hz is unknown; another app (a media player) was running"
     }
   ]
 }

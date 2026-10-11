@@ -56,6 +56,12 @@ the registration URI `[SRC]`. How retail SAM behaves for each value is `[UNK]`.
 - **Kit position:** expose `Suspended`/`Resuming` states driven by the SDL app events above. Media must
   pause or release on background. Do not claim true suspend/resume support (process frozen and
   thawed) until measured on a device.
+- **Measured on an OLED65C1PTB (webOS 6.5.3), 2026-10-11** `[HW]`: launching another app over a kit app
+  delivers `SDL_WINDOWEVENT_MINIMIZED`, `SDL_APP_WILLENTERBACKGROUND`, `SDL_APP_DIDENTERBACKGROUND` and
+  focus loss in the same millisecond; relaunching it delivers `SDL_WINDOWEVENT_RESTORED` and
+  WILL/DIDENTERFOREGROUND. The process keeps running in between (not frozen): the app shell stops
+  drawing itself. A first WILL/DIDENTERFOREGROUND pair also arrives just after the first frame of a cold
+  launch. `ares-launch --close` arrives as `SDL_QUIT`.
 
 ## Termination
 

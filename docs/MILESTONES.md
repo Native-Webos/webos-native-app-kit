@@ -11,7 +11,7 @@ level stated. Device items stay open until run on a TV.
 | 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
 | 4 | UI and navigation | 🟡 implemented, host-tested and run on an OLED65C1PTB (webOS 6.5.3); Magic Remote pointer included |
 | 5 | Platform services | 🟡 storage, background work, HTTP and images done (TV-verified); secrets, WebSocket pending |
-| 6 | Lifecycle and diagnostics | ⬜ |
+| 6 | Lifecycle and diagnostics | 🟡 shell, lifecycle, crash record, capabilities, metrics overlay done and run on an OLED65C1PTB (webOS 6.5.3) |
 | 7 | Media foundation | ⬜ |
 | 8 | Reference applications | ⬜ |
 | 9 | Optional Jellyfin client | ⬜ |
@@ -197,6 +197,36 @@ Pending: secret storage (keymanager), WebSocket, JSON helpers for apps.
 Full lifecycle state machine; deterministic shutdown with join deadlines; crash record; capability
 system (`Supported`/`Unsupported`/`Unknown`) + device info; metrics overlay (frame time, textures,
 queue depth, cache); machine-readable compatibility DB (`compat/records.json`) with schema.
+
+### M6 status (2026-10-11)
+
+Implemented: `app/` — `Lifecycle` state machine (Created → Initialising → Running ⇄ Suspended → Resuming,
+Stopping → Terminated) and the app shell (`wnk::app::run` + `Delegate`) that owns process setup, SDL/GL,
+fonts, worker pool, dispatcher, optional HTTP/storage/images, input routing, Exit/double-Back, background
+suspension (no drawing, input ignored), low-memory trimming, and a timed shutdown sequence under a
+watchdog. `diagnostics/` — per-phase frame metrics with a late threshold that follows the measured
+refresh rate, RSS, an async-signal-safe crash record with backtrace and executable mappings (reported on
+the next launch; `tools/symbolize-crash.py` resolves it), capabilities (Supported/Unsupported/Unknown)
+and device info through an allow-list. `docs/compatibility/schema.json` + `tools/check-compat.py`. An
+on-screen metrics overlay. Example B runs on the shell.
+
+| Item | Evidence |
+|---|---|
+| Lifecycle (4), frame metrics (3), crash (4, forked children crash for real), capabilities/device info (3), probe redaction unit tests; 8 compat checker tests | `[TEST]` |
+| e2e: background/foreground (input while suspended dropped), timed shutdown, crash then report on next launch, overlay toggle | `[TEST]` |
+| All clean under ASan/UBSan | `[TEST]` `host-asan` |
+| ARM build passes check-package; loads on 5.3.1–11.2.0; backtrace, libgcc_s.so.1, sigaltstack on every inventoried firmware | `[BUILD]` `[FWDB]` |
+
+On hardware (OLED65C1PTB, webOS 6.5.3, 2026-10-11; `docs/compatibility/records.json`): another app over
+the kit app sends MINIMIZED + WILL/DIDENTERBACKGROUND, returning sends RESTORED + WILL/DIDENTERFOREGROUND
+and the first frame follows in 8 ms; the process stays alive and draws nothing meanwhile. SAM close runs
+the whole shutdown in 11.3 ms. A deliberate SIGSEGV leaves a record that the next launch reports and that
+symbolises to source lines; the firmware preloads `libSegFault.so`, whose handlers ours replace.
+Capabilities on this TV: Mali-G51, highp, 8192 textures, 1920x1080 drawable, 3840x2160 panel. In a later
+session the output ran at 50 Hz (two builds A/B'd); `SDL_webOSGetRefreshRate` still said 120.
+
+Not verified: the Home key and the Exit key as background/close paths, SAM's SIGKILL deadline, the
+watchdog firing on a real hang, low-memory events, the overlay judged on screen.
 
 ## M7 — Media foundation
 

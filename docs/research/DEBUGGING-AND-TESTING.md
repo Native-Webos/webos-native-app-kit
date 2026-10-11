@@ -22,8 +22,12 @@ Evidence tags: see [README.md](README.md). Link prefixes: see [PROJECT-COMPARISO
   stackwalk tool `tools/plxnative-stackwalk.c`; Sentry Native optional.
 - lgnome: emergency media release, then re-raise.
 - moonlight-tv: `RLIMIT_CORE=0` in release builds.
-- **Kit:** minimal async-signal-safe crash record (signal, fault address, build id, backtrace via
-  `backtrace()` only if proven safe; otherwise raw frame-pointer walk later). Release media first.
+- **Kit:** async-signal-safe crash record (`diagnostics/crash.hpp`): signal, fault address, build id,
+  lifecycle state, registers, `backtrace()` (libgcc_s loaded at install), executable mappings; reported
+  on the next launch, symbolised with `tools/symbolize-crash.py`. Release media first (when media exists).
+- **Measured** `[HW]` (OLED65C1PTB, webOS 6.5.3): the record is written in the Developer Mode jail, the
+  32-bit ARM `backtrace()` unwinds through the signal frame to `main`, and the firmware preloads
+  `/lib/libSegFault.so` (glibc's segfault reporter) into apps; installing our handlers replaces it.
 
 ## Host simulation `[SRC]`
 

@@ -53,6 +53,18 @@ NDL_DirectMediaQuit()
 - **HDR:** `NDL_DirectVideoSetHDRInfo` forces the panel into HDR on any call. Call it only with real
   metadata, and only on change (punktfunk) `[SRC]`.
 
+### Measured with the kit (OLED65C1PTB, webOS 6.5.3, 2026-10-11) `[HW]`
+
+- Init 305-465 ms cold, first load after install 1.9 s, later loads 80-170 ms; callbacks 0x16 and 0x1a
+  arrive right after the first packets, 0x17 on unload, **no 0x1c** with buffer feeding.
+- **No backpressure:** `NDL_DirectVideoPlay`/`NDL_DirectAudioPlay` accepted a whole 15 s clip in 0.6 s.
+  Fed like that, the picture froze after a few seconds and there was no sound. Feeding paced to stay within
+  1 s of a real-time clock plays H.264 and HEVC 1080p25 smoothly with PCM audio in sync.
+- PCM info `"S16LE"` / `"interleaved"` / `"stereo"` / 48 kHz enum works (AAC and AC-3 5.1 decoded and
+  downmixed by the app). MP3 passed through (mono 48 kHz) loaded but played **silently**.
+- `NDL_DirectMediaSetAppState(FOREGROUND)` right after init returned -1.
+- PTS unit: µs and ms fed in real time looked identical, so the question below stays open.
+
 ### Disputed: v2 PTS unit `[UNK]`
 
 | Source | Unit |

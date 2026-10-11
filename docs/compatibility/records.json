@@ -386,6 +386,69 @@
       "method": "Example B perf log, two builds (0.2.2 and 0.4.0) A/B on the idle home screen",
       "evidence": "frame interval median 19.96-19.99 ms (50 Hz) in this session, versus 16.67 ms (60 Hz) in earlier sessions the same day; SDL_webOSGetRefreshRate kept reporting 120 (the panel's maximum, not the current output rate)",
       "limitations": "what switched the output to 50 Hz is unknown; another app (a media player) was running"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.ndl_v2.load",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example D (org.wnk.examples.player 0.1.x), libNDL_directmedia.so.1 dlopened",
+      "evidence": "NDL_DirectMediaInit -> 0 (305-465 ms cold, 27-48 ms on later inits in the same process), NDL_DirectMediaLoad -> 0 (1.9 s on the first load after install, 80-170 ms afterwards), NDL_DirectVideoSetArea(0,0,1920,1080) -> 0; load callback 0x16 then 0x1a right after the first packets; 0x17 on unload",
+      "limitations": "NDL_DirectMediaSetAppState(FOREGROUND) right after init returns -1; no 0x1c end-of-stream event with buffer feeding"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.ndl_v2.backpressure",
+      "result": "unsupported",
+      "date": "2026-10-11",
+      "method": "Example D 0.1.0, packets fed as fast as accepted",
+      "evidence": "a 15 s H.264+AAC clip (375 video, 704 audio packets) was accepted in 0.6 s with no non-zero return; fed that way the picture froze after a few seconds and no sound played",
+      "limitations": "the app must pace feeding itself (the controller now keeps within 1 s of its playback clock)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.ndl_v2.h264_pcm",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example D 0.1.1+, 1080p25 H.264 MP4 with AAC decoded to S16 stereo PCM 48 kHz, paced feeding",
+      "evidence": "owner: picture smooth to the end, a beep every second in sync with the white flash",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.ndl_v2.hevc_pcm",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example D 0.1.1+, 1080p25 HEVC MKV with AC-3 5.1 downmixed to S16 stereo PCM",
+      "evidence": "owner: picture and sound, in sync",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.ndl_v2.mp3_passthrough",
+      "result": "unsupported",
+      "date": "2026-10-11",
+      "method": "Example D 0.1.1, MPEG-TS H.264 + MP3 (mono 48 kHz) loaded as NDL_AUDIO_TYPE_MP3",
+      "evidence": "load and feed returned 0; picture played but no sound (owner); the same clip with MP3 decoded to PCM (0.1.2) has sound",
+      "limitations": "only mono 48 kHz MP3 tried"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.ndl_v2.pts_unit",
+      "result": "unknown",
+      "date": "2026-10-11",
+      "method": "Example D 0.1.2, the same H.264+AAC clip fed with microsecond and with millisecond PTS, paced in real time",
+      "evidence": "both looked and sounded the same to the owner (smooth, in sync)",
+      "limitations": "with real-time feeding NDL appears to present on arrival, so this test cannot tell the units apart; the kit keeps microseconds"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.pcm_layout_string",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example D, NDL PCM info format \"S16LE\", layout \"interleaved\", channelMode \"stereo\", 48 kHz enum",
+      "evidence": "audible, in-sync PCM playback",
+      "limitations": ""
     }
   ]
 }

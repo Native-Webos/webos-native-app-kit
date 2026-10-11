@@ -1,0 +1,320 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Example D: native video playback with the kit's media foundation.
+//
+//   clip list ──OK──► player screen: FfmpegSource → PlaybackController → NdlBackend (TV)
+//                                                                      → PacingBackend (host: no output)
+//
+// The bundled clips (tools/make-test-clips.sh) flash white and beep during the first 80 ms of every
+// second, so on the TV picture/sound sync and the NDL PTS unit can be judged by eye and ear.
+//
+// Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Stop or Back leaves. Any key
+// shows the controls; they hide after 4 s of playback. Backgrounding the app pauses playback and
+// releases the decoder.
+//
+// Launch params (ares-launch --params):
+//   {"uri": "file:///path/to/file.mkv"}   play that file straight away
+//   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
+//   {"autoplay": 0}                        open the first clip at start (used by scripted runs: 0..2)
+#include "wnk/app/app.hpp"
+#include "wnk/log.hpp"
+#include "wnk/media/controller.hpp"
+#include "wnk/media/ffmpeg_source.hpp"
+#include "wnk/media/ndl_backend.hpp"
+#include "wnk/media/pacing_backend.hpp"
+#include "wnk/platform/process.hpp"
+#include "wnk/ui/navigation.hpp"
+#include "wnk/ui/widgets.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <cstdio>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace {
+
+using namespace wnk::ui;
+using namespace wnk::media;
+using wnk::input::Action;
+using wnk::input::Phase;
+
+constexpr const char *kCat = "player";
+
+struct Clip {
+    std::string title, detail, file;
+};
+
+struct Settings {
+    std::string clips_dir;
+    PtsUnit pts_unit = PtsUnit::Microseconds;
+};
+
+std::string clock_text(int64_t us) {
+    if (us == kNoTime || us < 0) return "--:--";
+    const int64_t s = us / 1000000;
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%lld:%02lld", static_cast<long long>(s / 60), static_cast<long long>(s % 60));
+    return buf;
+}
+
+std::unique_ptr<MediaBackend> make_backend(const Settings &s) {
+    std::string why;
+    if (wnk::platform::kIsWebOS && NdlBackend::available(&why)) {
+        NdlOptions o;
+        o.pts_unit = s.pts_unit;
+        return std::make_unique<NdlBackend>(o);
+    }
+    if (wnk::platform::kIsWebOS) WNK_LOGW(kCat, "NDL unavailable (%s): no picture", why.c_str());
+    return std::make_unique<PacingBackend>();
+}
+
+// ---- player screen ---------------------------------------------------------------------------------
+
+class PlayerScreen : public Screen {
+ public:
+    PlayerScreen(wnk::app::Context &ctx, const Settings &s, std::string uri, std::string title)
+        : Screen(title), ctx_(ctx), uri_(std::move(uri)) {
+        name = "player";
+        bar_ = &add<Column>(14);
+        bar_->set_align(Align::Stretch, Align::End);
+        bar_->set_padding({80, 40, 80, 60});
+        bar_->set_background(wnk::render::Color::hex(0x000000B0));
+        auto &top = bar_->add<Row>(24);
+        title_ = &top.add<Label>(title, TextRole::Title);
+        title_->set_width(Dim::fill());
+        status_ = &top.add<Label>("Opening…");
+        status_->set_muted(true).set_align(Align::Start, Align::End);
+        progress_ = &bar_->add<ProgressBar>();
+        auto &bottom = bar_->add<Row>(24);
+        time_ = &bottom.add<Label>("--:-- / --:--");
+        time_->set_width(Dim::fill());
+        bottom.add<Label>("OK pause  ·  Left/Right 10 s  ·  Back leaves", TextRole::Small).set_muted(true);
+        detail_ = &bar_->add<Label>("", TextRole::Small);
+        detail_->set_muted(true);
+        spinner_ = &add<Spinner>(96);
+
+        auto backend = make_backend(s);
+        backend_name_ = backend->name();
+        controller_ = std::make_unique<PlaybackController>(std::make_unique<FfmpegSource>(), std::move(backend),
+                                                           ctx.dispatcher());
+        controller_->set_state_callback([this](PlayState from, PlayState to, const PlaybackSnapshot &snap) {
+            WNK_LOGI(kCat, "player state %s -> %s%s%s", play_state_name(from), play_state_name(to),
+                     snap.error.empty() ? "" : ": ", snap.error.c_str());
+            if (to == PlayState::Ready) describe(snap);
+            show_controls();
+        });
+    }
+
+    void on_show(Ui &ui) override {
+        ui.set_clear_color(wnk::render::kTransparent);  // the video plane is under the UI
+        controller_->set_video_area({0, 0, 1920, 1080});
+        if (!opened_) {
+            opened_ = true;
+            WNK_LOGI(kCat, "opening %s with %s", uri_.c_str(), backend_name_.c_str());
+            controller_->open(uri_);
+        }
+    }
+    void on_hide(Ui &ui) override { ui.set_clear_color(std::nullopt); }
+
+    bool on_back(Ui &) override {
+        stop();
+        return false;  // let the navigator pop
+    }
+
+    void stop() {
+        if (controller_) {
+            const auto s = controller_->snapshot();
+            WNK_LOGI(kCat, "stopping at %s: %llu video, %llu audio packets, %llu full retries", clock_text(s.position_us).c_str(),
+                     static_cast<unsigned long long>(s.video_packets), static_cast<unsigned long long>(s.audio_packets),
+                     static_cast<unsigned long long>(s.full_retries));
+            controller_->stop();
+        }
+    }
+
+    void pause() {
+        if (controller_ && controller_->state() == PlayState::Playing) controller_->pause();
+    }
+
+ protected:
+    bool on_action(Ui &ui, const wnk::input::ActionEvent &e) override {
+        if (e.phase == Phase::Release) return false;
+        show_controls();
+        switch (e.action) {
+            case Action::Confirm:
+            case Action::PlayPause:
+                if (e.phase == Phase::Press) controller_->toggle_pause();
+                return true;
+            case Action::Play: controller_->play(); return true;
+            case Action::Pause: controller_->pause(); return true;
+            case Action::Left:
+            case Action::Rewind: controller_->seek_relative(-10000000); return true;
+            case Action::Right:
+            case Action::FastForward: controller_->seek_relative(10000000); return true;
+            case Action::Stop: {
+                wnk::input::ActionEvent back;
+                back.action = Action::Back;
+                return ui.handle(back);
+            }
+            case Action::Up:
+            case Action::Down: return true;  // nothing to move to; keep focus here
+            default: return false;
+        }
+    }
+
+    void update(Ui &ui, float) override {
+        if (!controller_) return;
+        const PlaybackSnapshot s = controller_->snapshot();
+        const bool busy = s.state == PlayState::Opening || s.state == PlayState::Seeking;
+        spinner_->set_visible(busy);
+        status_->set_text(s.state == PlayState::Error ? "Error" : play_state_name(s.state));
+        time_->set_text(clock_text(s.position_us) + " / " + clock_text(s.duration_us) + (s.position_estimated ? "" : " ·"));
+        if (s.duration_us > 0 && s.position_us != kNoTime) progress_->set_value(static_cast<float>(s.position_us) / s.duration_us);
+        if (s.state == PlayState::Error) detail_->set_text(s.error);
+        // Controls hide during playback; paused, ended or failed keeps them up.
+        const bool keep = s.state != PlayState::Playing;
+        const bool visible = keep || ui.now_ms() - last_input_ms_ < 4000;
+        bar_->set_opacity(visible ? 1.0f : 0.0f);
+        // Once a second: what the controller has fed, for the PTS-unit experiment.
+        if (ui.now_ms() - last_log_ms_ >= 1000 && s.state == PlayState::Playing) {
+            last_log_ms_ = ui.now_ms();
+            WNK_LOGI(kCat, "position %s (%s) last video pts %.2f s, fed %llu video %llu audio, full retries %llu",
+                     clock_text(s.position_us).c_str(), s.position_estimated ? "estimated" : "decoder",
+                     s.last_video_pts_us == kNoTime ? -1.0 : s.last_video_pts_us / 1e6,
+                     static_cast<unsigned long long>(s.video_packets), static_cast<unsigned long long>(s.audio_packets),
+                     static_cast<unsigned long long>(s.full_retries));
+        }
+    }
+
+ private:
+    void show_controls() { last_input_ms_ = ctx_.ui().now_ms(); }
+    void describe(const PlaybackSnapshot &s) {
+        std::string d = s.info.container;
+        if (s.format.video) {
+            d += "  ·  " + std::string(codec_name(s.format.video->codec)) + " " + std::to_string(s.format.video->width) + "x" +
+                 std::to_string(s.format.video->height);
+        }
+        for (const auto &t : s.info.tracks) {
+            if (t.type == TrackType::Audio && s.format.audio) {
+                d += "  ·  " + t.codec_label + " " + std::to_string(t.channels) + " ch";
+                if (s.format.audio->codec == CodecId::PcmS16) d += " decoded to PCM stereo";
+                break;
+            }
+        }
+        d += "  ·  " + backend_name_;
+        detail_->set_text(d);
+    }
+
+    wnk::app::Context &ctx_;
+    std::string uri_;
+    std::string backend_name_;
+    std::unique_ptr<PlaybackController> controller_;
+    Column *bar_;
+    Label *title_, *status_, *time_, *detail_;
+    ProgressBar *progress_;
+    Spinner *spinner_;
+    bool opened_ = false;
+    double last_input_ms_ = 0;
+    double last_log_ms_ = 0;
+};
+
+// ---- clip list -------------------------------------------------------------------------------------
+
+class HomeScreen : public Screen {
+ public:
+    HomeScreen(wnk::app::Context &ctx, Navigator &nav, Settings settings, const std::vector<Clip> &clips)
+        : Screen("home"), ctx_(ctx), nav_(nav), settings_(std::move(settings)) {
+        name = "home";
+        auto &col = add<Column>(28);
+        col.set_padding({140, 110, 140, 80});
+        col.add<Label>("Native playback", TextRole::Title);
+        col.add<Label>("Hardware decoding through LG's NDL, demuxed by the kit's bundled FFmpeg. Each clip flashes "
+                       "white and beeps at the start of every second: the flash and the beep should coincide.")
+            .set_muted(true)
+            .set_max_lines(3);
+        auto &list = col.add<Column>(18);
+        list.set_padding({0, 20, 0, 0});
+        for (size_t i = 0; i < clips.size(); ++i) {
+            const Clip c = clips[i];
+            auto &b = list.add<Button>(c.title + "   —   " + c.detail, [this, c](Ui &ui) { play(ui, "file://" + settings_.clips_dir + "/" + c.file, c.title); });
+            b.set_align(Align::Start, Align::Start);
+            b.name = "clip" + std::to_string(i);
+        }
+        std::string info = std::string("Decoder: ") + (wnk::platform::kIsWebOS ? "NDL DirectMedia v2" : "none on the host (pacing backend, no picture)");
+        info += "   ·   PTS unit: ";
+        info += settings_.pts_unit == PtsUnit::Milliseconds ? "ms" : "µs";
+        info += "   ·   " + FfmpegSource::version();
+        col.add<Label>(info, TextRole::Small).set_muted(true).set_padding({0, 30, 0, 0});
+    }
+
+    void play(Ui &ui, const std::string &uri, const std::string &title) {
+        WNK_LOGI(kCat, "play %s", uri.c_str());
+        nav_.push(ui, std::make_unique<PlayerScreen>(ctx_, settings_, uri, title));
+    }
+
+ private:
+    wnk::app::Context &ctx_;
+    Navigator &nav_;
+    Settings settings_;
+};
+
+class Player : public wnk::app::Delegate {
+ public:
+    void on_start(wnk::app::Context &ctx) override {
+        Settings s;
+        s.clips_dir = ctx.launch().app_dir + "/clips";
+        std::string direct_uri;
+        int autoplay = -1;
+        const auto params = nlohmann::json::parse(ctx.launch().params_json.empty() ? "{}" : ctx.launch().params_json, nullptr, false);
+        if (params.is_object()) {
+            if (params.contains("ptsUnit") && params["ptsUnit"] == "ms") s.pts_unit = PtsUnit::Milliseconds;
+            if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
+            if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
+        }
+        WNK_LOGI(kCat, "%s; PTS unit %s", FfmpegSource::version().c_str(), s.pts_unit == PtsUnit::Milliseconds ? "ms" : "us");
+        const std::vector<Clip> clips = {
+            {"H.264 + AAC", "MP4 · 1080p25 · AAC decoded to PCM", "h264-aac.mp4"},
+            {"HEVC + AC-3 5.1", "MKV · 1080p25 · AC-3 downmixed to PCM stereo", "hevc-ac3-5.1.mkv"},
+            {"H.264 + MP3", "MPEG-TS · 1080p25 · MP3 decoded to PCM", "h264-mp3.ts"},
+        };
+        Ui &ui = ctx.ui();
+        nav_ = &ui.root().add<Navigator>();
+        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(ctx, *nav_, s, clips)));
+        if (!direct_uri.empty()) {
+            home_->play(ui, direct_uri, direct_uri.substr(direct_uri.find_last_of('/') + 1));
+        } else if (autoplay >= 0 && autoplay < static_cast<int>(clips.size())) {
+            home_->play(ui, "file://" + s.clips_dir + "/" + clips[autoplay].file, clips[autoplay].title);
+        }
+    }
+
+    void on_lifecycle(wnk::app::Context &, const wnk::app::Lifecycle::Transition &t) override {
+        // Leaving the app: stop decoding (the controller releases NDL on pause) and tell NDL.
+        if (t.to == wnk::app::State::Suspended) {
+            if (auto *p = dynamic_cast<PlayerScreen *>(nav_->top())) p->pause();
+            if (wnk::platform::kIsWebOS) NdlBackend::set_app_foreground(false);
+        } else if (t.to == wnk::app::State::Resuming && wnk::platform::kIsWebOS) {
+            NdlBackend::set_app_foreground(true);
+        }
+    }
+
+    void on_stop(wnk::app::Context &) override {
+        if (auto *p = dynamic_cast<PlayerScreen *>(nav_ != nullptr ? nav_->top() : nullptr)) p->stop();
+    }
+
+ private:
+    Navigator *nav_ = nullptr;
+    HomeScreen *home_ = nullptr;
+};
+
+}  // namespace
+
+int main(int argc, char **argv) {
+    wnk::app::AppConfig config;
+    config.fallback_app_id = "org.wnk.examples.player";
+    config.title = "wnk player";
+    config.images = false;
+    config.script_env_prefix = "WNK_PLAYER";
+    config.metrics_toggle = Action::Blue;
+    return wnk::app::run(argc, argv, config, [] { return std::make_unique<Player>(); });
+}

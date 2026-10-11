@@ -149,3 +149,25 @@ if (TARGET wnk_media_ffmpeg)
     target_link_libraries(test_ffmpeg_source PRIVATE wnk_media_ffmpeg)
     add_test(NAME integration.ffmpeg_source COMMAND test_ffmpeg_source)
 endif ()
+
+# End-to-end runs of Example D on the host: bundled FFmpeg demuxing real clips into the controller,
+# with the pacing backend (no picture on the host). Steps are 0.1 s apart; Up is a no-op used to wait.
+if (TARGET wnk-player)
+    function(wnk_player_e2e name params keys pass)
+        add_test(NAME e2e.player.${name} COMMAND wnk-player "${params}")
+        set_tests_properties(e2e.player.${name} PROPERTIES
+                ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_PLAYER_KEYS=${keys}"
+                PASS_REGULAR_EXPRESSION "${pass}"
+                FAIL_REGULAR_EXPRESSION "-> Error|${WNK_SANITIZER_FAIL}"
+                TIMEOUT 60)
+    endfunction()
+    wnk_player_e2e(pause_seek_resume "{\"autoplay\":0}" "Space,Right,Space"
+            "Playing -> Paused.*Paused -> Seeking.*Seeking -> Paused.*Paused -> Playing")
+    wnk_player_e2e(back_stops_playback "{\"autoplay\":0}" "Up,Up,Escape" "stopping at .*-> Stopped")
+    wnk_player_e2e(plays_to_the_end "{\"autoplay\":1}"
+            "Right,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up"
+            "Playing -> Ended")
+    wnk_player_e2e(missing_file_reports_error "{\"uri\":\"file:///nonexistent/clip.mkv\"}" "Up"
+            "open failed: No such file")
+    set_tests_properties(e2e.player.missing_file_reports_error PROPERTIES FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}")
+endif ()

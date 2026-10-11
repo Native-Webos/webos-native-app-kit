@@ -506,7 +506,7 @@ void Ui::draw() {
     alpha_ = 1;
     // A clear, not a full-screen quad: one less full-screen fragment pass per frame on the TV's GPU.
     // A transparent theme background lets a video plane show through.
-    r_.clear(theme_.background);
+    r_.clear(clear_override_ ? *clear_override_ : theme_.background);
     View *f = focused();
     const bool focus_in_overlay = f != nullptr && overlay_->is_ancestor_of(f);
     root_->draw_tree(*this);

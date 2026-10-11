@@ -23,6 +23,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -104,6 +105,9 @@ class Ui {
 
     // Content tree root: a full-canvas view that stacks its children. Add screens or a Navigator here.
     View &root() { return *root_; }
+    // What draw() clears to: theme().background unless overridden. A transparent colour lets a
+    // hardware video plane under the UI show through (the renderer keeps destination alpha).
+    void set_clear_color(std::optional<render::Color> c) { clear_override_ = c; }
 
     // ---- frame -------------------------------------------------------------------------------------
     bool handle(const input::ActionEvent &e);
@@ -203,6 +207,7 @@ class Ui {
     float ring_radius_ = 0;
     Smoothed ring_dx_, ring_dy_, ring_dw_, ring_dh_, ring_alpha_;
     bool ring_snap_ = true;
+    std::optional<render::Color> clear_override_;
     struct Toast {
         std::string text;
         double duration_ms;

@@ -692,6 +692,15 @@
       "method": "Example D 0.12.1 AdaptiveSource live on Starfish: DASH-IF livesim2 testpic_2s (dynamic MPD, SegmentTemplate @duration, 1 min time-shift, UTCTiming http-xsdate) and Unified Streaming live HLS (MPEG-TS, separate renditions)",
       "evidence": "livesim2: server clock +1035 ms from the TV's, joined at 54 s of a 60 s window, position advancing 1 s/s with displayed-frame callbacks once the first packet was mapped near 0 (0.12.0 held the first frame); smooth with sound, LIVE label, Left/Right seeks within the window; Unified HLS live also plays (owner)",
       "limitations": "startup about 4.5 s from launch to first frame on livesim2; live subtitles not loaded; Akamai's public HLS live test master pointed at a missing variant (404) on 2026-10-12"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "media.adaptive_startup",
+      "result": "supported",
+      "method": "Example D 0.12.1 vs 0.12.2 (pooled curl connections, renditions opened in parallel): launch with autoplay, time from the player's play line to Starfish's first presented frame in the event log",
+      "evidence": "livesim2 live DASH: 6.3 s -> 3.1 s; Dolby DASH VOD: 0.9 s; Unified Streaming live HLS: 6.9 s, bound by that server from this network (TCP connect 1.6 s, 0.8 Mb/s against a 1.3 Mb/s starting rung)",
+      "limitations": "the first HLS open is still sequential (the audio lane needs the video's timeline origin); the starting rung comes from initial_bandwidth, not a measurement"
     }
   ]
 }

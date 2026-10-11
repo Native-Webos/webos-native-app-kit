@@ -775,37 +775,77 @@ struct AdaptiveSource::Impl {
     // (Re)opens the selected renditions at `t`.
     bool open_at(int64_t t, StreamFormat *out, std::string *error) {
         if (lanes.empty()) return false;
-        int64_t main_start = t;
-        int64_t main_first_pts = kNoTime;
-        for (size_t i = 0; i < lanes.size(); ++i) {
-            Lane &lane = lanes[i];
-            size_t first;
-            {
-                std::lock_guard<std::mutex> plock(pres_mutex);
-                const auto &segs = pres.renditions[static_cast<size_t>(lane.rendition)].segments;
-                // The first lane leads (video if any); the others start at or before its segment.
-                first = i == 0 ? segment_at(segs, t) : segment_at(segs, main_start);
-                if (i == 0 && first < segs.size()) main_start = segs[first].start_us;
-                std::lock_guard<std::mutex> lock(lanes_mutex);
-                lane.next.reset();
+        // Where each lane starts: the first leads (video if any); the others start at or before its
+        // segment.
+        std::vector<size_t> firsts(lanes.size());
+        {
+            std::lock_guard<std::mutex> plock(pres_mutex);
+            int64_t main_start = t;
+            for (size_t i = 0; i < lanes.size(); ++i) {
+                const auto &segs = pres.renditions[static_cast<size_t>(lanes[i].rendition)].segments;
+                firsts[i] = i == 0 ? segment_at(segs, t) : segment_at(segs, main_start);
+                if (i == 0 && firsts[i] < segs.size()) main_start = segs[firsts[i]].start_us;
             }
+            std::lock_guard<std::mutex> lock(lanes_mutex);
+            for (Lane &lane : lanes) lane.next.reset();
+        }
+        // The other lanes open alongside the first: each open is a few round trips (init segment,
+        // first media segment). Not on the first HLS open, whose timeline origin the first lane sets.
+        const bool parallel = lanes.size() > 1 && !(pres.format == Presentation::Format::Hls && hls_origin_us == kNoTime);
+        struct Opened {
+            bool ok = false;
             StreamFormat fmt;
-            if (!open_lane(lane, first, &fmt, error)) return false;
-            if (out != nullptr) {
-                if (fmt.video) out->video = fmt.video;
-                if (fmt.audio) out->audio = fmt.audio;
+            std::string error;
+        };
+        std::vector<Opened> others(lanes.size());
+        std::vector<std::thread> openers;
+        if (parallel) {
+            for (size_t i = 1; i < lanes.size(); ++i) {
+                openers.emplace_back([this, i, &firsts, &others] {
+                    others[i].ok = open_lane(lanes[i], firsts[i], &others[i].fmt, &others[i].error);
+                });
             }
-            if (i == 0 && lane.want_video) {
+        }
+        auto join = [&] {
+            for (std::thread &th : openers) th.join();
+            openers.clear();
+        };
+        auto merge_fmt = [&](const StreamFormat &fmt) {
+            if (out == nullptr) return;
+            if (fmt.video) out->video = fmt.video;
+            if (fmt.audio) out->audio = fmt.audio;
+        };
+        int64_t main_first_pts = kNoTime;
+        {
+            Lane &lane = lanes[0];
+            StreamFormat fmt;
+            if (!open_lane(lane, firsts[0], &fmt, error)) {
+                join();
+                return false;
+            }
+            merge_fmt(fmt);
+            if (lane.want_video) {
                 // Where the video really starts (its keyframe), for trimming the other lanes.
                 const MediaSource::Read r = pull(lane, error);
                 if (r != MediaSource::Read::Packet) {
                     if (r == MediaSource::Read::Interrupted) *error = "interrupted";
+                    join();
                     return false;
                 }
                 if (lane.pending) main_first_pts = lane.pending->pts_us;
-            } else if (i > 0) {
-                lane.drop_before_us = main_first_pts;
             }
+        }
+        join();
+        for (size_t i = 1; i < lanes.size(); ++i) {
+            if (!parallel) {
+                others[i].ok = open_lane(lanes[i], firsts[i], &others[i].fmt, &others[i].error);
+            }
+            if (!others[i].ok) {
+                *error = others[i].error;
+                return false;
+            }
+            merge_fmt(others[i].fmt);
+            lanes[i].drop_before_us = main_first_pts;
         }
         position_us = t;
         return true;

@@ -90,6 +90,8 @@ int choose_video(const Presentation &p, const AdaptiveSourceOptions &o) {
         if (r.height > o.max_height || r.frame_rate > o.max_frame_rate + 0.01) continue;
         if (o.max_bandwidth > 0 && r.bandwidth > o.max_bandwidth) continue;
         if (!o.dolby_vision && !r.dolby_vision.empty() && any_plain) continue;
+        // Profile 5 has no base layer a non-Dolby-Vision display can show (PlxNative refuses it too).
+        if (!o.dolby_vision && dolby_vision_profile(r.dolby_vision) == 5) continue;
         if (best < 0) {
             best = static_cast<int>(i);
             continue;
@@ -287,6 +289,13 @@ struct AdaptiveSource::Impl {
             return false;
         }
         if (!s.select(v != nullptr ? v->index : -1, a != nullptr ? a->index : -1, caps, fmt, error)) return false;
+        // What the manifest says where the segments did not (no dvvC in the init segment, an E-AC-3
+        // stream whose JOC FFmpeg has not met yet).
+        if (fmt->video && fmt->video->dolby_vision_profile < 0 && fmt->video->codec == CodecId::Hevc) {
+            const int p = dolby_vision_profile(r.dolby_vision);
+            if (p >= 0 && p != 7) fmt->video->dolby_vision_profile = p;  // 7 is dual-layer
+        }
+        if (fmt->audio && fmt->audio->codec == CodecId::Eac3 && r.atmos) fmt->audio->atmos = true;
         return true;
     }
 

@@ -178,8 +178,16 @@ std::string StarfishBackend::build_load_payload(const StarfishLoad &l) {
     std::string p = "{\"args\":[{\"mediaTransportType\":\"BUFFERSTREAM\",\"option\":{";
     p += "\"appId\":\"" + json_escape(l.app_id) + "\"";
     if (!l.window_id.empty()) p += ",\"windowId\":\"" + json_escape(l.window_id) + "\"";
+    // The codec stays "H265" for Dolby Vision: libpf maps it to video/x-h265 and adds the DV caps
+    // when DolbyHdrInfo is present; profileId must be a JSON integer (a string reads as -1).
+    std::string extra;
+    if (l.dolby_vision_profile >= 0 && l.video == CodecId::Hevc) {
+        extra += ",\"DolbyHdrInfo\":{\"trackType\":\"single\",\"encryptionType\":\"clear\",\"profileId\":" +
+                 std::to_string(l.dolby_vision_profile) + "}";
+    }
+    if (l.atmos && l.audio == CodecId::Eac3) extra += ",\"immersive\":\"ATMOS\"";
     p += ",\"externalStreamingInfo\":{\"contents\":{\"codec\":" + codec + ",\"esInfo\":" + es +
-         ",\"format\":\"RAW\",\"provider\":\"wnk\"},\"streamQualityInfo\":true,\"streamQualityInfoNonFlushable\":true,"
+         ",\"format\":\"RAW\",\"provider\":\"wnk\"" + extra + "},\"streamQualityInfo\":true,\"streamQualityInfoNonFlushable\":true,"
          "\"audioSync\":true,\"restartStreaming\":false,\"bufferingCtrInfo\":{\"bufferMaxLevel\":0,\"bufferMinLevel\":0,"
          "\"preBufferByte\":0,\"qBufferLevelAudio\":0,\"qBufferLevelVideo\":0,"
          "\"srcBufferLevelAudio\":{\"minimum\":1,\"maximum\":" + audio_buffer +
@@ -289,6 +297,8 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
     l.height = format.video->height;
     l.frame_rate = format.video->frame_rate;
     if (format.audio) l.audio = format.audio->codec;
+    if (options_.dolby_vision) l.dolby_vision_profile = format.video->dolby_vision_profile;
+    l.atmos = options_.atmos && format.audio && format.audio->atmos;
     const std::string payload = build_load_payload(l);
     WNK_LOGI(kCat, "Load %s", payload.c_str());
     unsigned epoch;

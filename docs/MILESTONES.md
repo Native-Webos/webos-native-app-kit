@@ -309,7 +309,8 @@ sidx) and HLS playlists into one rendition model; `net::SegmentReader` reads ini
 `AdaptiveSource` picks a video rendition by codec, size and bandwidth, offers the audio renditions as
 tracks, runs one FfmpegSource per rendition and merges them by decode time; seeks reopen at the segment.
 Example D 0.8 lists four public streams. On the TV: Dolby 4K HEVC + E-AC-3, Apple HLS fMP4, Mux HLS-TS
-and Shaka DASH play and seek in sync. Open: Dolby Vision/Atmos declared to Starfish, bitrate switching,
+and Shaka DASH play and seek in sync. Example D 0.9 declares single-layer Dolby Vision (DolbyHdrInfo) and
+Atmos (immersive) to Starfish when the TV reports support: the TV shows both. Open: bitrate switching,
 live, subtitles from manifests, WebM renditions, DRM (refused).
 
 Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from

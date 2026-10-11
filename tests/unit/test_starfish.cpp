@@ -83,6 +83,37 @@ TEST("starfish: HEVC declares 4K at 60; video-only drops audio and uses low dela
     CHECK(!has(p, "videoFpsValue"));
 }
 
+TEST("starfish: Dolby Vision and Atmos nodes go into contents, profileId as an integer, codec still H265") {
+    StarfishLoad l;
+    l.app_id = "a";
+    l.video = CodecId::Hevc;
+    l.width = 3840;
+    l.height = 2160;
+    l.frame_rate = 59.94;
+    l.audio = CodecId::Eac3;
+    std::string p = StarfishBackend::build_load_payload(l);
+    CHECK(!has(p, "DolbyHdrInfo"));
+    CHECK(!has(p, "immersive"));
+    l.dolby_vision_profile = 8;
+    l.atmos = true;
+    p = StarfishBackend::build_load_payload(l);
+    CHECK(has(p, "\"codec\":{\"video\":\"H265\",\"audio\":\"AC3 PLUS\"}"));
+    CHECK(has(p, "\"provider\":\"wnk\",\"DolbyHdrInfo\":{\"trackType\":\"single\",\"encryptionType\":\"clear\",\"profileId\":8},\"immersive\":\"ATMOS\"}"));
+    int depth = 0;
+    for (char c : p) {
+        if (c == '{' || c == '[') ++depth;
+        if (c == '}' || c == ']') --depth;
+        CHECK(depth >= 0);
+    }
+    CHECK_EQ(depth, 0);
+    // Only where they mean something: DV on HEVC, Atmos on E-AC-3.
+    l.video = CodecId::H264;
+    l.audio = CodecId::Aac;
+    p = StarfishBackend::build_load_payload(l);
+    CHECK(!has(p, "DolbyHdrInfo"));
+    CHECK(!has(p, "immersive"));
+}
+
 TEST("starfish: unavailable on the host, with a reason; caps") {
     std::string why;
     CHECK(!StarfishBackend::available(&why));

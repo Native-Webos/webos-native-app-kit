@@ -77,12 +77,16 @@ struct VideoFormat {
     CodecId codec = CodecId::Unknown;
     int width = 0, height = 0;
     double frame_rate = 0;
+    // Single-layer Dolby Vision carried in the stream (RPUs in-band): its profile (5, 8, ...), else -1.
+    // Dual-layer streams (an enhancement layer, profile 7) report -1: only the base layer is fed.
+    int dolby_vision_profile = -1;
 };
 struct AudioFormat {
     CodecId codec = CodecId::Unknown;  // PcmS16 when the source decodes in software, Ac3 when it re-encodes
     int sample_rate = 0;
     int channels = 0;                  // PCM is delivered as interleaved stereo; re-encoded AC-3 has up to 5.1
     std::vector<uint8_t> codec_header;  // e.g. the OpusHead for Opus
+    bool atmos = false;  // E-AC-3 with Atmos objects (JOC), delivered as it is
 };
 struct StreamFormat {
     std::optional<VideoFormat> video;

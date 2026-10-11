@@ -100,6 +100,9 @@ bool parse_iso_duration(const std::string &s, int64_t *us);
 // hvc1/hev1/dvh1/dvhe, vp09, av01; Audio: mp4a, ac-3, ec-3, opus, mp3), Unknown if none.
 CodecId codec_from_rfc6381(const std::string &codecs, TrackType type);
 
+// The profile of a Dolby Vision codec string ("dvhe.08.06" → 8, "dvh1.05.06" → 5), else -1.
+int dolby_vision_profile(const std::string &codec);
+
 bool parse_mpd(const std::string &xml, const std::string &url, Presentation *out, std::string *error);
 
 // A master playlist (renditions with playlist_url set) or a media playlist (one muxed rendition

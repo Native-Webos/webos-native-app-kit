@@ -303,4 +303,15 @@ TEST("adaptive source: the video rendition follows codec preference, size and ba
     CHECK_EQ(id(choose_video(p, o)), std::string("av1"));
     o.video_codecs = {CodecId::Vp9};
     CHECK_EQ(id(choose_video(p, o)), std::string("none"));
+
+    // A Profile 5 ladder alone: only for a Dolby Vision display (no base layer anyone else can show).
+    Presentation p5;
+    REQUIRE(parse_mpd(R"(<MPD type="static" mediaPresentationDuration="PT4S"><Period>
+      <AdaptationSet contentType="video"><SegmentTemplate media="$Number$" duration="2"/>
+        <Representation id="p5" codecs="dvh1.05.06" height="2160" bandwidth="15000000"/>
+      </AdaptationSet></Period></MPD>)", "http://h/m.mpd", &p5, &err));
+    o = AdaptiveSourceOptions{};
+    CHECK_EQ(choose_video(p5, o), -1);
+    o.dolby_vision = true;
+    CHECK_EQ(choose_video(p5, o), 0);
 }

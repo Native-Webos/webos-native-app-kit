@@ -86,6 +86,15 @@ TEST("ISO 8601 durations") {
     CHECK(!parse_iso_duration("P", &us));
 }
 
+TEST("Dolby Vision profiles from codec strings") {
+    CHECK_EQ(dolby_vision_profile("dvhe.08.06"), 8);
+    CHECK_EQ(dolby_vision_profile("dvh1.05.06"), 5);
+    CHECK_EQ(dolby_vision_profile("dav1.10.09"), 10);
+    CHECK_EQ(dolby_vision_profile("hvc1.2.4.L153"), -1);
+    CHECK_EQ(dolby_vision_profile("dvhe"), -1);
+    CHECK_EQ(dolby_vision_profile(""), -1);
+}
+
 TEST("RFC 6381 codec strings map to the kit's codecs") {
     CHECK(codec_from_rfc6381("avc1.640028,mp4a.40.2", TrackType::Video) == CodecId::H264);
     CHECK(codec_from_rfc6381("avc1.640028,mp4a.40.2", TrackType::Audio) == CodecId::Aac);

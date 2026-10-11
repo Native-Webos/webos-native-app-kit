@@ -647,6 +647,15 @@
       "method": "Example D 0.8.0 AdaptiveSource on Starfish: Dolby DV/Atmos test DASH (SegmentTemplate, 2160p59.94 HEVC + E-AC-3 JOC), Apple bipbop HEVC HLS (fMP4 byte ranges, separate AAC), Mux x36xhzz HLS (MPEG-TS, muxed AAC), Shaka angel-one DASH (SegmentBase/sidx, AAC); single and held Left/Right seeks, Back",
       "evidence": "Dolby: 3840x2160 HEVC with E-AC-3 passed through, first frame ~1.7 s after launch, position advancing 1 s/s with ~60 video frames fed per second over 40 s, no retries; picture and sound in sync on all four, seeks resume on all four (owner)",
       "limitations": "plain HEVC rendition only: the TV showed HDR, not Dolby Vision (DV not declared to Starfish yet); fixed bitrate (no switching); held-key seeks needed a fix (interrupted reopen) and Apple's misaligned audio/video segments needed audio trimmed to the video keyframe, both in this version"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "media.starfish.dolby_vision_atmos",
+      "result": "supported",
+      "method": "Example D 0.9.0: Dolby DV/Atmos test DASH (DV profile 8.1 HEVC 2160p59.94, E-AC-3 JOC) on Starfish with contents.DolbyHdrInfo {trackType single, encryptionType clear, profileId 8} and contents.immersive ATMOS, both gated on com.webos.service.config (supportDolbyHDRContents, supportDolbyTVATMOS = true)",
+      "evidence": "dvvC read from the init segment (profile 8, compatibility 1); pipeline video info hdrType DolbyVision (was none without the node in 0.8.0), audio info immersive ATMOS; the TV showed Dolby Vision and Dolby Atmos with picture and sound fine (owner)",
+      "limitations": "profile 8.1 only; profile 5, PlxNative's 1 ns PTS nudge for DV LUT lookups (measured on webOS 4.10.2) and ACB's Atmos read-out are not examined on this TV"
     }
   ]
 }

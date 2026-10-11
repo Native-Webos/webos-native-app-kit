@@ -41,6 +41,13 @@ namespace wnk::media {
 
 struct StarfishOptions {
     std::string app_id;  // $APPID when empty
+    // Declare what the stream carries to the pipeline (PlxNative docs/dolby-vision.md, read from the
+    // TV's libpf/libcbe): contents.DolbyHdrInfo for single-layer Dolby Vision HEVC, which makes the
+    // pipeline add dolby-vision=TRUE to the video caps, and contents.immersive "ATMOS" for E-AC-3 JOC.
+    // libpf acts on the nodes without checking the panel, so set these only when the TV says it
+    // supports them (DeviceMediaCaps: an exact true).
+    bool dolby_vision = false;
+    bool atmos = false;
 };
 
 // Load payload inputs, for build_load_payload.
@@ -51,6 +58,8 @@ struct StarfishLoad {
     int width = 0, height = 0;
     double frame_rate = 0;
     CodecId audio = CodecId::Unknown;  // Unknown: no audio
+    int dolby_vision_profile = -1;     // >= 0: declare DolbyHdrInfo with this profileId
+    bool atmos = false;                // declare immersive ATMOS
 };
 
 class StarfishBackend : public MediaBackend {

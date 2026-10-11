@@ -11,6 +11,7 @@ extern "C" {
 #include <libavformat/avio.h>
 #include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/dovi_meta.h>
 #include <libavutil/opt.h>
 #include <libswresample/swresample.h>
 }
@@ -915,6 +916,16 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
         }
         m.video = video_track;
         out->video = VideoFormat{t->codec, t->width, t->height, t->frame_rate};
+        // Dolby Vision configuration record (MP4 dvcC/dvvC, Matroska block addition mapping).
+        if (const AVPacketSideData *sd = av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data,
+                                                                 AV_PKT_DATA_DOVI_CONF)) {
+            const auto *dv = reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(sd->data);
+            if (t->codec == CodecId::Hevc && dv->rpu_present_flag != 0 && dv->el_present_flag == 0) {
+                out->video->dolby_vision_profile = dv->dv_profile;
+            }
+            WNK_LOGI(kCat, "Dolby Vision profile %d, compatibility %d%s", dv->dv_profile, dv->dv_bl_signal_compatibility_id,
+                     dv->el_present_flag != 0 ? ", enhancement layer (base layer only)" : "");
+        }
     }
 
     if (audio_track >= 0) {
@@ -932,6 +943,7 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
                 m.adts_config.assign(par->extradata, par->extradata + par->extradata_size);
             }
             if (par->extradata_size > 0) a.codec_header.assign(par->extradata, par->extradata + par->extradata_size);
+            a.atmos = t->codec == CodecId::Eac3 && par->profile == AV_PROFILE_EAC3_DDP_ATMOS;
             out->audio = a;
             m.audio = audio_track;
         } else if (path == AudioPath::Pcm || path == AudioPath::Ac3) {

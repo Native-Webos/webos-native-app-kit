@@ -594,6 +594,15 @@ CodecId codec_from_rfc6381(const std::string &codecs, TrackType type) {
     return CodecId::Unknown;
 }
 
+int dolby_vision_profile(const std::string &codec) {
+    if (!is_dolby_vision(codec)) return -1;
+    const size_t dot = codec.find('.');
+    if (dot == std::string::npos || dot + 1 >= codec.size()) return -1;
+    char *end = nullptr;
+    const long p = std::strtol(codec.c_str() + dot + 1, &end, 10);
+    return end != codec.c_str() + dot + 1 && p >= 0 && p < 100 ? static_cast<int>(p) : -1;
+}
+
 bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out, std::string *error) {
     *out = Presentation{};
     out->format = Presentation::Format::Dash;

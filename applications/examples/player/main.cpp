@@ -99,8 +99,12 @@ std::unique_ptr<MediaBackend> make_backend(const Settings &s) {
         o.reload_to_pause_and_seek = s.ndl_reload;
         return std::make_unique<NdlBackend>(o);
     };
-    if (starfish && ndl) return std::make_unique<AutoBackend>(std::make_unique<StarfishBackend>(), make_ndl());
-    if (starfish) return std::make_unique<StarfishBackend>();
+    // Dolby Vision and Atmos are declared only when the TV says yes (unknown counts as no).
+    StarfishOptions so;
+    so.dolby_vision = s.device.dolby_vision == true;
+    so.atmos = s.device.dolby_atmos == true;
+    if (starfish && ndl) return std::make_unique<AutoBackend>(std::make_unique<StarfishBackend>(so), make_ndl());
+    if (starfish) return std::make_unique<StarfishBackend>(so);
     if (ndl) return make_ndl();
     WNK_LOGW(kCat, "no media backend (Starfish: %s; NDL: %s): no picture", why_sf.empty() ? "not wanted" : why_sf.c_str(),
              why_ndl.empty() ? "not wanted" : why_ndl.c_str());
@@ -117,6 +121,7 @@ std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &u
         o.language = s.language;
         if (s.device.hevc == false) o.video_codecs = {CodecId::H264};
         if (s.device.uhd_panel != true) o.max_height = 1080;
+        o.dolby_vision = s.device.dolby_vision == true;
         return std::make_unique<AdaptiveSource>(o);
     }
     return std::make_unique<FfmpegSource>(FfmpegSourceOptions{s.http, {}, s.ac3});

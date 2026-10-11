@@ -34,6 +34,8 @@ class ScriptedSource : public MediaSource {
     std::atomic<int64_t> last_seek{kNoTime};
     bool select_ok = true;
     bool subtitles = false;  // a text track (index 2) with a 0.5 s cue "cue N" at every second
+    int64_t audio_early_us = 0;  // audio stored this far ahead of the video it plays with
+    std::atomic<int> video_read{0};  // since open or the last seek
 
     bool open(const std::string &uri, std::string *error) override {
         if (uri == "block") {
@@ -79,6 +81,7 @@ class ScriptedSource : public MediaSource {
         vpts_ = 0;
         apts_ = 0;
         sub_next_ = 0;
+        video_read = 0;
         return true;
     }
     const MediaInfo &info() const override { return info_; }
@@ -112,8 +115,9 @@ class ScriptedSource : public MediaSource {
             sub_next_ += 1000000;
             return Read::Packet;
         }
-        // Interleave by timestamp, like a muxed file.
-        if (v_more && (!a_more || vpts_ <= apts_)) {
+        // Interleave by timestamp, like a muxed file (audio_early_us shifts audio earlier in the file).
+        if (v_more && (!a_more || vpts_ <= apts_ - audio_early_us)) {
+            ++video_read;
             out->type = TrackType::Video;
             out->pts_us = vpts_;
             out->key = vpts_ % 1000000 == 0;
@@ -134,6 +138,7 @@ class ScriptedSource : public MediaSource {
         vpts_ = std::min(duration_, pts_us / 1000000 * 1000000);  // keyframe at or before
         apts_ = vpts_;
         sub_next_ = vpts_;
+        video_read = 0;
         return true;
     }
     void interrupt() override { interrupted_ = true; }
@@ -157,6 +162,8 @@ class PacedBackend : public MediaBackend {
         std::atomic<bool> pause_drains{false};
         std::atomic<bool> seek_splices{false};
         std::atomic<int64_t> last_video_pts{kNoTime};
+        const std::atomic<int> *source_video_read = nullptr;
+        std::atomic<int> video_read_at_first_feed{-1};
         AudioFormat audio_format;
         std::mutex m;
     };
@@ -197,6 +204,7 @@ class PacedBackend : public MediaBackend {
             if (log_->first_video_after_flush == kNoTime) {
                 log_->first_video_after_flush = p.pts_us;
                 log_->first_was_key = p.key;
+                if (log_->source_video_read != nullptr) log_->video_read_at_first_feed = log_->source_video_read->load();
             }
             log_->last_video_pts = p.pts_us;
             ++log_->video;
@@ -242,6 +250,7 @@ struct Rig {
     explicit Rig(std::unique_ptr<ScriptedSource> src = std::make_unique<ScriptedSource>(), bool can_pause = false,
                  PlaybackOptions opts = {}) {
         source = src.get();
+        log->source_video_read = &source->video_read;
         auto be = std::make_unique<PacedBackend>(log, can_pause);
         backend = be.get();
         pc = std::make_unique<PlaybackController>(std::move(src), std::move(be), main, opts);
@@ -427,6 +436,38 @@ TEST("controller: subtitle packets go to the store, never to the backend; the se
     CHECK_EQ(r.pc->subtitle_store().count(2), 3u);
     r.pc->set_subtitle_track(-1);
     CHECK(r.pc->subtitles_now().empty());
+    r.pc->stop();
+}
+
+TEST("controller: audio stored far ahead of its video does not hold the video back") {
+    PlaybackOptions o;
+    o.max_lead_us = 1000000;
+    auto src = std::make_unique<ScriptedSource>(8000000);
+    src->audio_early_us = 2500000;  // in file order, audio runs 2.5 s ahead of the video
+    Rig r(std::move(src), false, o);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us > 1500000; }, 4000ms));
+    // Sample the video lead for a while: a single file-order lane would starve it below zero.
+    int64_t worst = INT64_MAX;
+    for (int i = 0; i < 20; ++i) {
+        const auto snap = r.pc->snapshot();
+        worst = std::min(worst, snap.last_video_pts_us - snap.position_us);
+        std::this_thread::sleep_for(50ms);
+    }
+    CHECK(worst > 500000);
+    r.pc->stop();
+}
+
+TEST("controller: after a seek nothing is fed until the lanes are primed") {
+    auto src = std::make_unique<ScriptedSource>(20000000);
+    Rig r(std::move(src));
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    r.pc->seek(10000000);
+    REQUIRE(r.wait([&] { return r.log->flushes.load() == 1 && r.log->first_video_after_flush.load() != kNoTime; }));
+    // 0.7 s of 25 fps video (18 frames, the span counts the last frame's duration) had been read
+    // since the seek when the first one went in.
+    CHECK(r.log->video_read_at_first_feed.load() >= 17);
     r.pc->stop();
 }
 

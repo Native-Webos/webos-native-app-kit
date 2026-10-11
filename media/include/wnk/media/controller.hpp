@@ -8,9 +8,13 @@
 //                  └──────────────(any failure)──────────────────────────────────► Error
 //   any state ─stop─► Stopped
 //
-// The playback thread reads packets, feeds the backend and retries while the backend reports Full,
-// and never runs more than max_lead_us ahead of the playback clock (decoders that accept everything
-// would otherwise receive the whole file at once). Commands from the main thread are queued and applied
+// The playback thread reads packets into one lane per stream (video, audio) and feeds each lane when
+// its next packet is due, so a packet held back on one stream never blocks the other however the
+// file interleaves them. It retries while the backend reports Full and never feeds more than
+// max_lead_us ahead of the playback clock (decoders that accept everything would otherwise receive
+// the whole file at once). After a load or seek it primes: nothing is fed until both lanes hold a
+// little (prime_video_us / prime_audio_us), then that goes in as one burst, so the decoder does not
+// start on a trickle (PlxNative's prime-then-play). Commands from the main thread are queued and applied
 // between packets; a blocked read or open is interrupted for stop and seek.
 //
 // Pause: when the backend cannot pause at all the controller stops feeding, unloads the decoder
@@ -74,6 +78,13 @@ struct PlaybackOptions {
     // was measured accepting a whole 15 s clip in 0.6 s without ever reporting Full (OLED65C1PTB,
     // webOS 6.5.3), so its own backpressure cannot be relied on. 0 disables.
     int64_t max_lead_us = 1000000;
+    // Read-ahead: lanes stop filling at this span per lane or this many bytes in all.
+    int64_t max_queue_us = 4000000;
+    size_t max_queue_bytes = 64u << 20;
+    // Priming after a load or seek; video_max ends it when a file has no audio near the start.
+    int64_t prime_video_us = 700000;
+    int64_t prime_audio_us = 300000;
+    int64_t prime_video_max_us = 2500000;
     std::chrono::milliseconds stop_deadline{2000};
 };
 
@@ -132,6 +143,9 @@ class PlaybackController {
     void do_resume();
     bool load_backend();
     void feed_one();
+    bool read_one();          // false: nothing read (interrupted, finished, failed)
+    bool prime_done() const;  // playback thread
+    void clear_lanes();
     void set_state(PlayState s, const std::string &error = {});
     void fail(const std::string &error);
     int64_t estimated_position() const;  // lock held; never before the clock's base (for display)
@@ -163,7 +177,9 @@ class PlaybackController {
     int64_t last_primary_pts_ = kNoTime;  // last PTS fed on the stream that drives the clock (guarded by mutex_)
     int64_t last_any_pts_ = kNoTime;      // last PTS fed on any stream (guarded by mutex_)
     int64_t splice_delay_us_ = 0;         // the next clock start waits this long (guarded by mutex_)
-    std::optional<Packet> pending_;
+    std::deque<Packet> lanes_[2];  // [0] video, [1] audio
+    size_t lane_bytes_ = 0;
+    bool priming_ = false;
     SubtitleStore subtitles_;
     std::atomic<int> subtitle_track_{-1};
     std::atomic<bool> eos_seen_{false};

@@ -575,6 +575,15 @@
       "method": "Example D: 24 fps BBB (internet and LAN), a 24 fps test pattern, the same BBB retimed to 25 fps; NDL video.unknown1 set to 24",
       "evidence": "24 fps BBB judders on camera pans (internet and LAN alike, feeding never starved); retimed to 25 fps it is smooth; the 24 fps test pattern looked smooth (little motion); unknown1=24 was accepted and changed nothing",
       "limitations": "NDL v2 has no frame-rate field; PlxNative declares Starfish adaptiveStreaming.maxFrameRate and measured 13 fps presented for 24p declared at 60 vs 24.1 declared at 24. The TV's Real Cinema setting could not be found on this unit"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.lip_sync",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example D 0.4.2 (per-stream lanes, priming): Tears of Steel 720p H.264 + MP3 44.1 kHz (decoded to PCM) streamed over HTTPS from download.blender.org; Big Buck Bunny retimed to 25 fps over LAN",
+      "evidence": "dialogue in lip sync, also after seeks; smooth at 25 fps; pause and seeks fine (owner)",
+      "limitations": "24 fps content still judders on pans (media.ndl.frame_rate_24p)"
     }
   ]
 }

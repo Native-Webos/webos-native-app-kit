@@ -173,7 +173,7 @@ void PlaybackController::set_state(PlayState s, const std::string &error) {
 
 void PlaybackController::fail(const std::string &error) {
     feeding_ = false;
-    pending_.reset();
+    clear_lanes();
     if (loaded_) {
         backend_->unload();
         loaded_ = false;
@@ -235,7 +235,7 @@ bool PlaybackController::apply(const Command &c) {
                 do_pause(c.release);
             } else if (c.release && state() == PlayState::Paused && loaded_) {
                 // Already held on a frame: give the decoder back; resume reloads and seeks back.
-                pending_.reset();
+                clear_lanes();
                 backend_->unload();
                 loaded_ = false;
             }
@@ -243,7 +243,7 @@ bool PlaybackController::apply(const Command &c) {
         case Cmd::Seek: do_seek(c.pts_us); break;
         case Cmd::Stop:
             feeding_ = false;
-            pending_.reset();
+            clear_lanes();
             if (loaded_) {
                 backend_->unload();
                 loaded_ = false;
@@ -264,7 +264,8 @@ void PlaybackController::do_open(const std::string &uri) {
         loaded_ = false;
     }
     feeding_ = false;
-    pending_.reset();
+    clear_lanes();
+    priming_ = true;
     source_done_ = false;
     eos_seen_ = false;
     {
@@ -346,7 +347,8 @@ void PlaybackController::do_seek(int64_t pts_us) {
     }
     set_state(PlayState::Seeking);
     source_->reset_interrupt();
-    pending_.reset();
+    clear_lanes();
+    priming_ = true;
     source_done_ = false;
     eos_seen_ = false;
     std::string err;
@@ -403,7 +405,7 @@ void PlaybackController::do_pause(bool release) {
     } else {
         // No real pause: stop feeding and release the decoder; resume reloads and seeks back.
         feeding_ = false;
-        pending_.reset();
+        clear_lanes();
         if (loaded_) {
             backend_->unload();
             loaded_ = false;
@@ -432,7 +434,8 @@ void PlaybackController::do_resume() {
         source_->reset_interrupt();
         source_done_ = false;
         eos_seen_ = false;
-        pending_.reset();
+        clear_lanes();
+        priming_ = true;
         if (!source_->seek(at, &err)) {
             fail("seek on resume failed: " + err);
             return;
@@ -446,86 +449,157 @@ void PlaybackController::do_resume() {
     set_state(PlayState::Playing);
 }
 
+void PlaybackController::clear_lanes() {
+    lanes_[0].clear();
+    lanes_[1].clear();
+    lane_bytes_ = 0;
+}
+
+namespace {
+int64_t lane_span(const std::deque<Packet> &lane) {
+    if (lane.empty()) return 0;
+    const Packet &a = lane.front(), &b = lane.back();
+    if (a.pts_us == kNoTime || b.pts_us == kNoTime) return 0;
+    return std::max<int64_t>(0, b.pts_us - a.pts_us) + b.duration_us;
+}
+}  // namespace
+
+bool PlaybackController::prime_done() const {
+    if (source_done_) return true;
+    bool has_video, has_audio;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        has_video = snap_.format.video.has_value();
+        has_audio = snap_.format.audio.has_value();
+    }
+    const int64_t v = lane_span(lanes_[0]), a = lane_span(lanes_[1]);
+    if (has_video && v >= options_.prime_video_max_us) return true;  // no audio coming soon
+    if (lane_bytes_ >= options_.max_queue_bytes) return true;
+    return (!has_video || v >= options_.prime_video_us) && (!has_audio || a >= options_.prime_audio_us);
+}
+
+bool PlaybackController::read_one() {
+    Packet p;
+    std::string err;
+    switch (source_->read(&p, &err)) {
+        case MediaSource::Read::Packet: break;
+        case MediaSource::Read::EndOfStream:
+            WNK_LOGI(kCat, "source finished");
+            source_done_ = true;
+            return false;
+        case MediaSource::Read::Interrupted: return false;  // a command is waiting
+        case MediaSource::Read::Error: fail("read failed: " + err); return false;
+    }
+    if (p.type == TrackType::Subtitle) {
+        // Never fed to the backend: the app draws them from the store.
+        if (p.subtitle) subtitles_.add(p.subtitle);
+        return true;
+    }
+    if (p.type != TrackType::Video && p.type != TrackType::Audio) return true;
+    lane_bytes_ += p.data.size();
+    lanes_[p.type == TrackType::Video ? 0 : 1].push_back(std::move(p));
+    return true;
+}
+
 void PlaybackController::feed_one() {
-    if (!pending_) {
-        if (source_done_) {
-            // Everything is fed: wait for the backend to present it.
-            bool ended = eos_seen_;
-            if (!ended) {
+    const bool lanes_empty = lanes_[0].empty() && lanes_[1].empty();
+    if (source_done_ && lanes_empty) {
+        // Everything is fed: wait for the backend to present it.
+        bool ended = eos_seen_;
+        if (!ended) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const int64_t pos = raw_position();
+            // The estimate is capped at the duration, so the target must be too.
+            int64_t end = last_primary_pts_ == kNoTime ? 0 : last_primary_pts_ + kEndSlackUs;
+            if (snap_.duration_us != kNoTime) end = std::min(end, snap_.duration_us);
+            ended = pos != kNoTime && pos >= end;
+        }
+        if (ended) {
+            feeding_ = false;
+            {
                 std::lock_guard<std::mutex> lock(mutex_);
-                const int64_t pos = raw_position();
-                // The estimate is capped at the duration, so the target must be too.
-                int64_t end = last_primary_pts_ == kNoTime ? 0 : last_primary_pts_ + kEndSlackUs;
-                if (snap_.duration_us != kNoTime) end = std::min(end, snap_.duration_us);
-                ended = pos != kNoTime && pos >= end;
+                if (snap_.duration_us != kNoTime) paused_at_us_ = snap_.duration_us;
+                clock_running_ = false;
             }
-            if (ended) {
-                feeding_ = false;
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (snap_.duration_us != kNoTime) paused_at_us_ = snap_.duration_us;
-                    clock_running_ = false;
-                }
-                set_state(PlayState::Ended);
-                return;
-            }
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait_for(lock, std::chrono::milliseconds(20), [this] { return !commands_.empty() || eos_seen_; });
+            set_state(PlayState::Ended);
             return;
         }
-        Packet p;
-        std::string err;
-        switch (source_->read(&p, &err)) {
-            case MediaSource::Read::Packet: pending_ = std::move(p); break;
-            case MediaSource::Read::EndOfStream:
-                WNK_LOGI(kCat, "source finished");
-                source_done_ = true;
-                return;
-            case MediaSource::Read::Interrupted: return;  // a command is waiting
-            case MediaSource::Read::Error: fail("read failed: " + err); return;
-        }
-    }
-    if (pending_->type == TrackType::Subtitle) {
-        // Never fed to the backend: the app draws them from the store.
-        if (pending_->subtitle) subtitles_.add(pending_->subtitle);
-        pending_.reset();
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait_for(lock, std::chrono::milliseconds(20), [this] { return !commands_.empty() || eos_seen_; });
         return;
     }
-    if (options_.max_lead_us > 0 && pending_->pts_us != kNoTime) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (clock_running_) {
-            const int64_t ahead = pending_->pts_us - raw_position() - options_.max_lead_us;
+
+    if (priming_) {
+        if (!prime_done()) {
+            read_one();
+            return;
+        }
+        priming_ = false;
+    }
+
+    // The lane whose head is due and earliest; how long until one is, otherwise.
+    int lane = -1;
+    int64_t wait_us = 20000;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int64_t pos = raw_position();
+        for (int i = 0; i < 2; ++i) {
+            if (lanes_[i].empty()) continue;
+            const int64_t pts = lanes_[i].front().pts_us;
+            const int64_t ahead = options_.max_lead_us > 0 && clock_running_ && pts != kNoTime && pos != kNoTime
+                                      ? pts - pos - options_.max_lead_us
+                                      : 0;
             if (ahead > 0) {
-                const auto wait = std::chrono::microseconds(std::min<int64_t>(ahead, 20000));
-                cv_.wait_for(lock, wait, [this] { return !commands_.empty(); });
-                return;
+                wait_us = std::min(wait_us, ahead);
+                continue;
+            }
+            if (lane < 0 || (pts != kNoTime && lanes_[lane].front().pts_us != kNoTime && pts < lanes_[lane].front().pts_us)) {
+                lane = i;
             }
         }
     }
-    switch (backend_->feed(*pending_)) {
+    if (lane < 0) {
+        // Nothing due: read ahead while there is room, else wait for the clock.
+        const bool room = lane_bytes_ < options_.max_queue_bytes &&
+                          (lanes_[0].empty() || lanes_[1].empty() ||
+                           (lane_span(lanes_[0]) < options_.max_queue_us && lane_span(lanes_[1]) < options_.max_queue_us));
+        if (!source_done_ && room) {
+            read_one();
+            return;
+        }
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait_for(lock, std::chrono::microseconds(wait_us), [this] { return !commands_.empty(); });
+        return;
+    }
+
+    Packet &pkt = lanes_[lane].front();
+    switch (backend_->feed(pkt)) {
         case MediaBackend::Feed::Accepted: {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (pending_->type == TrackType::Video) {
-                ++snap_.video_packets;
-                if (pending_->pts_us != kNoTime) snap_.last_video_pts_us = std::max(snap_.last_video_pts_us, pending_->pts_us);
-            } else {
-                ++snap_.audio_packets;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (pkt.type == TrackType::Video) {
+                    ++snap_.video_packets;
+                    if (pkt.pts_us != kNoTime) snap_.last_video_pts_us = std::max(snap_.last_video_pts_us, pkt.pts_us);
+                } else {
+                    ++snap_.audio_packets;
+                }
+                // Start the position clock at the first packet after a load or seek.
+                const bool primary = pkt.type == TrackType::Video || !snap_.format.video;
+                if (primary && pkt.pts_us != kNoTime) {
+                    last_primary_pts_ = std::max(last_primary_pts_ == kNoTime ? pkt.pts_us : last_primary_pts_, pkt.pts_us);
+                }
+                if (pkt.pts_us != kNoTime) {
+                    last_any_pts_ = last_any_pts_ == kNoTime ? pkt.pts_us : std::max(last_any_pts_, pkt.pts_us);
+                }
+                if (!clock_running_ && primary && pkt.pts_us != kNoTime) {
+                    clock_base_us_ = pkt.pts_us;
+                    clock_start_ = std::chrono::steady_clock::now() + std::chrono::microseconds(splice_delay_us_);
+                    splice_delay_us_ = 0;
+                    clock_running_ = true;
+                }
             }
-            // Start the position clock at the first packet after a load or seek.
-            const bool primary = pending_->type == TrackType::Video || !snap_.format.video;
-            if (primary && pending_->pts_us != kNoTime) {
-                last_primary_pts_ = std::max(last_primary_pts_ == kNoTime ? pending_->pts_us : last_primary_pts_, pending_->pts_us);
-            }
-            if (pending_->pts_us != kNoTime) {
-                last_any_pts_ = last_any_pts_ == kNoTime ? pending_->pts_us : std::max(last_any_pts_, pending_->pts_us);
-            }
-            if (!clock_running_ && primary && pending_->pts_us != kNoTime) {
-                clock_base_us_ = pending_->pts_us;
-                clock_start_ = std::chrono::steady_clock::now() + std::chrono::microseconds(splice_delay_us_);
-                splice_delay_us_ = 0;
-                clock_running_ = true;
-            }
-            pending_.reset();
+            lane_bytes_ -= std::min(lane_bytes_, pkt.data.size());
+            lanes_[lane].pop_front();
             break;
         }
         case MediaBackend::Feed::Full: {

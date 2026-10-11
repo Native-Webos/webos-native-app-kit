@@ -30,7 +30,7 @@ const char *play_state_name(PlayState s) {
 
 PlaybackController::PlaybackController(std::unique_ptr<MediaSource> source, std::unique_ptr<MediaBackend> backend,
                                        async::MainDispatcher &main, PlaybackOptions options)
-    : source_(std::move(source)), backend_(std::move(backend)), backend_name_(backend_->name()), main_(main),
+    : source_(std::move(source)), backend_(std::move(backend)), main_(main),
       options_(options), alive_(std::make_shared<int>(0)) {
     backend_->set_event_callback([this](BackendEvent e, const std::string &d) { on_backend_event(e, d); });
     thread_ = std::thread([this] { run(); });
@@ -295,6 +295,7 @@ void PlaybackController::do_open(const std::string &uri) {
     const TrackInfo *v = options_.video_track == -2 ? info.best(TrackType::Video) : info.track(options_.video_track);
     const TrackInfo *a = options_.audio_track == -2 ? info.best(TrackType::Audio) : info.track(options_.audio_track);
     StreamFormat format;
+    backend_->prepare(info, v, a);
     if (!source_->select(v != nullptr ? v->index : -1, a != nullptr ? a->index : -1, backend_->caps(), &format, &err)) {
         fail("tracks not playable: " + err);
         return;

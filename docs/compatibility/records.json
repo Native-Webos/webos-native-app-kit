@@ -602,6 +602,24 @@
       "method": "Example D 0.5.1 on Starfish: quick repeated Right/Left presses with a 400 ms settle window before feeding a splice seek's target",
       "evidence": "0.5.0 played a piece of every intermediate seek point (owner); 0.5.1 jumps straight to the final point (owner)",
       "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.backend_auto",
+      "result": "supported",
+      "method": "Example D 0.6.1 AutoBackend(Starfish, NDL): the five bundled clips in one session, Back to the list between them, then Home and return",
+      "evidence": "H.264 + AAC, HEVC + AC-3 5.1 (passed through) and the subtitle clip chose Starfish; H.264 + MP3 (MPEG-TS) fell back to NDL with MP3 decoded to PCM; all in sync, subtitles drawn over the Starfish video, Home and return resumed (owner)",
+      "limitations": "the backend is chosen from codecs only; AV1/VP9 rely on NDL"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-11",
+      "feature": "media.starfish.reload_resources",
+      "result": "supported",
+      "method": "Example D 0.6.0 vs 0.6.1: Starfish Loads in sequence (HEVC, H.264, HEVC) with and without the object destructor after UnloadCompleted",
+      "evidence": "0.6.0 (no destructor): the third Load got no decoder resources and blocked; 0.6.1 (destructor after type 23): every Load started",
+      "limitations": "a playback thread that cannot be stopped within the deadline is detached and can outlive its controller (crash seen after the 0.6.0 hang)"
     }
   ]
 }

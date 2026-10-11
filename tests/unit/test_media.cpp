@@ -9,6 +9,7 @@
 #define WNK_TEST_MAIN
 #include "wnk_test.hpp"
 
+#include "wnk/media/auto_backend.hpp"
 #include "wnk/media/controller.hpp"
 #include "wnk/media/device_caps.hpp"
 
@@ -699,4 +700,99 @@ TEST("device caps: parses a getConfigs reply (OLED65C1PTB, webOS 6.5.3); unknown
     CHECK(DeviceMediaCaps::request().find("tv.conti.supportHevc") != std::string::npos);
     // Off webOS the call is unsupported and says so.
     CHECK(!DeviceMediaCaps::detect(100).measured);
+}
+
+namespace {
+// A backend that records what it is asked; caps are set by the test.
+class RecordingBackend : public MediaBackend {
+ public:
+    RecordingBackend(const char *name, std::vector<CodecId> video, std::vector<CodecId> audio) : name_(name) {
+        caps_.video_codecs = std::move(video);
+        caps_.audio_codecs = std::move(audio);
+    }
+    const char *name() const override { return name_; }
+    BackendCaps caps() const override { return caps_; }
+    void prepare(const MediaInfo &, const TrackInfo *, const TrackInfo *) override { ++prepares; }
+    void set_event_callback(EventFn) override {}
+    bool load(const StreamFormat &, std::string *) override {
+        ++loads;
+        return true;
+    }
+    Feed feed(const Packet &) override {
+        ++feeds;
+        return Feed::Accepted;
+    }
+    bool flush(std::string *) override { return true; }
+    void unload() override {}
+    void set_area(const Rect &) override { ++areas; }
+    std::atomic<int> prepares{0}, loads{0}, feeds{0}, areas{0};
+
+ private:
+    const char *name_;
+    BackendCaps caps_;
+};
+
+TrackInfo track(TrackType type, CodecId codec, const char *label) {
+    TrackInfo t;
+    t.type = type;
+    t.codec = codec;
+    t.codec_label = label;
+    return t;
+}
+}  // namespace
+
+TEST("auto backend: the preferred one when it takes video and audio as they are, else the fallback") {
+    auto pref = std::make_unique<RecordingBackend>("pref", std::vector<CodecId>{CodecId::H264, CodecId::Hevc},
+                                                   std::vector<CodecId>{CodecId::Aac, CodecId::Ac3});
+    auto fall = std::make_unique<RecordingBackend>("fall", std::vector<CodecId>{CodecId::H264, CodecId::Av1},
+                                                   std::vector<CodecId>{CodecId::PcmS16});
+    RecordingBackend *p = pref.get(), *f = fall.get();
+    AutoBackend a(std::move(pref), std::move(fall));
+    CHECK_EQ(std::string(a.name()), std::string("pref"));  // before prepare
+    MediaInfo info;
+    const TrackInfo h264 = track(TrackType::Video, CodecId::H264, "h264");
+    const TrackInfo av1 = track(TrackType::Video, CodecId::Av1, "av1");
+    const TrackInfo aac = track(TrackType::Audio, CodecId::Aac, "aac");
+    const TrackInfo mp3 = track(TrackType::Audio, CodecId::Mp3, "mp3");
+
+    a.prepare(info, &h264, &aac);
+    CHECK(!a.using_fallback());
+    std::string err;
+    CHECK(a.load(StreamFormat{}, &err));
+    CHECK_EQ(p->loads.load(), 1);
+
+    a.prepare(info, &h264, &mp3);  // audio the preferred one cannot take
+    CHECK(a.using_fallback());
+    CHECK_EQ(std::string(a.name()), std::string("fall"));
+    CHECK(a.caps().accepts(CodecId::PcmS16));
+    CHECK(a.load(StreamFormat{}, &err));
+    CHECK_EQ(f->loads.load(), 1);
+
+    a.prepare(info, &av1, nullptr);  // video the preferred one cannot take
+    CHECK(a.using_fallback());
+    a.prepare(info, &h264, nullptr);  // video only, taken
+    CHECK(!a.using_fallback());
+    CHECK_EQ(p->prepares.load(), 2);
+    CHECK_EQ(f->prepares.load(), 2);
+    a.set_area({0, 0, 10, 10});  // both keep the area
+    CHECK(p->areas.load() == 1 && f->areas.load() == 1);
+    std::string why;
+    CHECK(!AutoBackend::takes(*p, &h264, &mp3, &why));
+    CHECK_EQ(why, std::string("audio mp3"));
+}
+
+TEST("controller: prepare reaches the backend before tracks are selected") {
+    async::MainDispatcher main;
+    auto be = std::make_unique<RecordingBackend>("rec", std::vector<CodecId>{CodecId::H264},
+                                                 std::vector<CodecId>{CodecId::PcmS16});
+    RecordingBackend *b = be.get();
+    PlaybackController pc(std::make_unique<ScriptedSource>(), std::move(be), main);
+    pc.open("x");
+    const auto end = std::chrono::steady_clock::now() + 3s;
+    while (b->loads.load() == 0 && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(5ms);
+    CHECK_EQ(b->prepares.load(), 1);
+    CHECK_EQ(b->loads.load(), 1);
+    CHECK_EQ(std::string(pc.backend_name()), std::string("rec"));
+    pc.stop();
+    main.drain();
 }

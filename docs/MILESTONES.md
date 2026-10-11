@@ -295,9 +295,13 @@ the default track and cycles tracks with Down. On the TV: SubRip in MKV in time,
 Starfish backend (2026-10-11): `StarfishBackend` drives LG's StarfishMediaAPIs (dlopened libplayerAPIs,
 SDL-webOS exported window, BUFFERSTREAM payload with the stream's frame rate) after PlxNative's seam. On
 the TV it plays 24 fps without the NDL judder (24 frames per second presented), with a real pause, the
-decoder's position and AAC passed through. Opt-in in Example D (`{"backend":"starfish"}`, 0.5.x).
+decoder's position and AAC passed through. Example D 0.6 chooses per file with `AutoBackend`: Starfish when it
+takes the video and audio codecs as they are, NDL otherwise (AV1, VP9, MP3/Opus/PCM audio).
 
-Open: subtitles from external files, ASS styling (libass), non-Latin fonts, bitmap subtitles on the TV,
+Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from
+com.webos.service.config (the decoder table is not visible in the Developer Mode jail).
+
+Open: a playback thread that misses the stop deadline is detached and can outlive its controller; subtitles from external files, ASS styling (libass), non-Latin fonts, bitmap subtitles on the TV,
 HDR metadata, VP9/AV1 on the TV,
 Opus passthrough, resampling for sample rates NDL lacks, pause and seek latency (the queued lead, up to 1 s), video-only files (reported to need an audio prime),
 a decoder-side position, real pause via Starfish, and a PTS-unit test that does not feed in real time.

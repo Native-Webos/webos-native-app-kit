@@ -127,7 +127,7 @@ class PlaybackController {
     const SubtitleStore &subtitle_store() const { return subtitles_; }
     PlaybackSnapshot snapshot() const;
     PlayState state() const;
-    const char *backend_name() const { return backend_name_; }
+    const char *backend_name() const { return backend_->name(); }  // may change at open (AutoBackend)
 
  private:
     enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop };
@@ -157,7 +157,6 @@ class PlaybackController {
 
     std::unique_ptr<MediaSource> source_;
     std::unique_ptr<MediaBackend> backend_;
-    const char *backend_name_;
     async::MainDispatcher &main_;
     PlaybackOptions options_;
     StateFn on_state_;

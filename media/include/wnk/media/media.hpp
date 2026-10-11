@@ -177,6 +177,9 @@ class MediaBackend {
     virtual ~MediaBackend() = default;
     virtual const char *name() const = 0;
     virtual BackendCaps caps() const = 0;
+    // Called after the source is open and before tracks are selected (and caps() consulted for
+    // them), so a backend that wraps others can choose one for this media.
+    virtual void prepare(const MediaInfo &, const TrackInfo * /*video*/, const TrackInfo * /*audio*/) {}
     // May be called from any thread; events may arrive on any thread (the controller handles that).
     virtual void set_event_callback(EventFn fn) = 0;
     virtual bool load(const StreamFormat &format, std::string *error) = 0;

@@ -18,12 +18,14 @@
 //   {"uri": "file:///path/to/file.mkv"}   play that file straight away; http(s):// URIs stream through
 //                                          the kit's HTTP client (byte ranges make them seekable)
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
-//   {"backend": "starfish"}                LG's Starfish pipeline instead of NDL (experiment)
+//   {"backend": "ndl"}                     force NDL (default: Starfish when the codecs suit it, else NDL)
+//   {"backend": "starfish"}                force LG's Starfish pipeline
 //   {"ndlReload": 1}                       pause and seek by reloading NDL (black picture; comparison)
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"autoplay": 0}                        open that bundled clip at start (scripted runs: 0..3)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
+#include "wnk/media/auto_backend.hpp"
 #include "wnk/media/controller.hpp"
 #include "wnk/media/device_caps.hpp"
 #include "wnk/media/ffmpeg_source.hpp"
@@ -60,7 +62,7 @@ struct Settings {
     std::string clips_dir;
     PtsUnit pts_unit = PtsUnit::Microseconds;
     bool ndl_reload = false;
-    bool starfish = false;
+    std::string backend = "auto";  // auto (Starfish when the codecs suit it, else NDL), starfish, ndl
     int lead_ms = 1000;
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
 };
@@ -74,18 +76,21 @@ std::string clock_text(int64_t us) {
 }
 
 std::unique_ptr<MediaBackend> make_backend(const Settings &s) {
-    std::string why;
-    if (wnk::platform::kIsWebOS && s.starfish) {
-        if (StarfishBackend::available(&why)) return std::make_unique<StarfishBackend>();
-        WNK_LOGW(kCat, "Starfish unavailable (%s): using NDL", why.c_str());
-    }
-    if (wnk::platform::kIsWebOS && NdlBackend::available(&why)) {
+    if (!wnk::platform::kIsWebOS) return std::make_unique<PacingBackend>();
+    std::string why_sf, why_ndl;
+    const bool starfish = s.backend != "ndl" && StarfishBackend::available(&why_sf);
+    const bool ndl = s.backend != "starfish" && NdlBackend::available(&why_ndl);
+    auto make_ndl = [&s] {
         NdlOptions o;
         o.pts_unit = s.pts_unit;
         o.reload_to_pause_and_seek = s.ndl_reload;
         return std::make_unique<NdlBackend>(o);
-    }
-    if (wnk::platform::kIsWebOS) WNK_LOGW(kCat, "NDL unavailable (%s): no picture", why.c_str());
+    };
+    if (starfish && ndl) return std::make_unique<AutoBackend>(std::make_unique<StarfishBackend>(), make_ndl());
+    if (starfish) return std::make_unique<StarfishBackend>();
+    if (ndl) return make_ndl();
+    WNK_LOGW(kCat, "no media backend (Starfish: %s; NDL: %s): no picture", why_sf.empty() ? "not wanted" : why_sf.c_str(),
+             why_ndl.empty() ? "not wanted" : why_ndl.c_str());
     return std::make_unique<PacingBackend>();
 }
 
@@ -281,7 +286,7 @@ class PlayerScreen : public Screen {
                 break;
             }
         }
-        d += "  ·  " + backend_name_;
+        d += "  ·  " + std::string(controller_->backend_name());
         detail_->set_text(d);
     }
 
@@ -357,7 +362,7 @@ class Player : public wnk::app::Delegate {
         if (params.is_object()) {
             if (params.contains("ptsUnit") && params["ptsUnit"] == "ms") s.pts_unit = PtsUnit::Milliseconds;
             if (params.contains("ndlReload") && params["ndlReload"] == 1) s.ndl_reload = true;
-            if (params.contains("backend") && params["backend"] == "starfish") s.starfish = true;
+            if (params.contains("backend") && params["backend"].is_string()) s.backend = params["backend"];
             if (params.contains("leadMs") && params["leadMs"].is_number_integer()) {
                 s.lead_ms = std::clamp(params["leadMs"].get<int>(), 100, 5000);
             }

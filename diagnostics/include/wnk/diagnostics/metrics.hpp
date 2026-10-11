@@ -23,7 +23,9 @@ struct FrameSample {
 struct FrameSummary {
     size_t frames = 0;
     float interval_avg = 0, interval_max = 0, interval_p95 = 0;
-    size_t late = 0;  // intervals over the late threshold
+    float interval_median = 0;  // ≈ the display's vsync period when frames are paced
+    float late_threshold = 0;   // the threshold used for `late`
+    size_t late = 0;            // intervals over the late threshold
     float events_max = 0, update_max = 0, draw_max = 0, finish_max = 0, swap_max = 0, swap_avg = 0;
     float fps() const { return interval_avg > 0 ? 1000.0f / interval_avg : 0; }
 };
@@ -31,14 +33,17 @@ struct FrameSummary {
 class FrameMetrics {
  public:
     static constexpr size_t kCapacity = 240;  // 4 s at 60 Hz
-    explicit FrameMetrics(float late_ms = 20.0f) : late_ms_(late_ms) {}
+    // late_ms > 0: fixed threshold. 0 (default): 1.5x the median interval, which follows the
+    // display's actual refresh rate; the TV was measured running at 60 Hz and, later, at 50 Hz.
+    explicit FrameMetrics(float late_ms = 0) : late_ms_(late_ms) {}
 
     void add(const FrameSample &s);
     // Summary of the most recent `window` frames (all retained frames if larger).
     FrameSummary summary(size_t window = kCapacity) const;
     size_t size() const { return count_; }
     uint64_t total() const { return total_; }
-    float late_threshold() const { return late_ms_; }
+    // The fixed threshold, or the adaptive one for the retained frames.
+    float late_threshold() const;
     // i = 0 is the oldest retained sample.
     const FrameSample &at(size_t i) const { return ring_[(head_ + kCapacity - count_ + i) % kCapacity]; }
 

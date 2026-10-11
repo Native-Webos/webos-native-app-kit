@@ -111,3 +111,20 @@ TEST("frame metrics: ring keeps the newest samples in order") {
     CHECK_EQ(m.at(m.size() - 1).interval, static_cast<float>(FrameMetrics::kCapacity + 9));
     CHECK(wnk::diagnostics::process_memory().ok);
 }
+
+TEST("frame metrics: the late threshold follows the display's refresh rate") {
+    // A 50 Hz output (measured on the TV): perfectly paced 20 ms frames are not late.
+    FrameMetrics m;
+    for (int i = 0; i < 100; ++i) {
+        FrameSample s;
+        s.interval = (i == 50) ? 40.0f : 20.0f;
+        m.add(s);
+    }
+    const auto s = m.summary();
+    CHECK_EQ(s.interval_median, 20.0f);
+    CHECK_EQ(s.late_threshold, 30.0f);
+    CHECK_EQ(s.late, size_t{1});
+    FrameMetrics fixed(20.0f);
+    for (int i = 0; i < 10; ++i) fixed.add({25.0f});
+    CHECK_EQ(fixed.summary().late, size_t{10});
+}

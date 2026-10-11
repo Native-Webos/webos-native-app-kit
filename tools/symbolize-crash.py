@@ -20,7 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-FRAME = re.compile(r"^(?P<path>[^(\[]+)\((?P<sym>[^)]*)\)\s*\[(?P<addr>0x[0-9a-fA-F]+)\]")
+# glibc prints "path(sym+off)[addr]", "path(+off)[addr]" (PIE) or "path[addr]" (no symbol, non-PIE).
+FRAME = re.compile(r"^(?P<path>[^(\[]+)(\((?P<sym>[^)]*)\))?\s*\[(?P<addr>0x[0-9a-fA-F]+)\]")
 MAP = re.compile(r"^(?P<start>[0-9a-f]+)-(?P<end>[0-9a-f]+)\s+r-xp\s+(?P<off>[0-9a-f]+)\s+\S+\s+\S+\s+(?P<path>\S+)")
 REG = re.compile(r"\b(pc|lr)=(0x[0-9a-f]+)")
 
@@ -109,7 +110,7 @@ def main() -> int:
             wanted.append((reg, to_file(int(val, 16))))
         fm = FRAME.match(line)
         if fm and os.path.basename(fm.group("path").strip()) == name:
-            sym = fm.group("sym")
+            sym = fm.group("sym") or ""
             rel = re.match(r"^\+(0x[0-9a-f]+)$", sym)
             addr = int(rel.group(1), 16) if rel else to_file(int(fm.group("addr"), 16))
             wanted.append(("frame", addr))

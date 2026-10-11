@@ -31,8 +31,8 @@ void draw_metrics_overlay(render::Renderer &r, const ui::Theme &theme, Size canv
     };
     char buf[200];
     const diagnostics::FrameSummary f = d.frames != nullptr ? d.frames->summary() : diagnostics::FrameSummary{};
-    std::snprintf(buf, sizeof buf, "%.1f fps   avg %.1f  p95 %.1f  max %.1f ms   late %zu/%zu", f.fps(), f.interval_avg,
-                  f.interval_p95, f.interval_max, f.late, f.frames);
+    std::snprintf(buf, sizeof buf, "%.1f fps  vsync %.1f  p95 %.1f  max %.1f ms  late %zu/%zu", f.fps(),
+                  f.interval_median, f.interval_p95, f.interval_max, f.late, f.frames);
     line(head, buf);
 
     // Frame interval graph, oldest on the left; guides at one and two 60 Hz frames.
@@ -44,14 +44,17 @@ void draw_metrics_overlay(render::Renderer &r, const ui::Theme &theme, Size canv
         const size_t n = d.frames->size();
         const float bw = g.w / static_cast<float>(diagnostics::FrameMetrics::kCapacity);
         const float x0 = g.right() - bw * static_cast<float>(n);
+        const float period = f.interval_median > 0 ? f.interval_median : 1000.0f / 60;
         for (size_t i = 0; i < n; ++i) {
             const float ms = d.frames->at(i).interval;
-            const render::Color c = ms > 1000.0f / 30 + 1 ? kDropped : ms > d.frames->late_threshold() ? kLate : kGood;
+            const render::Color c = ms > period * 2.5f ? kDropped : ms > f.late_threshold ? kLate : kGood;
             const float top = y_for(ms);
             r.fill_rect({x0 + bw * static_cast<float>(i), top, std::max(1.0f, bw - 0.5f), g.bottom() - top}, c);
         }
     }
-    for (float guide : {1000.0f / 60, 1000.0f / 30}) r.fill_rect({g.x, y_for(guide), g.w, 1.5f}, kGuide);
+    // Guides at one and two measured vsync periods.
+    const float period = f.interval_median > 0 ? f.interval_median : 1000.0f / 60;
+    for (float guide : {period, period * 2}) r.fill_rect({g.x, y_for(guide), g.w, 1.5f}, kGuide);
 
     std::snprintf(buf, sizeof buf, "max ms  events %.1f  update %.1f  draw %.1f  finish %.1f  swap %.1f", f.events_max,
                   f.update_max, f.draw_max, f.finish_max, f.swap_max);

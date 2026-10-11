@@ -34,16 +34,20 @@ FrameSummary FrameMetrics::summary(size_t window) const {
         out.draw_max = std::max(out.draw_max, s.draw);
         out.finish_max = std::max(out.finish_max, s.finish);
         out.swap_max = std::max(out.swap_max, s.swap);
-        if (s.interval > late_ms_) ++out.late;
     }
     out.frames = n;
     out.interval_avg = static_cast<float>(interval_sum / n);
     out.swap_avg = static_cast<float>(swap_sum / n);
-    const size_t k = std::min(n - 1, static_cast<size_t>(n * 0.95));
-    std::nth_element(intervals.begin(), intervals.begin() + static_cast<long>(k), intervals.end());
-    out.interval_p95 = intervals[k];
+    std::vector<float> sorted = intervals;
+    std::sort(sorted.begin(), sorted.end());
+    out.interval_median = sorted[n / 2];
+    out.interval_p95 = sorted[std::min(n - 1, static_cast<size_t>(n * 0.95))];
+    out.late_threshold = late_ms_ > 0 ? late_ms_ : out.interval_median * 1.5f;
+    for (float v : intervals) out.late += v > out.late_threshold ? 1 : 0;
     return out;
 }
+
+float FrameMetrics::late_threshold() const { return late_ms_ > 0 ? late_ms_ : summary().late_threshold; }
 
 ProcessMemory process_memory() {
     ProcessMemory m;

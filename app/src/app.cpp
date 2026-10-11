@@ -691,10 +691,10 @@ class Shell final : public Context {
         const auto rs = renderer_->stats();
         const auto us = ui_->stats();
         const auto mem = diagnostics::process_memory();
-        WNK_LOGI("perf", "frames %llu: interval avg %.2f p95 %.2f max %.2f ms, late %zu; max ms events %.2f "
+        WNK_LOGI("perf", "frames %llu: interval avg %.2f median %.2f p95 %.2f max %.2f ms, late %zu; max ms events %.2f "
                  "update %.2f draw %.2f finish %.2f swap %.2f; draw calls %u, quads %u, textures %u, views %zu, "
                  "rss %.1f MB",
-                 static_cast<unsigned long long>(frames), s.interval_avg, s.interval_p95, s.interval_max, s.late,
+                 static_cast<unsigned long long>(frames), s.interval_avg, s.interval_median, s.interval_p95, s.interval_max, s.late,
                  s.events_max, s.update_max, s.draw_max, s.finish_max, s.swap_max, rs.draw_calls, rs.quads,
                  rs.textures, us.views, mem.rss_bytes / 1048576.0);
     }

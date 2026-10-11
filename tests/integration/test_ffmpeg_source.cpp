@@ -297,6 +297,88 @@ TEST("ffmpeg source: unsupported video codec and missing files are refused with 
     CHECK(s.read(&p, &err) == MediaSource::Read::Packet);
 }
 
+// ---- subtitles ---------------------------------------------------------------------------------
+
+namespace {
+
+// Two SubRip cues (the second with two lines and an italic tag) muxed into a 2 s clip.
+bool make_subtitled(const std::string &name, const std::string &scodec) {
+    const std::string out = dir() + "/" + name;
+    if (access(out.c_str(), R_OK) == 0) return true;
+    const std::string srt = dir() + "/cues.srt";
+    if (FILE *f = std::fopen(srt.c_str(), "w")) {
+        std::fputs("1\n00:00:00,200 --> 00:00:00,900\nFirst cue\n\n"
+                   "2\n00:00:01,000 --> 00:00:01,800\n<i>Second</i> cue\nline two\n\n", f);
+        std::fclose(f);
+    }
+    if (!make_clip("h264_aac.mp4", "libx264", "aac")) return false;
+    const std::string cmd = "ffmpeg -hide_banner -loglevel error -y -i '" + dir() + "/h264_aac.mp4' -i '" + srt +
+                            "' -map 0 -map 1 -c:v copy -c:a copy -c:s " + scodec + " -metadata:s:s:0 language=eng '" +
+                            out + "'";
+    return std::system(cmd.c_str()) == 0;
+}
+
+std::vector<Packet> subtitle_packets(FfmpegSource &s) {
+    std::vector<Packet> subs;
+    Packet p;
+    std::string err;
+    while (s.read(&p, &err) == MediaSource::Read::Packet) {
+        if (p.type == TrackType::Subtitle) subs.push_back(p);
+    }
+    return subs;
+}
+
+}  // namespace
+
+TEST("ffmpeg source: text subtitle tracks (SRT and ASS in MKV, timed text in MP4) become plain cues") {
+    SKIP_WITHOUT_FFMPEG();
+    for (const auto &[name, codec] : {std::pair<std::string, std::string>{"subs_srt.mkv", "srt"},
+                                      {"subs_ass.mkv", "ass"},
+                                      {"subs_mov_text.mp4", "mov_text"}}) {
+        std::printf("  %s\n", name.c_str());
+        REQUIRE(make_subtitled(name, codec));
+        FfmpegSource s;
+        std::string err;
+        REQUIRE(s.open(dir() + "/" + name, &err));
+        const TrackInfo *t = s.info().best(TrackType::Subtitle);
+        REQUIRE(t != nullptr);
+        CHECK(t->subtitle == SubtitleKind::Text);
+        CHECK_EQ(t->language, std::string("eng"));
+        StreamFormat f;
+        REQUIRE(s.select(s.info().best(TrackType::Video)->index, s.info().best(TrackType::Audio)->index,
+                         ndl_like_caps(), &f, &err));
+        const auto subs = subtitle_packets(s);
+        std::vector<Packet> cues;  // MP4 also carries empty "gap" samples between cues
+        for (const Packet &x : subs) {
+            if (!x.subtitle->empty()) cues.push_back(x);
+        }
+        REQUIRE(cues.size() == 2u);
+        const SubtitleCue &a = *cues[0].subtitle, &b = *cues[1].subtitle;
+        CHECK_EQ(a.track, t->index);
+        CHECK_EQ(a.text, std::string("First cue"));
+        CHECK_EQ(b.text, std::string("Second cue\nline two"));
+        // Content time starts at the earliest stream (AAC priming may shift everything a little).
+        CHECK(std::abs(a.start_us - 200000) <= 30000);
+        CHECK(std::abs((a.end_us - a.start_us) - 700000) <= 1000);
+        CHECK(std::abs((b.start_us - a.start_us) - 800000) <= 1000);
+        CHECK(std::abs((b.end_us - b.start_us) - 800000) <= 1000);
+    }
+}
+
+TEST("ffmpeg source: subtitles read while a seek looks for its keyframe are delivered") {
+    SKIP_WITHOUT_FFMPEG();
+    REQUIRE(make_subtitled("subs_srt.mkv", "srt"));
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/subs_srt.mkv", &err));
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, -1, ndl_like_caps(), &f, &err));
+    REQUIRE(s.seek(1500000, &err));  // keyframe at 1.0 s, the second cue starts there
+    const auto subs = subtitle_packets(s);
+    REQUIRE(subs.size() == 1u);
+    CHECK(subs[0].subtitle->text.find("Second") == 0);
+}
+
 // ---- over HTTP (needs http_server.py: WNK_TEST_HTTP_BASE and WNK_TEST_FILES_DIR) ------------------
 
 namespace {

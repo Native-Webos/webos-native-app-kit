@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -40,6 +41,9 @@ bool is_video(CodecId c);
 enum class TrackType : uint8_t { Video, Audio, Subtitle, Other };
 const char *track_type_name(TrackType t);
 
+// How a subtitle track is drawn: text the app lays out, or bitmaps (PGS, DVD, DVB) it scales.
+enum class SubtitleKind : uint8_t { None, Text, Bitmap };
+
 struct TrackInfo {
     int index = -1;  // the source's stream index
     TrackType type = TrackType::Other;
@@ -51,6 +55,7 @@ struct TrackInfo {
     int width = 0, height = 0;  // video
     double frame_rate = 0;
     int sample_rate = 0, channels = 0;  // audio
+    SubtitleKind subtitle = SubtitleKind::None;  // subtitle tracks the source can decode
 };
 
 struct MediaInfo {
@@ -82,12 +87,32 @@ struct StreamFormat {
     std::optional<AudioFormat> audio;
 };
 
+// One bitmap of a subtitle cue, positioned on the cue's canvas.
+struct SubtitleBitmap {
+    int x = 0, y = 0, width = 0, height = 0;
+    std::vector<uint8_t> rgba;  // width*height*4, straight (not premultiplied) alpha
+};
+
+// What one subtitle track shows from start_us until end_us. Text cues carry plain UTF-8 with '\n'
+// between lines (styling tags removed); bitmap cues carry images on a canvas (usually the video's
+// size). A cue with no text and no bitmaps clears the track (PGS "clear" events).
+struct SubtitleCue {
+    int track = -1;                 // the source's stream index
+    int64_t start_us = kNoTime;
+    int64_t end_us = kNoTime;       // kNoTime: until the next cue of the track
+    std::string text;
+    std::vector<SubtitleBitmap> bitmaps;
+    int canvas_w = 0, canvas_h = 0;
+    bool empty() const { return text.empty() && bitmaps.empty(); }
+};
+
 struct Packet {
     TrackType type = TrackType::Video;
     std::vector<uint8_t> data;
     int64_t pts_us = kNoTime;
     int64_t duration_us = 0;
     bool key = false;
+    std::shared_ptr<const SubtitleCue> subtitle;  // type == Subtitle: the decoded cue (data unused)
 };
 
 // Audio codecs a backend can take directly; the source decodes everything else to PcmS16.
@@ -116,6 +141,8 @@ class MediaSource {
     virtual const MediaInfo &info() const = 0;
     // Chooses the tracks to deliver (-1: none of that type) and how: audio codecs the backend does
     // not accept are decoded to PCM S16 stereo. Returns false if a selected track cannot be delivered.
+    // Every subtitle track the source can decode (TrackInfo::subtitle) is delivered as well, as
+    // Subtitle packets carrying cues, so the viewer can switch between them without a seek.
     virtual bool select(int video_track, int audio_track, const BackendCaps &caps, StreamFormat *out,
                         std::string *error) = 0;
     // Next packet of a selected track. Blocking.

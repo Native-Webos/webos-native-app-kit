@@ -33,6 +33,7 @@ class ScriptedSource : public MediaSource {
     std::atomic<int> seeks{0};
     std::atomic<int64_t> last_seek{kNoTime};
     bool select_ok = true;
+    bool subtitles = false;  // a text track (index 2) with a 0.5 s cue "cue N" at every second
 
     bool open(const std::string &uri, std::string *error) override {
         if (uri == "block") {
@@ -68,8 +69,16 @@ class ScriptedSource : public MediaSource {
             a.channels = 2;
             info_.tracks.push_back(a);
         }
+        if (subtitles) {
+            TrackInfo t;
+            t.index = 2;
+            t.type = TrackType::Subtitle;
+            t.subtitle = SubtitleKind::Text;
+            info_.tracks.push_back(t);
+        }
         vpts_ = 0;
         apts_ = 0;
+        sub_next_ = 0;
         return true;
     }
     const MediaInfo &info() const override { return info_; }
@@ -90,6 +99,19 @@ class ScriptedSource : public MediaSource {
         const bool v_more = video_ && vpts_ < duration_;
         const bool a_more = audio_ && apts_ < duration_;
         if (!v_more && !a_more) return Read::EndOfStream;
+        if (subtitles && sub_next_ < duration_ && sub_next_ <= std::min(vpts_, apts_)) {
+            auto cue = std::make_shared<SubtitleCue>();
+            cue->track = 2;
+            cue->start_us = sub_next_;
+            cue->end_us = sub_next_ + 500000;
+            cue->text = "cue " + std::to_string(sub_next_ / 1000000);
+            out->type = TrackType::Subtitle;
+            out->pts_us = sub_next_;
+            out->data.clear();
+            out->subtitle = std::move(cue);
+            sub_next_ += 1000000;
+            return Read::Packet;
+        }
         // Interleave by timestamp, like a muxed file.
         if (v_more && (!a_more || vpts_ <= apts_)) {
             out->type = TrackType::Video;
@@ -111,6 +133,7 @@ class ScriptedSource : public MediaSource {
         last_seek = pts_us;
         vpts_ = std::min(duration_, pts_us / 1000000 * 1000000);  // keyframe at or before
         apts_ = vpts_;
+        sub_next_ = vpts_;
         return true;
     }
     void interrupt() override { interrupted_ = true; }
@@ -120,7 +143,7 @@ class ScriptedSource : public MediaSource {
     MediaInfo info_;
     int64_t duration_;
     bool video_, audio_;
-    int64_t vpts_ = 0, apts_ = 0;
+    int64_t vpts_ = 0, apts_ = 0, sub_next_ = 0;
     std::atomic<bool> interrupted_{false};
 };
 
@@ -381,6 +404,29 @@ TEST("controller: pause_and_release unloads even a pausing backend, also when al
     r.pc->play();
     REQUIRE(r.wait_state(PlayState::Playing));
     CHECK_EQ(r.log->loads.load(), 3);
+    r.pc->stop();
+}
+
+TEST("controller: subtitle packets go to the store, never to the backend; the selected track shows at the position") {
+    auto src = std::make_unique<ScriptedSource>(3000000);
+    src->subtitles = true;
+    Rig r(std::move(src));
+    r.pc->open("x");
+    CHECK(r.pc->subtitles_now().empty());  // no track selected
+    r.pc->set_subtitle_track(2);
+    std::string seen;
+    REQUIRE(r.wait([&] {
+        const auto cues = r.pc->subtitles_now();
+        const int64_t pos = r.pc->snapshot().position_us;
+        if (!cues.empty() && pos >= 1050000 && pos < 1450000) seen = cues[0]->text;
+        return !seen.empty();
+    }, 4000ms));
+    CHECK_EQ(seen, std::string("cue 1"));
+    REQUIRE(r.wait_state(PlayState::Ended, 5000ms));
+    CHECK_EQ(r.log->audio.load(), 150);  // 3 s of audio only: no subtitle reached the backend
+    CHECK_EQ(r.pc->subtitle_store().count(2), 3u);
+    r.pc->set_subtitle_track(-1);
+    CHECK(r.pc->subtitles_now().empty());
     r.pc->stop();
 }
 

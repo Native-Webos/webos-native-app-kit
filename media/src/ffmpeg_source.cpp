@@ -2,6 +2,7 @@
 #include "wnk/media/ffmpeg_source.hpp"
 
 #include "wnk/log.hpp"
+#include "wnk/media/subtitles.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -18,6 +19,7 @@ extern "C" {
 #include <cstdarg>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 
 namespace wnk::media {
@@ -45,6 +47,22 @@ CodecId map_codec(AVCodecID id) {
         case AV_CODEC_ID_OPUS: return CodecId::Opus;
         case AV_CODEC_ID_PCM_S16LE: return CodecId::PcmS16;
         default: return CodecId::Unknown;
+    }
+}
+
+SubtitleKind subtitle_kind(AVCodecID id) {
+    switch (id) {
+        case AV_CODEC_ID_SUBRIP:
+        case AV_CODEC_ID_SRT:
+        case AV_CODEC_ID_ASS:
+        case AV_CODEC_ID_SSA:
+        case AV_CODEC_ID_WEBVTT:
+        case AV_CODEC_ID_MOV_TEXT:
+        case AV_CODEC_ID_TEXT: return SubtitleKind::Text;
+        case AV_CODEC_ID_HDMV_PGS_SUBTITLE:
+        case AV_CODEC_ID_DVD_SUBTITLE:
+        case AV_CODEC_ID_DVB_SUBTITLE: return SubtitleKind::Bitmap;
+        default: return SubtitleKind::None;
     }
 }
 
@@ -136,6 +154,12 @@ struct FfmpegSource::Impl {
     std::deque<AVPacket *> replay;  // demuxed by seek() while looking for a keyframe; read() goes first
     std::atomic<bool> interrupted{false};
     std::vector<float> planar_tmp;
+    std::map<int, AVCodecContext *> subs;  // stream index → decoder, for every decodable subtitle track
+
+    void free_subtitle_decoders() {
+        for (auto &[index, ctx] : subs) avcodec_free_context(&ctx);
+        subs.clear();
+    }
 
     ~Impl() { close(); }
 
@@ -146,6 +170,7 @@ struct FfmpegSource::Impl {
 
     void close() {
         clear_replay();
+        free_subtitle_decoders();
         av_bsf_free(&bsf);
         avcodec_free_context(&dec);
         avformat_close_input(&fmt);  // leaves a custom AVIOContext alone
@@ -290,10 +315,81 @@ struct FfmpegSource::Impl {
         ready.push_back(std::move(p));
     }
 
+    // Decodes one subtitle packet into a cue (text, bitmaps, or a clear event).
+    void decode_subtitle(AVCodecContext *ctx, AVPacket *p, AVRational tb) {
+        AVSubtitle sub{};
+        int got = 0;
+        if (avcodec_decode_subtitle2(ctx, &sub, &got, p) < 0 || got == 0) return;
+        auto cue = std::make_shared<SubtitleCue>();
+        cue->track = p->stream_index;
+        const int64_t pts = to_us(p->pts != AV_NOPTS_VALUE ? p->pts : p->dts, tb);
+        if (pts == kNoTime) {
+            avsubtitle_free(&sub);
+            return;
+        }
+        cue->start_us = pts + static_cast<int64_t>(sub.start_display_time) * 1000;
+        if (p->duration > 0) {
+            cue->end_us = pts + av_rescale_q(p->duration, tb, kMicros);
+        } else if (sub.end_display_time != 0 && sub.end_display_time != UINT32_MAX) {
+            cue->end_us = pts + static_cast<int64_t>(sub.end_display_time) * 1000;
+        }
+        cue->canvas_w = ctx->width;
+        cue->canvas_h = ctx->height;
+        for (unsigned r = 0; r < sub.num_rects; ++r) {
+            const AVSubtitleRect *rect = sub.rects[r];
+            std::string line;
+            if (rect->type == SUBTITLE_ASS && rect->ass != nullptr) {
+                line = ass_event_text(rect->ass);
+            } else if (rect->type == SUBTITLE_TEXT && rect->text != nullptr) {
+                line = rect->text;
+            } else if (rect->type == SUBTITLE_BITMAP && rect->w > 0 && rect->h > 0 && rect->data[0] != nullptr &&
+                       rect->data[1] != nullptr) {
+                // PAL8: one index per pixel, a palette of 0xAARRGGBB words.
+                SubtitleBitmap b;
+                b.x = rect->x;
+                b.y = rect->y;
+                b.width = rect->w;
+                b.height = rect->h;
+                b.rgba.resize(static_cast<size_t>(rect->w) * rect->h * 4);
+                const auto *palette = reinterpret_cast<const uint32_t *>(rect->data[1]);
+                for (int y = 0; y < rect->h; ++y) {
+                    const uint8_t *src = rect->data[0] + static_cast<ptrdiff_t>(y) * rect->linesize[0];
+                    uint8_t *dst = b.rgba.data() + static_cast<size_t>(y) * rect->w * 4;
+                    for (int x = 0; x < rect->w; ++x) {
+                        const uint32_t c = palette[src[x]];
+                        dst[x * 4 + 0] = static_cast<uint8_t>(c >> 16);
+                        dst[x * 4 + 1] = static_cast<uint8_t>(c >> 8);
+                        dst[x * 4 + 2] = static_cast<uint8_t>(c);
+                        dst[x * 4 + 3] = static_cast<uint8_t>(c >> 24);
+                    }
+                }
+                cue->bitmaps.push_back(std::move(b));
+            }
+            if (!line.empty()) cue->text += (cue->text.empty() ? "" : "\n") + line;
+        }
+        avsubtitle_free(&sub);
+        if (!cue->bitmaps.empty() && (cue->canvas_w <= 0 || cue->canvas_h <= 0)) {
+            // DVD subtitles without a size: assume the video's frame (or PAL SD).
+            const TrackInfo *v = info.best(TrackType::Video);
+            cue->canvas_w = v != nullptr && v->width > 0 ? v->width : 720;
+            cue->canvas_h = v != nullptr && v->height > 0 ? v->height : 576;
+        }
+        Packet out;
+        out.type = TrackType::Subtitle;
+        out.key = true;
+        out.pts_us = cue->start_us;
+        out.subtitle = std::move(cue);
+        ready.push_back(std::move(out));
+    }
+
     // Turns one demuxed packet of a selected stream into ready packets.
     void consume(AVPacket *p) {
         const int si = p->stream_index;
         const AVRational tb = fmt->streams[si]->time_base;
+        if (const auto sd = subs.find(si); sd != subs.end()) {
+            decode_subtitle(sd->second, p, tb);
+            return;
+        }
         if (si == video) {
             if (bsf != nullptr) {
                 if (av_bsf_send_packet(bsf, p) == 0) drain_bsf(tb);  // takes the packet's reference
@@ -332,6 +428,11 @@ struct FfmpegSource::Impl {
             }
             const bool is_video = p->stream_index == video;
             const bool wanted = is_video || p->stream_index == audio;
+            if (subs.count(p->stream_index) != 0) {
+                consume(p);  // subtitles are kept whatever the landing point (the store drops repeats)
+                av_packet_free(&p);
+                continue;
+            }
             if (is_video) {
                 saw_video = true;
                 const int64_t ts = p->pts != AV_NOPTS_VALUE ? p->pts : p->dts;
@@ -484,7 +585,12 @@ bool FfmpegSource::open(const std::string &uri, std::string *error) {
                 t.sample_rate = par->sample_rate;
                 t.channels = par->ch_layout.nb_channels;
                 break;
-            case AVMEDIA_TYPE_SUBTITLE: t.type = TrackType::Subtitle; break;
+            case AVMEDIA_TYPE_SUBTITLE:
+                t.type = TrackType::Subtitle;
+                // Only what this FFmpeg build can decode is offered.
+                t.subtitle = avcodec_find_decoder(par->codec_id) != nullptr ? subtitle_kind(par->codec_id)
+                                                                             : SubtitleKind::None;
+                break;
             default: t.type = TrackType::Other; break;
         }
         info.tracks.push_back(t);
@@ -500,9 +606,25 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
         return false;
     }
     m.clear_replay();
+    m.free_subtitle_decoders();
     av_bsf_free(&m.bsf);
     avcodec_free_context(&m.dec);
     m.video = m.audio = -1;
+    for (const TrackInfo &t : m.info.tracks) {
+        if (t.type != TrackType::Subtitle || t.subtitle == SubtitleKind::None) continue;
+        const AVStream *st = m.fmt->streams[t.index];
+        const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
+        AVCodecContext *ctx = codec != nullptr ? avcodec_alloc_context3(codec) : nullptr;
+        if (ctx != nullptr && avcodec_parameters_to_context(ctx, st->codecpar) >= 0) {
+            ctx->pkt_timebase = st->time_base;
+            if (avcodec_open2(ctx, codec, nullptr) >= 0) {
+                m.subs[t.index] = ctx;
+                continue;
+            }
+        }
+        WNK_LOGW(kCat, "subtitle track %d (%s) cannot be decoded", t.index, t.codec_label.c_str());
+        avcodec_free_context(&ctx);
+    }
     m.decode_audio = false;
     *out = StreamFormat{};
 
@@ -639,6 +761,8 @@ bool FfmpegSource::seek(int64_t pts_us, std::string *error) {
     // before it, starting further back while there is none.
     const int stream = m.video >= 0 ? m.video : -1;
     m.clear_replay();
+    m.ready.clear();
+    for (auto &[index, ctx] : m.subs) avcodec_flush_buffers(ctx);
     int64_t back_us = 0;
     for (;;) {
         const int64_t from_us = std::max<int64_t>(pts_us - back_us, 0);
@@ -663,7 +787,10 @@ bool FfmpegSource::seek(int64_t pts_us, std::string *error) {
     }
     if (m.bsf != nullptr) av_bsf_flush(m.bsf);
     if (m.dec != nullptr) avcodec_flush_buffers(m.dec);
-    m.ready.clear();
+    // Keep the subtitles decoded while looking for the keyframe; drop everything else.
+    m.ready.erase(std::remove_if(m.ready.begin(), m.ready.end(),
+                                 [](const Packet &p) { return p.type != TrackType::Subtitle; }),
+                  m.ready.end());
     m.eof = false;
     m.need_key = m.video >= 0;
     return true;

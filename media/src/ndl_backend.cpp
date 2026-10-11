@@ -309,6 +309,7 @@ bool NdlBackend::load_locked(const StreamFormat &format, std::string *error) {
 MediaBackend::Feed NdlBackend::feed(const Packet &p) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!loaded_) return Feed::Error;
+    if (p.type != TrackType::Video && p.type != TrackType::Audio) return Feed::Accepted;  // not NDL's
     const bool video = p.type == TrackType::Video;
     if (video && !format_.video) return Feed::Accepted;  // not loaded with that stream: drop
     if (!video && !format_.audio) return Feed::Accepted;

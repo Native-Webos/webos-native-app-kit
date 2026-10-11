@@ -24,6 +24,10 @@
 // packet after load/seek (offset by that packet's PTS) and frozen while paused. The estimate is
 // marked as such in the snapshot.
 //
+// Subtitles: every cue the source decodes goes into a SubtitleStore (all subtitle tracks, kept across
+// seeks) instead of the backend; subtitles_now() answers what the selected track shows at the
+// current position, so switching tracks needs no seek.
+//
 // Threading: public methods are main-thread calls and never block on the playback thread except
 // stop()/~PlaybackController, which join it with a deadline. State changes are posted to the
 // MainDispatcher; snapshot() can be read at any time.
@@ -31,6 +35,7 @@
 
 #include "wnk/async/async.hpp"
 #include "wnk/media/media.hpp"
+#include "wnk/media/subtitles.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -99,6 +104,13 @@ class PlaybackController {
     bool stop();
 
     void set_video_area(const Rect &pixels);
+
+    // Subtitle track to show (a stream index from MediaInfo, -1 for none).
+    void set_subtitle_track(int track) { subtitle_track_.store(track); }
+    int subtitle_track() const { return subtitle_track_.load(); }
+    // Cues of the selected track at the current position (empty when none or paused before any).
+    std::vector<std::shared_ptr<const SubtitleCue>> subtitles_now() const;
+    const SubtitleStore &subtitle_store() const { return subtitles_; }
     PlaybackSnapshot snapshot() const;
     PlayState state() const;
     const char *backend_name() const { return backend_name_; }
@@ -152,6 +164,8 @@ class PlaybackController {
     int64_t last_any_pts_ = kNoTime;      // last PTS fed on any stream (guarded by mutex_)
     int64_t splice_delay_us_ = 0;         // the next clock start waits this long (guarded by mutex_)
     std::optional<Packet> pending_;
+    SubtitleStore subtitles_;
+    std::atomic<int> subtitle_track_{-1};
     std::atomic<bool> eos_seen_{false};
     std::thread thread_;
     bool joined_ = false;

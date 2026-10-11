@@ -28,8 +28,12 @@
 #   bsf       length-prefixed (MP4/MKV) H.264/HEVC → Annex-B, which NDL requires
 #   decoders  AAC, AC-3, E-AC-3 and MP3, decoded to PCM: PCM is the NDL v2 audio path measured to work
 #             (MP3 passed through to NDL was silent on an OLED65C1PTB, webOS 6.5.3). Video is never
-#             decoded here.
-#   protocol  file only; network reads go through the kit's own HTTP client (custom AVIO), later.
+#             decoded here. Subtitles are decoded to text or bitmaps and drawn by the app (NDL has no
+#             subtitle path): SubRip, ASS/SSA, WebVTT, MP4 timed text, PGS, DVD and DVB bitmaps, the
+#             same list as PlxNative's except that configure calls the MP4 text decoder "movtext"
+#             ("mov_text" is silently ignored).
+#   demuxers  also SRT, WebVTT and ASS files for external subtitle tracks.
+#   protocol  file only; network reads go through the kit's own HTTP client (custom AVIO).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -43,10 +47,11 @@ PREFIX=$(cd "$PREFIX" && pwd)
 
 COMPONENTS=(
   --disable-everything --disable-autodetect --enable-zlib
-  --enable-demuxer=matroska,mov,mpegts,h264,hevc,aac,mp3,ogg,wav
+  --enable-demuxer=matroska,mov,mpegts,h264,hevc,aac,mp3,ogg,wav,srt,webvtt,ass
   --enable-parser=h264,hevc,aac,ac3,mpegaudio,opus,vp9,av1
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata
   --enable-decoder=aac,ac3,eac3,mp3float
+  --enable-decoder=subrip,srt,ass,ssa,webvtt,movtext,text,pgssub,dvdsub,dvbsub
   --enable-protocol=file
 )
 COMMON=(

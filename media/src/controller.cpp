@@ -119,6 +119,17 @@ PlaybackSnapshot PlaybackController::snapshot() const {
     return s;
 }
 
+std::vector<std::shared_ptr<const SubtitleCue>> PlaybackController::subtitles_now() const {
+    const int track = subtitle_track_.load();
+    if (track < 0) return {};
+    int64_t pos;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pos = estimated_position();
+    }
+    return subtitles_.active(track, pos);
+}
+
 PlayState PlaybackController::state() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return snap_.state;
@@ -266,6 +277,7 @@ void PlaybackController::do_open(const std::string &uri) {
         clock_base_us_ = kNoTime;
         paused_at_us_ = kNoTime;
     }
+    subtitles_.clear();
     set_state(PlayState::Opening);
     source_->reset_interrupt();
     std::string err;
@@ -472,6 +484,12 @@ void PlaybackController::feed_one() {
             case MediaSource::Read::Interrupted: return;  // a command is waiting
             case MediaSource::Read::Error: fail("read failed: " + err); return;
         }
+    }
+    if (pending_->type == TrackType::Subtitle) {
+        // Never fed to the backend: the app draws them from the store.
+        if (pending_->subtitle) subtitles_.add(pending_->subtitle);
+        pending_.reset();
+        return;
     }
     if (options_.max_lead_us > 0 && pending_->pts_us != kNoTime) {
         std::unique_lock<std::mutex> lock(mutex_);

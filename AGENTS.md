@@ -25,6 +25,9 @@
 - Widgets/app code act on `wnk::input::Action`, never on raw scancodes. New key codes go into a keymap
   table with a `Provenance`; only codes captured on a TV may be marked `Measured`.
 - All drawing goes through `wnk::render::Renderer` in logical units; GL state belongs to `Gles2Renderer`.
+- `ui/` never includes SDL or GL. Widgets register focus through the view tree (`set_focusable`,
+  `set_focus_scope`); they never call `FocusManager` directly. Views removed while handling input are
+  retired by the `Ui` and destroyed at the next entry point, so handlers may close their own screen.
 
 ## Commits
 - Follow `CONTRIBUTING.md`: imperative subject ≤ 72 chars saying what changed; body explains why and

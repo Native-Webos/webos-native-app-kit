@@ -46,6 +46,7 @@ add_subdirectory(storage)
 add_subdirectory(async)
 add_subdirectory(net)
 add_subdirectory(image)
+add_subdirectory(ui)
 
 if (WNK_BUILD_EXAMPLES)
     include(WebOSPackage)

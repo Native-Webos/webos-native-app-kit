@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http image)
+foreach (t log platform input focus font storage async http image ui)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -13,6 +13,7 @@ target_link_libraries(test_storage PRIVATE wnk_storage)
 target_link_libraries(test_async PRIVATE wnk_async)
 target_link_libraries(test_http PRIVATE wnk_net)
 target_link_libraries(test_image PRIVATE wnk_image)
+target_link_libraries(test_ui PRIVATE wnk_ui)
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 
 # curl transport against a local HTTP/HTTPS server started by http_server.py (needs python3 + openssl).

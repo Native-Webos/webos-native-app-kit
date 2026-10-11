@@ -301,7 +301,7 @@ takes the video and audio codecs as they are, NDL otherwise (AV1, VP9, MP3/Opus/
 Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from
 com.webos.service.config (the decoder table is not visible in the Developer Mode jail).
 
-Open: a playback thread that misses the stop deadline is detached and can outlive its controller; subtitles from external files, ASS styling (libass), non-Latin fonts, bitmap subtitles on the TV,
+Open: subtitles from external files, ASS styling (libass), non-Latin fonts, bitmap subtitles on the TV,
 HDR metadata, VP9/AV1 on the TV,
 Opus passthrough, resampling for sample rates NDL lacks, pause and seek latency (the queued lead, up to 1 s), video-only files (reported to need an audio prime),
 a decoder-side position, real pause via Starfish, and a PTS-unit test that does not feed in real time.

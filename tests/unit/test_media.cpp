@@ -796,3 +796,36 @@ TEST("controller: prepare reaches the backend before tracks are selected") {
     pc.stop();
     main.drain();
 }
+
+namespace {
+// Load blocks until released, like a decoder that never gets its resources.
+class StuckBackend : public RecordingBackend {
+ public:
+    StuckBackend() : RecordingBackend("stuck", {CodecId::H264}, {CodecId::PcmS16}) {}
+    bool load(const StreamFormat &f, std::string *e) override {
+        entered = true;
+        while (!release) std::this_thread::sleep_for(2ms);
+        return RecordingBackend::load(f, e);
+    }
+    static std::atomic<bool> entered, release;
+};
+std::atomic<bool> StuckBackend::entered{false};
+std::atomic<bool> StuckBackend::release{false};
+}  // namespace
+
+TEST("controller: a playback thread stuck past the stop deadline outlives the controller safely") {
+    async::MainDispatcher main;
+    PlaybackOptions o;
+    o.stop_deadline = 100ms;
+    auto pc = std::make_unique<PlaybackController>(std::make_unique<ScriptedSource>(), std::make_unique<StuckBackend>(),
+                                                   main, o);
+    pc->open("x");
+    const auto end = std::chrono::steady_clock::now() + 3s;
+    while (!StuckBackend::entered && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(2ms);
+    REQUIRE(StuckBackend::entered.load());
+    CHECK(!pc->stop());  // detached
+    pc.reset();          // the handle goes; the thread still holds the state
+    StuckBackend::release = true;
+    std::this_thread::sleep_for(300ms);  // the thread finishes, feeds, sees Stop and ends on its own
+    main.drain();                        // nothing posted after destruction reaches a callback
+}

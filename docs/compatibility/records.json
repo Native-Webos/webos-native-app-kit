@@ -620,6 +620,15 @@
       "method": "Example D 0.6.0 vs 0.6.1: Starfish Loads in sequence (HEVC, H.264, HEVC) with and without the object destructor after UnloadCompleted",
       "evidence": "0.6.0 (no destructor): the third Load got no decoder resources and blocked; 0.6.1 (destructor after type 23): every Load started",
       "limitations": "a playback thread that cannot be stopped within the deadline is detached and can outlive its controller (crash seen after the 0.6.0 hang)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.starfish.long_https",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example D 0.6.1 (AutoBackend chose Starfish): Big Buck Bunny 596 s 720p24 H.264 + AAC over HTTPS from uploads.video-commander.com, played to the end without input",
+      "evidence": "14315 video and 25666 audio packets fed, no reconnects, warnings or Full retries; pushEOS then Ended at 598.9 s; displayed-frame counter mean 4.81 per 200 ms (24.0 fps); UI frame interval 16.66 ms",
+      "limitations": "one stream, one session"
     }
   ]
 }

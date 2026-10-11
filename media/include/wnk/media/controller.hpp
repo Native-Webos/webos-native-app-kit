@@ -102,7 +102,7 @@ class PlaybackController {
     PlaybackController(const PlaybackController &) = delete;
     PlaybackController &operator=(const PlaybackController &) = delete;
 
-    void set_state_callback(StateFn fn) { on_state_ = std::move(fn); }
+    void set_state_callback(StateFn fn);
 
     void open(const std::string &uri);
     void play();
@@ -114,81 +114,26 @@ class PlaybackController {
     void seek(int64_t pts_us);
     void seek_relative(int64_t delta_us);
     // Stops playback, unloads the backend and joins the thread (bounded by stop_deadline).
-    // Returns false if the thread did not finish in time (it is then detached).
+    // Returns false if the thread did not finish in time: it is then detached and keeps the
+    // controller's internal state alive until it ends, so it never touches freed memory.
     bool stop();
 
     void set_video_area(const Rect &pixels);
 
     // Subtitle track to show (a stream index from MediaInfo, -1 for none).
-    void set_subtitle_track(int track) { subtitle_track_.store(track); }
-    int subtitle_track() const { return subtitle_track_.load(); }
+    void set_subtitle_track(int track);
+    int subtitle_track() const;
     // Cues of the selected track at the current position (empty when none or paused before any).
     std::vector<std::shared_ptr<const SubtitleCue>> subtitles_now() const;
-    const SubtitleStore &subtitle_store() const { return subtitles_; }
+    const SubtitleStore &subtitle_store() const;
     PlaybackSnapshot snapshot() const;
     PlayState state() const;
-    const char *backend_name() const { return backend_->name(); }  // may change at open (AutoBackend)
+    const char *backend_name() const;  // may change at open (AutoBackend)
+
+    struct Core;  // everything the playback thread uses; shared with that thread
 
  private:
-    enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop };
-    struct Command {
-        Cmd cmd;
-        std::string uri;
-        int64_t pts_us = 0;
-        bool release = false;  // Pause: unload the decoder even if the backend can pause
-    };
-    void post(Command c);
-    void run();
-    bool apply(const Command &c);  // false: leave the loop
-    void do_open(const std::string &uri);
-    void do_seek(int64_t pts_us);
-    void do_pause(bool release);
-    void do_resume();
-    bool load_backend();
-    void feed_one();
-    bool read_one();          // false: nothing read (interrupted, finished, failed)
-    bool prime_done() const;  // playback thread
-    void clear_lanes();
-    void set_state(PlayState s, const std::string &error = {});
-    void fail(const std::string &error);
-    int64_t estimated_position() const;  // lock held; never before the clock's base (for display)
-    int64_t raw_position() const;        // lock held; before the base while a splice backlog plays
-    void on_backend_event(BackendEvent e, const std::string &detail);
-
-    std::unique_ptr<MediaSource> source_;
-    std::unique_ptr<MediaBackend> backend_;
-    async::MainDispatcher &main_;
-    PlaybackOptions options_;
-    StateFn on_state_;
-    std::shared_ptr<int> alive_;  // posted callbacks check it
-
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
-    std::deque<Command> commands_;
-    PlaybackSnapshot snap_;  // guarded by mutex_
-    // Position clock (guarded by mutex_).
-    bool clock_running_ = false;
-    std::chrono::steady_clock::time_point clock_start_;
-    int64_t clock_base_us_ = kNoTime;
-    int64_t paused_at_us_ = kNoTime;
-
-    // Playback thread only.
-    bool loaded_ = false;
-    bool feeding_ = false;
-    bool source_done_ = false;
-    int64_t last_primary_pts_ = kNoTime;  // last PTS fed on the stream that drives the clock (guarded by mutex_)
-    int64_t last_any_pts_ = kNoTime;      // last PTS fed on any stream (guarded by mutex_)
-    int64_t splice_delay_us_ = 0;         // the next clock start waits this long (guarded by mutex_)
-    std::deque<Packet> lanes_[2];  // [0] video, [1] audio
-    size_t lane_bytes_ = 0;
-    bool priming_ = false;
-    bool eos_sent_ = false;  // backend told everything is fed
-    std::atomic<int64_t> last_seek_request_ms_{0};  // steady clock, from seek() on the main thread
-    SubtitleStore subtitles_;
-    std::atomic<int> subtitle_track_{-1};
-    std::atomic<bool> eos_seen_{false};
-    std::thread thread_;
-    bool joined_ = false;
+    std::shared_ptr<Core> core_;
 };
 
 }  // namespace wnk::media

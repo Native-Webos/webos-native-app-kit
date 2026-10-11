@@ -28,22 +28,160 @@ const char *play_state_name(PlayState s) {
     return "?";
 }
 
-PlaybackController::PlaybackController(std::unique_ptr<MediaSource> source, std::unique_ptr<MediaBackend> backend,
-                                       async::MainDispatcher &main, PlaybackOptions options)
+struct PlaybackController::Core {
+    using StateFn = PlaybackController::StateFn;
+
+    Core(std::unique_ptr<MediaSource> source, std::unique_ptr<MediaBackend> backend, async::MainDispatcher &main,
+         PlaybackOptions options);
+    ~Core();
+    // Starts the playback thread, which keeps `self` (this core) alive until it ends.
+    void start(const std::shared_ptr<Core> &self);
+
+    void set_state_callback(StateFn fn) { on_state_ = std::move(fn); }
+
+    void open(const std::string &uri);
+    void play();
+    void pause();
+    // Pauses and gives the decoder back even if the backend could hold it (app backgrounded, decoder
+    // reclaimed). Resuming reloads it and seeks back.
+    void pause_and_release();
+    void toggle_pause();
+    void seek(int64_t pts_us);
+    void seek_relative(int64_t delta_us);
+    bool stop();
+
+    void set_video_area(const Rect &pixels);
+
+    // Subtitle track to show (a stream index from MediaInfo, -1 for none).
+    void set_subtitle_track(int track) { subtitle_track_.store(track); }
+    int subtitle_track() const { return subtitle_track_.load(); }
+    // Cues of the selected track at the current position (empty when none or paused before any).
+    std::vector<std::shared_ptr<const SubtitleCue>> subtitles_now() const;
+    const SubtitleStore &subtitle_store() const { return subtitles_; }
+    PlaybackSnapshot snapshot() const;
+    PlayState state() const;
+    const char *backend_name() const { return backend_->name(); }  // may change at open (AutoBackend)
+
+    enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop };
+    struct Command {
+        Cmd cmd;
+        std::string uri;
+        int64_t pts_us = 0;
+        bool release = false;  // Pause: unload the decoder even if the backend can pause
+    };
+    void post(Command c);
+    void run();
+    bool apply(const Command &c);  // false: leave the loop
+    void do_open(const std::string &uri);
+    void do_seek(int64_t pts_us);
+    void do_pause(bool release);
+    void do_resume();
+    bool load_backend();
+    void feed_one();
+    bool read_one();          // false: nothing read (interrupted, finished, failed)
+    bool prime_done() const;  // playback thread
+    void clear_lanes();
+    void set_state(PlayState s, const std::string &error = {});
+    void fail(const std::string &error);
+    int64_t estimated_position() const;  // lock held; never before the clock's base (for display)
+    int64_t raw_position() const;        // lock held; before the base while a splice backlog plays
+    void on_backend_event(BackendEvent e, const std::string &detail);
+
+    std::unique_ptr<MediaSource> source_;
+    std::unique_ptr<MediaBackend> backend_;
+    async::MainDispatcher &main_;
+    PlaybackOptions options_;
+    StateFn on_state_;
+    std::shared_ptr<int> alive_;  // posted callbacks check it (guarded by mutex_)
+
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<Command> commands_;
+    PlaybackSnapshot snap_;  // guarded by mutex_
+    // Position clock (guarded by mutex_).
+    bool clock_running_ = false;
+    std::chrono::steady_clock::time_point clock_start_;
+    int64_t clock_base_us_ = kNoTime;
+    int64_t paused_at_us_ = kNoTime;
+
+    // Playback thread only.
+    bool loaded_ = false;
+    bool feeding_ = false;
+    bool source_done_ = false;
+    int64_t last_primary_pts_ = kNoTime;  // last PTS fed on the stream that drives the clock (guarded by mutex_)
+    int64_t last_any_pts_ = kNoTime;      // last PTS fed on any stream (guarded by mutex_)
+    int64_t splice_delay_us_ = 0;         // the next clock start waits this long (guarded by mutex_)
+    std::deque<Packet> lanes_[2];  // [0] video, [1] audio
+    size_t lane_bytes_ = 0;
+    bool priming_ = false;
+    bool eos_sent_ = false;  // backend told everything is fed
+    std::atomic<int64_t> last_seek_request_ms_{0};  // steady clock, from seek() on the main thread
+    SubtitleStore subtitles_;
+    std::atomic<int> subtitle_track_{-1};
+    std::atomic<bool> eos_seen_{false};
+    std::thread thread_;
+    bool joined_ = false;
+};
+
+PlaybackController::Core::Core(std::unique_ptr<MediaSource> source, std::unique_ptr<MediaBackend> backend,
+                               async::MainDispatcher &main, PlaybackOptions options)
     : source_(std::move(source)), backend_(std::move(backend)), main_(main),
       options_(options), alive_(std::make_shared<int>(0)) {
     backend_->set_event_callback([this](BackendEvent e, const std::string &d) { on_backend_event(e, d); });
-    thread_ = std::thread([this] { run(); });
+}
+
+void PlaybackController::Core::start(const std::shared_ptr<Core> &self) {
+    thread_ = std::thread([self] { self->run(); });
+}
+
+PlaybackController::Core::~Core() {
+    // The last reference may be the playback thread's own (it was detached and has now finished).
+    if (thread_.joinable()) {
+        if (thread_.get_id() == std::this_thread::get_id()) {
+            thread_.detach();
+        } else {
+            thread_.join();
+        }
+    }
+}
+
+// ---- the public handle ------------------------------------------------------------------------------
+
+PlaybackController::PlaybackController(std::unique_ptr<MediaSource> source, std::unique_ptr<MediaBackend> backend,
+                                       async::MainDispatcher &main, PlaybackOptions options)
+    : core_(std::make_shared<Core>(std::move(source), std::move(backend), main, options)) {
+    core_->start(core_);
 }
 
 PlaybackController::~PlaybackController() {
-    stop();
-    alive_.reset();
+    core_->stop();
+    std::lock_guard<std::mutex> lock(core_->mutex_);
+    core_->alive_.reset();  // nothing posted from now on reaches the state callback
 }
+
+void PlaybackController::set_state_callback(StateFn fn) { core_->on_state_ = std::move(fn); }
+void PlaybackController::open(const std::string &uri) { core_->open(uri); }
+void PlaybackController::play() { core_->play(); }
+void PlaybackController::pause() { core_->pause(); }
+void PlaybackController::pause_and_release() { core_->pause_and_release(); }
+void PlaybackController::toggle_pause() { core_->toggle_pause(); }
+void PlaybackController::seek(int64_t pts_us) { core_->seek(pts_us); }
+void PlaybackController::seek_relative(int64_t delta_us) { core_->seek_relative(delta_us); }
+bool PlaybackController::stop() { return core_->stop(); }
+void PlaybackController::set_video_area(const Rect &pixels) { core_->set_video_area(pixels); }
+void PlaybackController::set_subtitle_track(int track) { core_->subtitle_track_.store(track); }
+int PlaybackController::subtitle_track() const { return core_->subtitle_track_.load(); }
+std::vector<std::shared_ptr<const SubtitleCue>> PlaybackController::subtitles_now() const { return core_->subtitles_now(); }
+const SubtitleStore &PlaybackController::subtitle_store() const { return core_->subtitles_; }
+PlaybackSnapshot PlaybackController::snapshot() const { return core_->snapshot(); }
+PlayState PlaybackController::state() const { return core_->state(); }
+const char *PlaybackController::backend_name() const { return core_->backend_->name(); }
+
+
 
 // ---- main thread ------------------------------------------------------------------------------------
 
-void PlaybackController::post(Command c) {
+void PlaybackController::Core::post(Command c) {
     // A blocked open/read would delay these indefinitely.
     if (c.cmd == Cmd::Stop || c.cmd == Cmd::Seek || c.cmd == Cmd::Open) source_->interrupt();
     {
@@ -59,12 +197,12 @@ void PlaybackController::post(Command c) {
     cv_.notify_all();
 }
 
-void PlaybackController::open(const std::string &uri) { post({Cmd::Open, uri, 0}); }
-void PlaybackController::play() { post({Cmd::Play, {}, 0}); }
-void PlaybackController::pause() { post({Cmd::Pause, {}, 0}); }
-void PlaybackController::pause_and_release() { post({Cmd::Pause, {}, 0, true}); }
+void PlaybackController::Core::open(const std::string &uri) { post({Cmd::Open, uri, 0}); }
+void PlaybackController::Core::play() { post({Cmd::Play, {}, 0}); }
+void PlaybackController::Core::pause() { post({Cmd::Pause, {}, 0}); }
+void PlaybackController::Core::pause_and_release() { post({Cmd::Pause, {}, 0, true}); }
 
-void PlaybackController::toggle_pause() {
+void PlaybackController::Core::toggle_pause() {
     const PlayState s = state();
     if (s == PlayState::Paused || s == PlayState::Ready || s == PlayState::Ended) {
         play();
@@ -73,14 +211,14 @@ void PlaybackController::toggle_pause() {
     }
 }
 
-void PlaybackController::seek(int64_t pts_us) {
+void PlaybackController::Core::seek(int64_t pts_us) {
     last_seek_request_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now().time_since_epoch())
                                 .count();
     post({Cmd::Seek, {}, std::max<int64_t>(0, pts_us)});
 }
 
-void PlaybackController::seek_relative(int64_t delta_us) {
+void PlaybackController::Core::seek_relative(int64_t delta_us) {
     const PlaybackSnapshot s = snapshot();
     int64_t base = s.position_us != kNoTime ? s.position_us : 0;
     int64_t target = base + delta_us;
@@ -88,7 +226,7 @@ void PlaybackController::seek_relative(int64_t delta_us) {
     seek(target);
 }
 
-bool PlaybackController::stop() {
+bool PlaybackController::Core::stop() {
     if (joined_) return true;
     post({Cmd::Stop, {}, 0});
     // Wait for the thread to finish, bounded: a hardware call that never returns must not hang shutdown.
@@ -108,9 +246,9 @@ bool PlaybackController::stop() {
     return false;
 }
 
-void PlaybackController::set_video_area(const Rect &pixels) { backend_->set_area(pixels); }
+void PlaybackController::Core::set_video_area(const Rect &pixels) { backend_->set_area(pixels); }
 
-PlaybackSnapshot PlaybackController::snapshot() const {
+PlaybackSnapshot PlaybackController::Core::snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     PlaybackSnapshot s = snap_;
     const int64_t backend_pos = backend_->caps().position ? backend_->position_us() : kNoTime;
@@ -124,7 +262,7 @@ PlaybackSnapshot PlaybackController::snapshot() const {
     return s;
 }
 
-std::vector<std::shared_ptr<const SubtitleCue>> PlaybackController::subtitles_now() const {
+std::vector<std::shared_ptr<const SubtitleCue>> PlaybackController::Core::subtitles_now() const {
     const int track = subtitle_track_.load();
     if (track < 0) return {};
     int64_t pos;
@@ -135,12 +273,12 @@ std::vector<std::shared_ptr<const SubtitleCue>> PlaybackController::subtitles_no
     return subtitles_.active(track, pos);
 }
 
-PlayState PlaybackController::state() const {
+PlayState PlaybackController::Core::state() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return snap_.state;
 }
 
-int64_t PlaybackController::raw_position() const {
+int64_t PlaybackController::Core::raw_position() const {
     if (paused_at_us_ != kNoTime) return paused_at_us_;
     if (!clock_running_ || clock_base_us_ == kNoTime) return clock_base_us_;
     const auto elapsed = std::chrono::steady_clock::now() - clock_start_;
@@ -149,16 +287,17 @@ int64_t PlaybackController::raw_position() const {
     return pos;
 }
 
-int64_t PlaybackController::estimated_position() const {
+int64_t PlaybackController::Core::estimated_position() const {
     const int64_t pos = raw_position();
     return pos != kNoTime && clock_base_us_ != kNoTime && clock_running_ ? std::max(pos, clock_base_us_) : pos;
 }
 
 // ---- playback thread --------------------------------------------------------------------------------
 
-void PlaybackController::set_state(PlayState s, const std::string &error) {
+void PlaybackController::Core::set_state(PlayState s, const std::string &error) {
     PlaybackSnapshot copy;
     PlayState from;
+    std::weak_ptr<int> alive;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         from = snap_.state;
@@ -167,16 +306,16 @@ void PlaybackController::set_state(PlayState s, const std::string &error) {
         if (!error.empty()) snap_.error = error;
         copy = snap_;
         copy.position_us = estimated_position();
+        alive = alive_;
     }
     cv_.notify_all();  // stop() waits for Stopped
     WNK_LOGI(kCat, "%s -> %s%s%s", play_state_name(from), play_state_name(s), error.empty() ? "" : ": ", error.c_str());
-    std::weak_ptr<int> alive = alive_;
     main_.post([this, alive, from, s, copy] {
         if (!alive.expired() && on_state_) on_state_(from, s, copy);
     });
 }
 
-void PlaybackController::fail(const std::string &error) {
+void PlaybackController::Core::fail(const std::string &error) {
     feeding_ = false;
     clear_lanes();
     if (loaded_) {
@@ -190,7 +329,7 @@ void PlaybackController::fail(const std::string &error) {
     set_state(PlayState::Error, error);
 }
 
-void PlaybackController::on_backend_event(BackendEvent e, const std::string &detail) {
+void PlaybackController::Core::on_backend_event(BackendEvent e, const std::string &detail) {
     WNK_LOGI(kCat, "backend event %s%s%s", backend_event_name(e), detail.empty() ? "" : ": ", detail.c_str());
     if (e == BackendEvent::EndOfStream) {
         eos_seen_ = true;
@@ -201,7 +340,7 @@ void PlaybackController::on_backend_event(BackendEvent e, const std::string &det
     }
 }
 
-void PlaybackController::run() {
+void PlaybackController::Core::run() {
     for (;;) {
         std::optional<Command> cmd;
         {
@@ -220,7 +359,7 @@ void PlaybackController::run() {
     }
 }
 
-bool PlaybackController::apply(const Command &c) {
+bool PlaybackController::Core::apply(const Command &c) {
     switch (c.cmd) {
         case Cmd::Open: do_open(c.uri); break;
         case Cmd::Play: {
@@ -263,7 +402,7 @@ bool PlaybackController::apply(const Command &c) {
     return true;
 }
 
-void PlaybackController::do_open(const std::string &uri) {
+void PlaybackController::Core::do_open(const std::string &uri) {
     if (loaded_) {
         backend_->unload();
         loaded_ = false;
@@ -320,7 +459,7 @@ void PlaybackController::do_open(const std::string &uri) {
     }
 }
 
-bool PlaybackController::load_backend() {
+bool PlaybackController::Core::load_backend() {
     StreamFormat format;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -335,7 +474,7 @@ bool PlaybackController::load_backend() {
     return true;
 }
 
-void PlaybackController::do_seek(int64_t pts_us) {
+void PlaybackController::Core::do_seek(int64_t pts_us) {
     const PlayState before = state();
     if (before == PlayState::Idle || before == PlayState::Opening || before == PlayState::Error ||
         before == PlayState::Stopped) {
@@ -392,7 +531,7 @@ void PlaybackController::do_seek(int64_t pts_us) {
     }
 }
 
-void PlaybackController::do_pause(bool release) {
+void PlaybackController::Core::do_pause(bool release) {
     const BackendCaps caps = backend_->caps();
     const bool hold = caps.pause && !release;
     {
@@ -420,7 +559,7 @@ void PlaybackController::do_pause(bool release) {
     set_state(PlayState::Paused);
 }
 
-void PlaybackController::do_resume() {
+void PlaybackController::Core::do_resume() {
     int64_t at;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -455,7 +594,7 @@ void PlaybackController::do_resume() {
     set_state(PlayState::Playing);
 }
 
-void PlaybackController::clear_lanes() {
+void PlaybackController::Core::clear_lanes() {
     lanes_[0].clear();
     lanes_[1].clear();
     lane_bytes_ = 0;
@@ -471,7 +610,7 @@ int64_t lane_span(const std::deque<Packet> &lane) {
 }
 }  // namespace
 
-bool PlaybackController::prime_done() const {
+bool PlaybackController::Core::prime_done() const {
     if (source_done_) return true;
     bool has_video, has_audio;
     {
@@ -485,7 +624,7 @@ bool PlaybackController::prime_done() const {
     return (!has_video || v >= options_.prime_video_us) && (!has_audio || a >= options_.prime_audio_us);
 }
 
-bool PlaybackController::read_one() {
+bool PlaybackController::Core::read_one() {
     Packet p;
     std::string err;
     switch (source_->read(&p, &err)) {
@@ -508,7 +647,7 @@ bool PlaybackController::read_one() {
     return true;
 }
 
-void PlaybackController::feed_one() {
+void PlaybackController::Core::feed_one() {
     const bool lanes_empty = lanes_[0].empty() && lanes_[1].empty();
     if (source_done_ && lanes_empty) {
         // Everything is fed: wait for the backend to present it.

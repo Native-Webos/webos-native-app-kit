@@ -15,7 +15,8 @@
 //   * Widgets shows buttons, a modal dialog, a toast, a spinner and progress bars;
 //   * Back at the root shows "Press Back again to exit"; Exit quits (both handled by the shell);
 //   * Magic Remote pointer: hovering focuses, clicking is OK, the wheel scrolls the page or grid;
-//   * leaving the app (Home, another app) suspends drawing; returning resumes it.
+//   * leaving the app (Home, another app) suspends drawing; returning resumes it;
+//   * the Blue key toggles the metrics overlay (frame timing, draw stats, memory).
 //
 // Scripted runs (host diagnostics; SAM launches cannot pass environment variables):
 //   WNK_TVUI_KEYS="Left,Down,Right"  key names, move@X:Y, click@X:Y, wheel@N, bg, fg (see wnk/app)
@@ -317,5 +318,6 @@ int main(int argc, char **argv) {
     config.fallback_app_id = kFallbackAppId;
     config.title = "wnk tvui";
     config.script_env_prefix = "WNK_TVUI";
+    config.metrics_toggle = wnk::input::Action::Blue;  // the blue colour key shows frame timing on screen
     return wnk::app::run(argc, argv, config, [] { return std::make_unique<TvUi>(); });
 }

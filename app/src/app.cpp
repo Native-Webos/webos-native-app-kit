@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "wnk/app/app.hpp"
 
+#include "wnk/app/overlay.hpp"
 #include "wnk/diagnostics/crash.hpp"
 #include "wnk/image/textures.hpp"
 #include "wnk/input/sdl_input.hpp"
@@ -256,6 +257,11 @@ class Shell final : public Context {
     const diagnostics::FrameMetrics &frame_metrics() const override { return metrics_; }
     diagnostics::Capabilities &capabilities() override { return caps_; }
     const diagnostics::DeviceInfo &device() const override { return device_; }
+    void set_metrics_overlay(bool visible) override {
+        if (visible != overlay_) WNK_LOGI(kCat, "metrics overlay %s", visible ? "on" : "off");
+        overlay_ = visible;
+    }
+    bool metrics_overlay() const override { return overlay_; }
     void quit(const char *reason) override {
         if (!quit_requested_) WNK_LOGI(kCat, "quit requested: %s", reason);
         quit_requested_ = true;
@@ -310,6 +316,15 @@ class Shell final : public Context {
             caps_.set("diagnostics.crash_record", diagnostics::Support::Unsupported, err);
         }
         crash_test_ = crash_test_kind(launch_.params_json);
+        if (!launch_.params_json.empty()) {
+            const auto j = nlohmann::json::parse(launch_.params_json, nullptr, false);
+            if (j.is_object() && j.contains("wnkMetrics") && j["wnkMetrics"].is_boolean() && j["wnkMetrics"].get<bool>()) {
+                overlay_ = true;
+            }
+        }
+        if (const char *m = SDL_getenv((config_.script_env_prefix + "_METRICS").c_str()); m != nullptr && m[0] == '1') {
+            overlay_ = true;
+        }
         if (!crash_test_.empty()) WNK_LOGW("crash", "crash test requested: %s after 180 frames", crash_test_.c_str());
     }
 
@@ -489,6 +504,7 @@ class Shell final : public Context {
             SDL_GL_GetDrawableSize(window_, &dw, &dh);
             renderer_->begin_frame(dw, dh);
             ui_->draw();
+            if (overlay_) draw_overlay();
             const float draw_ms = static_cast<float>(ms_since(t_draw));
             const Uint64 t_finish = SDL_GetPerformanceCounter();
             renderer_->end_frame();
@@ -602,8 +618,24 @@ class Shell final : public Context {
         if (auto a = mapper_.map(*key)) handle_action(*a);
     }
 
+    void draw_overlay() {
+        OverlayData d;
+        d.frames = &metrics_;
+        d.render = renderer_->stats();
+        d.ui = ui_->stats();
+        if (images_) d.images = images_->stats();
+        d.pool = pool_->stats();
+        d.memory = diagnostics::process_memory();
+        d.state = state_name(lifecycle_.state());
+        draw_metrics_overlay(*renderer_, ui_->theme(), ui_->canvas(), d);
+    }
+
     void handle_action(const input::ActionEvent &a) {
         if (!lifecycle_.renders() && a.phase != input::Phase::Release) return;  // backgrounded: ignore
+        if (a.action == config_.metrics_toggle && a.action != input::Action::Unknown) {
+            if (a.phase == input::Phase::Press) set_metrics_overlay(!overlay_);
+            return;
+        }
         if (ui_->handle(a)) return;
         if (delegate_->on_action(*this, a)) return;
         if (a.phase != input::Phase::Press) return;
@@ -742,6 +774,7 @@ class Shell final : public Context {
     int moves_logged_ = 0;
     ui::ViewId last_focus_ = 0;
     std::string crash_test_;
+    bool overlay_ = false;
 };
 
 }  // namespace

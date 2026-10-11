@@ -44,7 +44,7 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 | `storage/` | Key/value store with revisions: DB8 on the TV, atomic files on the host |
 | `render/` | Renderer interface, fonts/UTF-8/atlas packing (CPU), GLES2 backend in `render/gles2` |
 | `ui/` | Widget toolkit: view tree, Row/Column/Grid layouts, Label, ImageView, Button, Card, virtualised lists/grids, ScrollView, dialogs, toasts, navigation stack, focus ring, animation helpers |
-| `app/` | App shell (`wnk::app::run` + `Delegate`): SDL/GL setup, main loop, input routing, lifecycle state machine (Running ⇄ Suspended), timed shutdown under a watchdog |
+| `app/` | App shell (`wnk::app::run` + `Delegate`): SDL/GL setup, main loop, input routing, lifecycle state machine (Running ⇄ Suspended), timed shutdown under a watchdog, metrics overlay |
 | `diagnostics/` | Frame timing (per loop phase), process memory, crash record (async-signal-safe; `tools/symbolize-crash.py` resolves it offline), capabilities (Supported/Unsupported/Unknown) and device info without identifiers |
 | `applications/examples/hello/` | Example A: tile grid with focus ring, modal dialog, key log, device probe |
 | `applications/examples/tvui/` | Example B: sidebar, poster rails, 1000-item grid, details screen, dialogs; `ui/` on the `app/` shell |

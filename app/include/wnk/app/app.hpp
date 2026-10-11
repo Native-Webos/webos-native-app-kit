@@ -51,8 +51,12 @@ struct AppConfig {
     ui::Theme theme;          // fonts are filled in by the shell
     std::string font_regular = "fonts/AtkinsonHyperlegible-Regular.ttf";  // relative to the app dir
     std::string font_bold = "fonts/AtkinsonHyperlegible-Bold.ttf";
-    // Scripted input for host tests: <prefix>_KEYS and <prefix>_SHOT (see Script in app.cpp).
+    // Scripted input for host tests: <prefix>_KEYS and <prefix>_SHOT (see Script in app.cpp);
+    // <prefix>_METRICS=1 shows the metrics overlay from the start.
     std::string script_env_prefix = "WNK";
+    // Action that toggles the metrics overlay anywhere in the app. None by default: the kit does not
+    // give keys side effects the app did not ask for. Launch params {"wnkMetrics":true} also show it.
+    input::Action metrics_toggle = input::Action::Unknown;
 };
 
 // What the delegate can reach. Valid from on_start until on_stop returns.
@@ -73,6 +77,8 @@ class Context {
     // What this device was found to support, and which device it is (no identifiers).
     virtual diagnostics::Capabilities &capabilities() = 0;
     virtual const diagnostics::DeviceInfo &device() const = 0;
+    virtual void set_metrics_overlay(bool visible) = 0;
+    virtual bool metrics_overlay() const = 0;
     // Ends the main loop after the current iteration; the shutdown sequence then runs.
     virtual void quit(const char *reason) = 0;
 };

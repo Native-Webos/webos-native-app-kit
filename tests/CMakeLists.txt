@@ -136,3 +136,7 @@ if (TARGET wnk-tvui)
             FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
             TIMEOUT 30)
 endif ()
+if (TARGET wnk-tvui)
+    # The Blue key (F4 on the host keymap) toggles the metrics overlay, and the app keeps running.
+    wnk_tvui_e2e(metrics_overlay_toggle "F4,Right,F4" "metrics overlay on.*focus rail0.item1.*metrics overlay off")
+endif ()

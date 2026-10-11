@@ -50,3 +50,4 @@
 ## Where things are
 - Research and decisions: `docs/research/` (ARCHITECTURE-DECISIONS.md, PACKAGING-AND-FIRMWARE.md).
 - Plan and status: `docs/MILESTONES.md`.
+- Building a new native app: `docs/AGENT-APP-GUIDE.md` (shell, widgets, services, packaging).

@@ -19,6 +19,8 @@
 3. `tools/verify.sh <ipk> --runtime-libs cmake/sdl-webos-runtime-libs.txt` must be 7/7 for 5.3.1+.
 4. If the executable's libraries change, update `applications/**/expected-needed.txt` deliberately.
 5. If `WNK_SDL_WEBOS_TAG` or SDL flags change, re-derive `cmake/sdl-webos-runtime-libs.txt`.
+6. After editing `docs/compatibility/records.json`, run `tools/check-compat.py` (schema in
+   `docs/compatibility/schema.json`; it also rejects device identifiers such as serials and MACs).
 
 ## Architecture rules (enforced by CMake target dependencies)
 - `input/` core and `focus/` never include SDL or GL; only `input/sdl` and `render/gles2` do.

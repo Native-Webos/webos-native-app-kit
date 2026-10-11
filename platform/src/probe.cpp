@@ -75,11 +75,35 @@ Facts collect_system_facts() {
         f.emplace_back("starfish-release", read_small("/etc/starfish-release"));
         f.emplace_back("machineName", read_small("/etc/prefs/properties/machineName"));
         f.emplace_back("nyx os_info", read_small("/var/run/nyx/os_info.json"));
-        f.emplace_back("nyx device_info", read_small("/var/run/nyx/device_info.json"));
+        f.emplace_back("nyx device_info", redact_identifiers(read_small("/var/run/nyx/device_info.json")));
     } else {
         f.emplace_back("os-release", read_small("/etc/os-release", 256));
     }
     return f;
+}
+
+std::string redact_identifiers(const std::string &json_text) {
+    static const char *const kKeys[] = {"serial_number", "nduid", "wifi_addr", "wired_addr", "bt_addr", "device_id"};
+    std::string s = json_text;
+    for (const char *key : kKeys) {
+        const std::string quoted = std::string("\"") + key + "\"";
+        for (size_t pos = s.find(quoted); pos != std::string::npos; pos = s.find(quoted, pos + 1)) {
+            size_t p = pos + quoted.size();
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) ++p;
+            if (p >= s.size() || s[p] != ':') continue;
+            ++p;
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) ++p;
+            if (p >= s.size() || s[p] != '"') continue;
+            size_t end = p + 1;
+            while (end < s.size() && s[end] != '"') end += (s[end] == '\\') ? 2 : 1;
+            if (end >= s.size()) {
+                s.replace(p, std::string::npos, "\"<redacted>\"");  // truncated read: drop the rest
+                break;
+            }
+            s.replace(p, end - p + 1, "\"<redacted>\"");
+        }
+    }
+    return s;
 }
 
 const char *durability_name(Durability d) {

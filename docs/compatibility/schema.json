@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wnk-compat/1",
+  "title": "webos-native-app-kit compatibility records",
+  "description": "Hardware observations only: one record per device + feature observation. Host and firmware-inventory results belong in docs/MILESTONES.md. tools/check-compat.py enforces this schema plus cross-references (record.device must be a key of devices) and a ban on device identifiers (serial numbers, nduid, MAC addresses).",
+  "type": "object",
+  "required": ["schema", "notes", "devices", "records"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "enum": ["wnk-compat/1"]},
+    "notes": {"type": "string"},
+    "devices": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z0-9]+(-[a-z0-9.]+)+$"},
+      "additionalProperties": {
+        "type": "object",
+        "required": ["model", "webos_release", "firmware"],
+        "additionalProperties": false,
+        "properties": {
+          "model": {"type": "string", "minLength": 1},
+          "year": {"type": "integer"},
+          "board": {"type": "string"},
+          "machine_name": {"type": "string"},
+          "hardware_id": {"type": "string"},
+          "webos_release": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$"},
+          "webos_codename": {"type": "string"},
+          "firmware": {"type": "string", "pattern": "^[0-9]{2}\\.[0-9]{2}\\.[0-9]{2}(\\.[0-9]{2})?$"},
+          "kernel": {"type": "string"},
+          "ram": {"type": "string"},
+          "gpu": {"type": "string"},
+          "install_mode": {"type": "string"}
+        }
+      }
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["device", "feature", "result", "date", "method", "evidence", "limitations"],
+        "additionalProperties": false,
+        "properties": {
+          "device": {"type": "string"},
+          "feature": {"type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9][a-z0-9_.-]*)+$"},
+          "result": {"type": "string", "enum": ["supported", "unsupported", "unknown"]},
+          "date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+          "method": {"type": "string", "minLength": 1},
+          "evidence": {"type": "string", "minLength": 1},
+          "limitations": {"type": "string"}
+        }
+      }
+    }
+  }
+}

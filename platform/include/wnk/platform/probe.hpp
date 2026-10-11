@@ -16,8 +16,13 @@ using Facts = std::vector<std::pair<std::string, std::string>>;
 
 // Process and OS facts: uid/gid/euid/groups, HOME, APPID, LD_LIBRARY_PATH, cwd, exe path,
 // /etc/starfish-release, /etc/prefs/properties/machineName, /var/run/nyx/os_info.json and
-// device_info.json (first 512 bytes each, if readable), kernel release.
+// device_info.json (first 512 bytes each, if readable; identifiers redacted), kernel release.
 Facts collect_system_facts();
+
+// Replaces the string values of identifying keys in a flat JSON text with "<redacted>": serial_number,
+// nduid, wifi_addr, wired_addr, bt_addr, device_id. nyx device_info.json carries the first four
+// (seen on an OLED65C1PTB, webOS 6.5.3); logs must not.
+std::string redact_identifiers(const std::string &json_text);
 
 enum class Durability { Durable, Volatile, Unknown };
 const char *durability_name(Durability d);

@@ -22,7 +22,9 @@
 #include <thread>
 #include <vector>
 
+#include <dlfcn.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace wnk::app {
@@ -252,6 +254,8 @@ class Shell final : public Context {
     const std::string &runtime_dir() override { return runtime_; }
     State state() const override { return lifecycle_.state(); }
     const diagnostics::FrameMetrics &frame_metrics() const override { return metrics_; }
+    diagnostics::Capabilities &capabilities() override { return caps_; }
+    const diagnostics::DeviceInfo &device() const override { return device_; }
     void quit(const char *reason) override {
         if (!quit_requested_) WNK_LOGI(kCat, "quit requested: %s", reason);
         quit_requested_ = true;
@@ -262,6 +266,10 @@ class Shell final : public Context {
         lifecycle_.set_listener([this](const Lifecycle::Transition &t) {
             WNK_LOGI("lifecycle", "%s -> %s (%s)", state_name(t.from), state_name(t.to), event_name(t.event));
             diagnostics::set_crash_state(state_name(t.to));
+            if (t.to == State::Suspended) {
+                note_capability("lifecycle.background", diagnostics::Support::Supported,
+                                std::string("background event received (") + event_name(t.event) + ")");
+            }
             if (delegate_ && ui_) delegate_->on_lifecycle(*this, t);
         });
         lifecycle_.dispatch(Event::Start, SDL_GetTicks());
@@ -273,6 +281,8 @@ class Shell final : public Context {
 
  private:
     void setup_crash_record() {
+        device_ = diagnostics::DeviceInfo::detect(platform::kIsWebOS);
+        WNK_LOGI("device", "%s", device_.summary().c_str());
         if (runtime_.empty()) {
             WNK_LOGW("crash", "no runtime directory: crash records disabled");
             return;
@@ -294,8 +304,10 @@ class Shell final : public Context {
         if (diagnostics::install_crash_handler(cc, &err)) {
             WNK_LOGI("crash", "handler installed: %s, version %s, build id %s", path.c_str(),
                      cc.version.empty() ? "?" : cc.version.c_str(), cc.build_id.empty() ? "?" : cc.build_id.c_str());
+            caps_.set("diagnostics.crash_record", diagnostics::Support::Supported, path);
         } else {
             WNK_LOGW("crash", "handler not installed: %s", err.c_str());
+            caps_.set("diagnostics.crash_record", diagnostics::Support::Unsupported, err);
         }
         crash_test_ = crash_test_kind(launch_.params_json);
         if (!crash_test_.empty()) WNK_LOGW("crash", "crash test requested: %s after 180 frames", crash_test_.c_str());
@@ -364,11 +376,73 @@ class Shell final : public Context {
             image_source_ = std::make_unique<ui::ServiceImageSource>(*images_, *textures_);
             ui_->set_image_source(image_source_.get());
         }
+        probe_capabilities(mode, gpu);
         delegate_ = factory();
         if (!delegate_) return fail("no delegate");
         delegate_->on_start(*this);
         lifecycle_.dispatch(Event::Started, SDL_GetTicks());
         return 0;
+    }
+
+    // Facts the running app can establish itself. Everything else stays Unknown until seen.
+    void probe_capabilities(const SDL_DisplayMode &mode, const render::GpuInfo &gpu) {
+        using diagnostics::Support;
+        caps_.set("display.gles2", Support::Supported, gpu.renderer + " / " + gpu.version);
+        caps_.set("display.fragment_highp", gpu.fragment_highp ? Support::Supported : Support::Unsupported, "");
+        caps_.set("display.max_texture_size", Support::Supported, std::to_string(gpu.max_texture_size));
+        caps_.set("display.mode", Support::Supported,
+                  std::to_string(mode.w) + "x" + std::to_string(mode.h) + " @" + std::to_string(mode.refresh_rate) + " Hz");
+        // SDL-webOS extensions, looked up at runtime so another SDL build still links and runs.
+        using PanelFn = SDL_bool (*)(int *, int *);
+        using RateFn = SDL_bool (*)(int *);
+        auto panel = reinterpret_cast<PanelFn>(dlsym(RTLD_DEFAULT, "SDL_webOSGetPanelResolution"));
+        auto rate = reinterpret_cast<RateFn>(dlsym(RTLD_DEFAULT, "SDL_webOSGetRefreshRate"));
+        int pw = 0, ph = 0, hz = 0;
+        if (panel != nullptr && panel(&pw, &ph) == SDL_TRUE) {
+            caps_.set("display.panel", Support::Supported, std::to_string(pw) + "x" + std::to_string(ph));
+        } else {
+            caps_.set("display.panel", Support::Unknown, panel == nullptr ? "SDL_webOSGetPanelResolution not exported" : "query failed");
+        }
+        if (rate != nullptr && rate(&hz) == SDL_TRUE) {
+            caps_.set("display.refresh_rate", Support::Supported, std::to_string(hz) + " Hz");
+        } else {
+            caps_.set("display.refresh_rate", Support::Unknown, rate == nullptr ? "SDL_webOSGetRefreshRate not exported" : "query failed");
+        }
+        if (config_.storage) {
+            caps_.set("storage.kv", store_ ? Support::Supported : Support::Unsupported, store_ ? store_->backend_name() : "open failed");
+        } else {
+            caps_.set("storage.kv", Support::Unknown, "not requested by the app", "not-probed");
+        }
+        if (config_.http) {
+            caps_.set("net.http", http_ ? Support::Supported : Support::Unsupported, http_ ? http_->describe() : "libcurl unavailable");
+        } else {
+            caps_.set("net.http", Support::Unknown, "not requested by the app", "not-probed");
+        }
+        caps_.set("images.decode", config_.images ? Support::Supported : Support::Unknown, config_.images ? "PNG, JPEG" : "not requested");
+        caps_.set("input.pointer", Support::Unknown, "no pointer event yet");
+        caps_.set("lifecycle.background", Support::Unknown, "no background event yet");
+        caps_.set("media.playback", Support::Unknown, "not implemented in the kit yet", "not-implemented");
+        for (const auto &c : caps_.all()) {
+            WNK_LOGI("caps", "%-26s %-11s %s", c.id.c_str(), diagnostics::support_name(c.support), c.detail.c_str());
+        }
+        write_capabilities();
+    }
+
+    void note_capability(const char *id, diagnostics::Support s, const std::string &detail) {
+        if (caps_.set(id, s, detail)) {
+            WNK_LOGI("caps", "%s now %s: %s", id, diagnostics::support_name(s), detail.c_str());
+        }
+    }
+
+    void write_capabilities() {
+        if (runtime_.empty()) return;
+        const std::string path = runtime_ + "/capabilities.json";
+        {
+            std::ofstream out(path, std::ios::trunc);
+            if (!out) return;
+            out << diagnostics::capability_report_json(device_, caps_);
+        }
+        chmod(path.c_str(), 0640);  // readable by Dev Manager (app group), like the event log
     }
 
     int fail(const char *what) {
@@ -551,6 +625,10 @@ class Shell final : public Context {
         using T = input::PointerEvent::Type;
         if (!lifecycle_.renders()) return;
         const bool hit = ui_->handle_pointer(p);
+        if (p.type == T::Move || p.type == T::Press || p.type == T::Wheel) {
+            note_capability("input.pointer", diagnostics::Support::Supported,
+                            std::string("first event: ") + input::pointer_type_name(p.type));
+        }
         if (p.type == T::Move) {
             // Motion arrives at the remote's report rate: log at most once a second.
             if (p.time_ms - last_move_log_ < 1000 && moves_logged_ > 0) return;
@@ -603,6 +681,7 @@ class Shell final : public Context {
             WNK_LOGI("shutdown", "%s: %.1f ms", name, ms_since(t));
         };
         if (delegate_ && ui_) run_step("delegate on_stop", [this] { delegate_->on_stop(*this); });
+        run_step("write capabilities", [this] { write_capabilities(); });
         if (dispatcher_) run_step("close dispatcher", [this] { dispatcher_->close(); });
         if (pool_) {
             run_step("join workers", [this] {
@@ -642,6 +721,8 @@ class Shell final : public Context {
     input::ActionMapper mapper_;
     Lifecycle lifecycle_;
     diagnostics::FrameMetrics metrics_;
+    diagnostics::Capabilities caps_;
+    diagnostics::DeviceInfo device_;
     bool sdl_ = false;
     bool quit_requested_ = false;
     SDL_Window *window_ = nullptr;

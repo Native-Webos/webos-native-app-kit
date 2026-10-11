@@ -20,6 +20,7 @@
 
 #include "wnk/app/lifecycle.hpp"
 #include "wnk/async/async.hpp"
+#include "wnk/diagnostics/capabilities.hpp"
 #include "wnk/diagnostics/metrics.hpp"
 #include "wnk/image/image.hpp"
 #include "wnk/input/input.hpp"
@@ -69,6 +70,9 @@ class Context {
     virtual const std::string &runtime_dir() = 0;            // empty if unavailable
     virtual State state() const = 0;
     virtual const diagnostics::FrameMetrics &frame_metrics() const = 0;
+    // What this device was found to support, and which device it is (no identifiers).
+    virtual diagnostics::Capabilities &capabilities() = 0;
+    virtual const diagnostics::DeviceInfo &device() const = 0;
     // Ends the main loop after the current iteration; the shutdown sequence then runs.
     virtual void quit(const char *reason) = 0;
 };

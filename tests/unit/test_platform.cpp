@@ -118,3 +118,18 @@ TEST("storage candidates end with the volatile runtime dir") {
     CHECK_EQ(c.back().directory, std::string("/tmp/rt"));
     CHECK(c.back().durability == Durability::Volatile);
 }
+
+TEST("probe: identifiers in nyx device_info are redacted, other fields kept") {
+    const std::string in =
+        "{ \"board_type\": \"O20_DVB\", \"nduid\": \"0f37f0840956\", \"product_id\": \"OLED65C1PTB\",\n"
+        "  \"serial_number\" : \"111INPT7A032\", \"wifi_addr\":\"4C:BC:E9:00:00:0E\", \"wired_addr\": \"B0:37:95:00:00:7D\" }";
+    const std::string out = wnk::platform::redact_identifiers(in);
+    CHECK(out.find("0f37f0840956") == std::string::npos);
+    CHECK(out.find("111INPT7A032") == std::string::npos);
+    CHECK(out.find("4C:BC") == std::string::npos);
+    CHECK(out.find("B0:37") == std::string::npos);
+    CHECK(out.find("\"product_id\": \"OLED65C1PTB\"") != std::string::npos);
+    CHECK(out.find("\"serial_number\" : \"<redacted>\"") != std::string::npos);
+    // A read cut off inside a value (read_small truncates) still hides it.
+    CHECK(wnk::platform::redact_identifiers("{\"nduid\": \"0f37f08").find("0f37") == std::string::npos);
+}

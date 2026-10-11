@@ -16,7 +16,9 @@
 //
 // Launch params (ares-launch --params):
 //   {"uri": "file:///path/to/file.mkv"}   play that file straight away; http(s):// URIs stream through
-//                                          the kit's HTTP client (byte ranges make them seekable)
+//                                          the kit's HTTP client (byte ranges make them seekable); .mpd
+//                                          and .m3u8 URIs play as DASH/HLS (AdaptiveSource)
+//   {"lang": "de"}                         preferred audio language for DASH/HLS
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"backend": "ndl"}                     force NDL (default: Starfish when the codecs suit it, else NDL)
 //   {"backend": "starfish"}                force LG's Starfish pipeline
@@ -24,12 +26,13 @@
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"ac3": false}                         never re-encode audio to AC-3 (audio Starfish cannot take
 //                                          then sends the file to NDL, as before)
-//   {"autoplay": 0}                        open that bundled clip at start (scripted runs: 0..5)
+//   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..9)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
 #include "wnk/media/auto_backend.hpp"
 #include "wnk/media/controller.hpp"
 #include "wnk/media/device_caps.hpp"
+#include "wnk/media/adaptive_source.hpp"
 #include "wnk/media/ffmpeg_source.hpp"
 #include "wnk/media/ndl_backend.hpp"
 #include "wnk/media/pacing_backend.hpp"
@@ -60,6 +63,11 @@ struct Clip {
     std::string title, detail, file;
 };
 
+// Public test streams (network), listed under the bundled clips.
+struct Stream {
+    std::string title, detail, url;
+};
+
 struct Settings {
     std::string clips_dir;
     PtsUnit pts_unit = PtsUnit::Microseconds;
@@ -67,6 +75,8 @@ struct Settings {
     std::string backend = "auto";  // auto (Starfish when the codecs suit it, else NDL), starfish, ndl
     int lead_ms = 1000;
     bool ac3 = true;  // re-encode audio Starfish cannot take to AC-3
+    std::string language;  // preferred audio language for DASH/HLS
+    DeviceMediaCaps device;
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
 };
 
@@ -95,6 +105,21 @@ std::unique_ptr<MediaBackend> make_backend(const Settings &s) {
     WNK_LOGW(kCat, "no media backend (Starfish: %s; NDL: %s): no picture", why_sf.empty() ? "not wanted" : why_sf.c_str(),
              why_ndl.empty() ? "not wanted" : why_ndl.c_str());
     return std::make_unique<PacingBackend>();
+}
+
+// DASH/HLS manifests go to the AdaptiveSource, everything else to FfmpegSource. Renditions are
+// chosen from what the TV reports: HEVC first when it has HEVC, 2160p only on a UHD panel.
+std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &uri) {
+    if (AdaptiveSource::handles(uri)) {
+        AdaptiveSourceOptions o;
+        o.http = s.http;
+        o.ac3_encode = s.ac3;
+        o.language = s.language;
+        if (s.device.hevc == false) o.video_codecs = {CodecId::H264};
+        if (s.device.uhd_panel != true) o.max_height = 1080;
+        return std::make_unique<AdaptiveSource>(o);
+    }
+    return std::make_unique<FfmpegSource>(FfmpegSourceOptions{s.http, {}, s.ac3});
 }
 
 // ---- player screen ---------------------------------------------------------------------------------
@@ -131,8 +156,7 @@ class PlayerScreen : public Screen {
         backend_name_ = backend->name();
         PlaybackOptions po;
         po.max_lead_us = static_cast<int64_t>(s.lead_ms) * 1000;
-        controller_ = std::make_unique<PlaybackController>(std::make_unique<FfmpegSource>(FfmpegSourceOptions{s.http, {}, s.ac3}),
-                                                           std::move(backend), ctx.dispatcher(), po);
+        controller_ = std::make_unique<PlaybackController>(make_source(s, uri_), std::move(backend), ctx.dispatcher(), po);
         controller_->set_state_callback([this](PlayState from, PlayState to, const PlaybackSnapshot &snap) {
             WNK_LOGI(kCat, "player state %s -> %s%s%s", play_state_name(from), play_state_name(to),
                      snap.error.empty() ? "" : ": ", snap.error.c_str());
@@ -315,23 +339,31 @@ class PlayerScreen : public Screen {
 
 class HomeScreen : public Screen {
  public:
-    HomeScreen(wnk::app::Context &ctx, Navigator &nav, Settings settings, const std::vector<Clip> &clips)
+    HomeScreen(wnk::app::Context &ctx, Navigator &nav, Settings settings, const std::vector<Clip> &clips,
+               const std::vector<Stream> &streams)
         : Screen("home"), ctx_(ctx), nav_(nav), settings_(std::move(settings)) {
         name = "home";
-        auto &col = add<Column>(28);
-        col.set_padding({140, 110, 140, 80});
+        auto &col = add<Column>(20);
+        col.set_padding({140, 70, 140, 50});
         col.add<Label>("Native playback", TextRole::Title);
-        col.add<Label>("Hardware decoding through LG's NDL, demuxed by the kit's bundled FFmpeg. Each clip flashes "
+        col.add<Label>("Hardware decoding through LG's Starfish or NDL, demuxed by the kit's bundled FFmpeg. Each clip flashes "
                        "white and beeps at the start of every second: the flash and the beep should coincide.")
             .set_muted(true)
             .set_max_lines(3);
-        auto &list = col.add<Column>(18);
-        list.set_padding({0, 20, 0, 0});
+        auto &list = col.add<Column>(10);
+        list.set_padding({0, 10, 0, 0});
         for (size_t i = 0; i < clips.size(); ++i) {
             const Clip c = clips[i];
             auto &b = list.add<Button>(c.title + "   —   " + c.detail, [this, c](Ui &ui) { play(ui, "file://" + settings_.clips_dir + "/" + c.file, c.title); });
             b.set_align(Align::Start, Align::Start);
             b.name = "clip" + std::to_string(i);
+        }
+        list.add<Label>("Streams (DASH / HLS over the network)", TextRole::Small).set_muted(true).set_padding({0, 12, 0, 0});
+        for (size_t i = 0; i < streams.size(); ++i) {
+            const Stream st = streams[i];
+            auto &b = list.add<Button>(st.title + "   —   " + st.detail, [this, st](Ui &ui) { play(ui, st.url, st.title); });
+            b.set_align(Align::Start, Align::Start);
+            b.name = "stream" + std::to_string(i);
         }
         std::string info = std::string("Decoder: ") + (wnk::platform::kIsWebOS ? "NDL DirectMedia v2" : "none on the host (pacing backend, no picture)");
         info += "   ·   PTS unit: ";
@@ -370,10 +402,14 @@ class Player : public wnk::app::Delegate {
                 s.lead_ms = std::clamp(params["leadMs"].get<int>(), 100, 5000);
             }
             if (params.contains("ac3") && params["ac3"].is_boolean()) s.ac3 = params["ac3"];
+            if (params.contains("lang") && params["lang"].is_string()) s.language = params["lang"];
             if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
             if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
         }
-        if (wnk::platform::kIsWebOS) WNK_LOGI(kCat, "device media: %s", DeviceMediaCaps::detect().summary().c_str());
+        if (wnk::platform::kIsWebOS) {
+            s.device = DeviceMediaCaps::detect();
+            WNK_LOGI(kCat, "device media: %s", s.device.summary().c_str());
+        }
         WNK_LOGI(kCat, "%s; PTS unit %s; NDL pause/seek by %s; lead %d ms", FfmpegSource::version().c_str(),
                  s.pts_unit == PtsUnit::Milliseconds ? "ms" : "us", s.ndl_reload ? "reload" : "hold/splice", s.lead_ms);
         const std::vector<Clip> clips = {
@@ -384,13 +420,26 @@ class Player : public wnk::app::Delegate {
             {"H.264 + FLAC 7.1", "MKV · 1080p25 · 96 kHz 7.1 FLAC re-encoded to AC-3 5.1 48 kHz (Starfish)", "h264-flac-7.1.mkv"},
             {"H.264 + Opus", "MKV · 1080p25 · Opus re-encoded to AC-3 (Starfish) or as is (NDL)", "h264-opus.mkv"},
         };
+        const std::vector<Stream> streams = {
+            {"Dolby Vision + Atmos", "DASH · Dolby test stream · HEVC up to 2160p59.94 · E-AC-3 JOC",
+             "https://media.developer.dolby.com/DolbyVision_Atmos/profile8.1_DASH/p8.1.mpd"},
+            {"Apple bipbop", "HLS · fMP4 byte ranges · H.264/HEVC · separate AAC, AC-3, E-AC-3",
+             "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/master.m3u8"},
+            {"Mux test stream", "HLS · MPEG-TS · H.264 + AAC muxed", "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"},
+            {"Shaka angel-one", "DASH · SegmentBase (sidx) · H.264 · AAC in six languages",
+             "https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd"},
+        };
         Ui &ui = ctx.ui();
         nav_ = &ui.root().add<Navigator>();
-        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(ctx, *nav_, s, clips)));
+        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(ctx, *nav_, s, clips, streams)));
+        const int n_clips = static_cast<int>(clips.size());
         if (!direct_uri.empty()) {
             home_->play(ui, direct_uri, direct_uri.substr(direct_uri.find_last_of('/') + 1));
-        } else if (autoplay >= 0 && autoplay < static_cast<int>(clips.size())) {
+        } else if (autoplay >= 0 && autoplay < n_clips) {
             home_->play(ui, "file://" + s.clips_dir + "/" + clips[autoplay].file, clips[autoplay].title);
+        } else if (autoplay >= n_clips && autoplay < n_clips + static_cast<int>(streams.size())) {
+            const Stream &st = streams[static_cast<size_t>(autoplay - n_clips)];
+            home_->play(ui, st.url, st.title);
         }
     }
 

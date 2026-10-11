@@ -50,9 +50,16 @@ bool make_presentations() {
                  "-hls_segment_filename 'f_%v_%03d.m4s' -master_pl_name f.m3u8 "
                  "-var_stream_map 'v:0,agroup:aud a:0,agroup:aud,language:de,name:Deutsch' 'f_%v.m3u8'",
         };
+        // Video keyframes every 3 s against 2 s audio segments: the renditions' boundaries differ.
+        std::string misaligned = in + "-f hls -hls_time 2 -hls_playlist_type vod -hls_segment_type fmp4 "
+                                      "-hls_fmp4_init_filename 'g_init_%v.mp4' -hls_segment_filename 'g_%v_%03d.m4s' "
+                                      "-master_pl_name g.m3u8 -var_stream_map 'v:0,agroup:aud a:0,agroup:aud' 'g_%v.m3u8'";
+        const size_t gop = misaligned.find("-g 25 -keyint_min 25");
+        misaligned.replace(gop, 20, "-g 75 -keyint_min 75");
         for (const std::string &c : cmds) {
             if (std::system(c.c_str()) != 0) return false;
         }
+        if (std::system(misaligned.c_str()) != 0) return false;
         return true;
     }();
     return ok;
@@ -210,6 +217,25 @@ TEST("adaptive source: seeks land on the segment start in DASH, HLS-TS and HLS-f
     check_seek("f.m3u8", 9000000, 8000000);
 }
 
+TEST("adaptive source: audio reopened at an earlier segment boundary is trimmed to the video's keyframe") {
+    SKIP_UNLESS_READY();
+    AdaptiveSource s(options());
+    std::string err;
+    REQUIRE(s.open(url("g.m3u8"), &err));
+    StreamFormat f;
+    REQUIRE(s.select(0, 1, starfish_like(), &f, &err));
+    REQUIRE(s.audio_rendition() >= 0);
+    REQUIRE(s.seek(4500000, &err));
+    const Drained d = drain(s);
+    REQUIRE(!d.video.empty() && !d.audio.empty());
+    CHECK(d.video[0].key);
+    CHECK(d.video[0].pts_us >= 3000000 && d.video[0].pts_us < 3050000);  // the 3 s keyframe
+    // The audio segment starts at 2 s; what ends before the keyframe is not delivered.
+    CHECK(d.audio[0].pts_us + d.audio[0].duration_us > d.video[0].pts_us);
+    CHECK(d.audio[0].pts_us <= d.video[0].pts_us);
+    CHECK(d.ordered);
+}
+
 TEST("adaptive source: missing and malformed manifests, live, interrupt") {
     SKIP_UNLESS_READY();
     std::string err;
@@ -235,6 +261,16 @@ TEST("adaptive source: missing and malformed manifests, live, interrupt") {
     CHECK(s.read(&p, &err) == MediaSource::Read::Interrupted);
     s.reset_interrupt();
     CHECK(s.read(&p, &err) == MediaSource::Read::Packet);
+
+    // A seek cut short by the next command (held arrow keys) succeeds; reading on reopens there.
+    s.interrupt();
+    CHECK(s.seek(4000000, &err));
+    CHECK(s.read(&p, &err) == MediaSource::Read::Interrupted);
+    s.reset_interrupt();
+    const Drained d = drain(s);
+    REQUIRE(!d.video.empty());
+    CHECK(d.video[0].key);
+    CHECK_EQ(d.video[0].pts_us, int64_t{4000000});
 }
 
 TEST("adaptive source: the video rendition follows codec preference, size and bandwidth limits") {

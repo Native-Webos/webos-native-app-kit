@@ -638,6 +638,15 @@
       "method": "Example D 0.7.0 AutoBackend: FfmpegSource decodes audio Starfish cannot take and re-encodes it with FFmpeg's native AC-3 encoder (libswresample for rate and layout); bundled clips H.264 + 7.1 FLAC 96 kHz (MKV) and H.264 + Opus stereo 48 kHz (MKV)",
       "evidence": "both chose Starfish (Load codec audio AC3, ADEC allocated); FLAC became AC-3 5.1 48 kHz 640 kb/s, Opus AC-3 stereo 256 kb/s; beep in sync with the flash on both (owner); encoder thread CPU 90 ms per s of audio (9.0% of a core) for 7.1 96 kHz, 15.3 ms (1.5%) for stereo 48 kHz",
       "limitations": "CPU excludes decoding; TrueHD, DTS and PCM tracks verified on the host only; ~5 ms AC-3 encoder delay not compensated"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "media.adaptive_streaming",
+      "result": "supported",
+      "method": "Example D 0.8.0 AdaptiveSource on Starfish: Dolby DV/Atmos test DASH (SegmentTemplate, 2160p59.94 HEVC + E-AC-3 JOC), Apple bipbop HEVC HLS (fMP4 byte ranges, separate AAC), Mux x36xhzz HLS (MPEG-TS, muxed AAC), Shaka angel-one DASH (SegmentBase/sidx, AAC); single and held Left/Right seeks, Back",
+      "evidence": "Dolby: 3840x2160 HEVC with E-AC-3 passed through, first frame ~1.7 s after launch, position advancing 1 s/s with ~60 video frames fed per second over 40 s, no retries; picture and sound in sync on all four, seeks resume on all four (owner)",
+      "limitations": "plain HEVC rendition only: the TV showed HDR, not Dolby Vision (DV not declared to Starfish yet); fixed bitrate (no switching); held-key seeks needed a fix (interrupted reopen) and Apple's misaligned audio/video segments needed audio trimmed to the video keyframe, both in this version"
     }
   ]
 }

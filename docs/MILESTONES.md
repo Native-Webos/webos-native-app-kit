@@ -304,6 +304,14 @@ rates other than 32/44.1/48 kHz), so `AutoBackend` keeps such files on Starfish;
 rule (as is, else PCM, else AC-3). Example D 0.7 (`{"ac3": false}` turns it off). On the TV: 7.1 FLAC
 96 kHz and Opus in sync; the encoder costs 9% of a core for 7.1 96 kHz, 1.5% for stereo.
 
+DASH and HLS (2026-10-12): `manifest.hpp` parses MPDs (SegmentTemplate/Timeline, SegmentList, SegmentBase +
+sidx) and HLS playlists into one rendition model; `net::SegmentReader` reads init + segments as one stream;
+`AdaptiveSource` picks a video rendition by codec, size and bandwidth, offers the audio renditions as
+tracks, runs one FfmpegSource per rendition and merges them by decode time; seeks reopen at the segment.
+Example D 0.8 lists four public streams. On the TV: Dolby 4K HEVC + E-AC-3, Apple HLS fMP4, Mux HLS-TS
+and Shaka DASH play and seek in sync. Open: Dolby Vision/Atmos declared to Starfish, bitrate switching,
+live, subtitles from manifests, WebM renditions, DRM (refused).
+
 Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from
 com.webos.service.config (the decoder table is not visible in the Developer Mode jail).
 

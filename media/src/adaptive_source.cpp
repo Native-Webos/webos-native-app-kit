@@ -132,12 +132,17 @@ struct AdaptiveSource::Impl {
         std::unique_ptr<FfmpegSource> src;
         std::optional<Packet> pending;
         bool ended = false;
+        // Packets ending before this are dropped: an audio lane reopened at its own segment boundary
+        // may start well before the video's keyframe (segment lengths differ, and HLS EXTINF values
+        // are only approximate).
+        int64_t drop_before_us = kNoTime;
     };
     std::mutex lanes_mutex;  // guards the lane pointers against interrupt() from other threads
     std::vector<Lane> lanes;
     BackendCaps caps;
     int sel_audio = -1;        // rendition of a separate audio lane
     int64_t position_us = 0;   // where the next select() starts
+    bool reopen = false;       // a seek was interrupted while reopening: reopen at position_us first
     int64_t hls_origin_us = kNoTime;
     std::atomic<bool> interrupted{false};
     std::mutex fetch_mutex;
@@ -293,10 +298,32 @@ struct AdaptiveSource::Impl {
         }
     }
 
+    // Next non-subtitle packet of a lane (subtitles in segments are not offered yet).
+    MediaSource::Read pull(Lane &lane, std::string *error) {
+        while (!lane.pending && !lane.ended) {
+            Packet p;
+            const MediaSource::Read r = lane.src->read(&p, error);
+            if (r == MediaSource::Read::EndOfStream) {
+                lane.ended = true;
+            } else if (r != MediaSource::Read::Packet) {
+                return r;
+            } else if (p.type != TrackType::Subtitle) {
+                if (lane.drop_before_us != kNoTime && p.pts_us != kNoTime &&
+                    p.pts_us + std::max<int64_t>(p.duration_us, 1) <= lane.drop_before_us) {
+                    continue;
+                }
+                lane.drop_before_us = kNoTime;
+                lane.pending = std::move(p);
+            }
+        }
+        return MediaSource::Read::Packet;
+    }
+
     // (Re)opens the selected renditions at `t`.
     bool open_at(int64_t t, StreamFormat *out, std::string *error) {
         if (lanes.empty()) return false;
         int64_t main_start = t;
+        int64_t main_first_pts = kNoTime;
         for (size_t i = 0; i < lanes.size(); ++i) {
             Lane &lane = lanes[i];
             const auto &segs = pres.renditions[static_cast<size_t>(lane.rendition)].segments;
@@ -308,6 +335,17 @@ struct AdaptiveSource::Impl {
             if (out != nullptr) {
                 if (fmt.video) out->video = fmt.video;
                 if (fmt.audio) out->audio = fmt.audio;
+            }
+            if (i == 0 && lane.want_video) {
+                // Where the video really starts (its keyframe), for trimming the other lanes.
+                const MediaSource::Read r = pull(lane, error);
+                if (r != MediaSource::Read::Packet) {
+                    if (r == MediaSource::Read::Interrupted) *error = "interrupted";
+                    return false;
+                }
+                if (lane.pending) main_first_pts = lane.pending->pts_us;
+            } else if (i > 0) {
+                lane.drop_before_us = main_first_pts;
             }
         }
         position_us = t;
@@ -508,18 +546,17 @@ MediaSource::Read AdaptiveSource::read(Packet *out, std::string *error) {
     Impl &m = *impl_;
     for (;;) {
         if (m.interrupted) return Read::Interrupted;
-        for (Impl::Lane &lane : m.lanes) {
-            while (!lane.pending && !lane.ended) {
-                Packet p;
-                const Read r = lane.src->read(&p, error);
-                if (r == Read::EndOfStream) {
-                    lane.ended = true;
-                } else if (r != Read::Packet) {
-                    return r;
-                } else if (p.type != TrackType::Subtitle) {  // subtitles in segments are not offered yet
-                    lane.pending = std::move(p);
-                }
+        if (m.reopen) {
+            StreamFormat ignored;
+            if (!m.open_at(m.position_us, &ignored, error)) {
+                if (m.interrupted) return Read::Interrupted;
+                return Read::Error;
             }
+            m.reopen = false;
+        }
+        for (Impl::Lane &lane : m.lanes) {
+            const Read r = m.pull(lane, error);
+            if (r != Read::Packet) return r;
         }
         // Interleave by decode time, so B-frame video does not hold back audio.
         auto when = [](const Packet &p) { return p.dts_us != kNoTime ? p.dts_us : p.pts_us; };
@@ -546,7 +583,15 @@ bool AdaptiveSource::seek(int64_t pts_us, std::string *error) {
         return true;
     }
     StreamFormat ignored;
-    if (!m.open_at(t, &ignored, error)) return false;
+    m.reopen = false;
+    if (!m.open_at(t, &ignored, error)) {
+        if (!m.interrupted) return false;
+        // Interrupted by a newer command (a held arrow key seeks again): like a demuxer seek that
+        // was cut short, this one succeeds and read() reports the interrupt; reading on without a
+        // new seek reopens here.
+        m.position_us = t;
+        m.reopen = true;
+    }
     return true;
 }
 

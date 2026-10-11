@@ -4,7 +4,7 @@
 ld-linux.so.3
 libc.so.6
 libm.so.6
-libdl.so.2              # dlopen of libNDL_directmedia.so.1 (never DT_NEEDED) and the shell's optional libraries
+libdl.so.2              # dlopen of libNDL_directmedia.so.1 and libcurl.so.4 (never DT_NEEDED), the shell's optional libraries
 libpthread.so.0         # playback thread, worker pool
 librt.so.1
 libGLESv2.so.2          # firmware GLES2

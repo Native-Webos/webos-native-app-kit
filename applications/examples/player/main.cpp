@@ -13,7 +13,8 @@
 // releases the decoder.
 //
 // Launch params (ares-launch --params):
-//   {"uri": "file:///path/to/file.mkv"}   play that file straight away
+//   {"uri": "file:///path/to/file.mkv"}   play that file straight away; http(s):// URIs stream through
+//                                          the kit's HTTP client (byte ranges make them seekable)
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"autoplay": 0}                        open the first clip at start (used by scripted runs: 0..2)
 #include "wnk/app/app.hpp"
@@ -49,6 +50,7 @@ struct Clip {
 struct Settings {
     std::string clips_dir;
     PtsUnit pts_unit = PtsUnit::Microseconds;
+    std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
 };
 
 std::string clock_text(int64_t us) {
@@ -97,8 +99,8 @@ class PlayerScreen : public Screen {
 
         auto backend = make_backend(s);
         backend_name_ = backend->name();
-        controller_ = std::make_unique<PlaybackController>(std::make_unique<FfmpegSource>(), std::move(backend),
-                                                           ctx.dispatcher());
+        controller_ = std::make_unique<PlaybackController>(std::make_unique<FfmpegSource>(FfmpegSourceOptions{s.http, {}}),
+                                                           std::move(backend), ctx.dispatcher());
         controller_->set_state_callback([this](PlayState from, PlayState to, const PlaybackSnapshot &snap) {
             WNK_LOGI(kCat, "player state %s -> %s%s%s", play_state_name(from), play_state_name(to),
                      snap.error.empty() ? "" : ": ", snap.error.c_str());
@@ -264,6 +266,9 @@ class Player : public wnk::app::Delegate {
     void on_start(wnk::app::Context &ctx) override {
         Settings s;
         s.clips_dir = ctx.launch().app_dir + "/clips";
+        std::string curl_error;
+        s.http = wnk::net::make_curl_transport({}, &curl_error);
+        if (!s.http) WNK_LOGW(kCat, "no HTTP streaming: %s", curl_error.c_str());
         std::string direct_uri;
         int autoplay = -1;
         const auto params = nlohmann::json::parse(ctx.launch().params_json.empty() ? "{}" : ctx.launch().params_json, nullptr, false);

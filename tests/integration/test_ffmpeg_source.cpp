@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // FfmpegSource against real files, generated at test time by the system ffmpeg CLI (test signal
-// video + sine audio). The suite reports SKIP if the CLI or one of its encoders is missing.
+// video + sine audio). The suite reports SKIP if the CLI or one of its encoders is missing. Run
+// through tests/integration/http_server.py it also plays the clips over HTTP (local server only).
 #define WNK_TEST_MAIN
 #include "wnk_test.hpp"
 
@@ -269,6 +270,106 @@ TEST("ffmpeg source: unsupported video codec and missing files are refused with 
     Packet p;
     CHECK(s.read(&p, &err) == MediaSource::Read::Interrupted);
     s.reset_interrupt();
+    CHECK(s.read(&p, &err) == MediaSource::Read::Packet);
+}
+
+// ---- over HTTP (needs http_server.py: WNK_TEST_HTTP_BASE and WNK_TEST_FILES_DIR) ------------------
+
+namespace {
+
+std::string env(const char *name) {
+    const char *v = std::getenv(name);
+    return v != nullptr ? v : "";
+}
+
+// Copies a generated clip into the served directory; returns its URL.
+std::string serve_clip(const std::string &name) {
+    std::system(("cp '" + dir() + "/" + name + "' '" + env("WNK_TEST_FILES_DIR") + "/'").c_str());
+    return env("WNK_TEST_HTTP_BASE") + "/files/" + name;
+}
+
+FfmpegSourceOptions with_http() {
+    FfmpegSourceOptions o;
+    o.http = wnk::net::make_curl_transport();
+    o.http_stream.buffer_bytes = 128u << 10;  // smaller than the clips, so reads cross refills
+    o.http_stream.keep_behind_bytes = 32u << 10;
+    return o;
+}
+
+#define SKIP_WITHOUT_SERVER()                                            \
+    if (env("WNK_TEST_HTTP_BASE").empty() || env("WNK_TEST_FILES_DIR").empty()) { \
+        std::printf("  SKIP: run through http_server.py\n");             \
+        return;                                                          \
+    }
+
+}  // namespace
+
+TEST("ffmpeg source over HTTP: same packets as the local file, for MP4 (index first or last), MKV and TS") {
+    SKIP_WITHOUT_FFMPEG();
+    SKIP_WITHOUT_SERVER();
+    REQUIRE(make_clip("h264_aac.mp4", "libx264", "aac"));
+    REQUIRE(make_clip("h264_aac_faststart.mp4", "libx264", "aac", "-movflags +faststart"));
+    REQUIRE(make_clip("hevc_ac3.mkv", "libx265 -x265-params log-level=error", "ac3", "-ac 6"));
+    REQUIRE(make_clip("h264_mp3.ts", "libx264", "libmp3lame"));
+    for (const char *name : {"h264_aac.mp4", "h264_aac_faststart.mp4", "hevc_ac3.mkv", "h264_mp3.ts"}) {
+        std::printf("  %s\n", name);
+        FfmpegSource local, remote(with_http());
+        std::string err;
+        REQUIRE(local.open(dir() + "/" + name, &err));
+        const std::string url = serve_clip(name);
+        REQUIRE(remote.open(url + "?token=abc", &err));  // the query must not hide the extension
+        CHECK(remote.info().seekable);
+        CHECK_EQ(remote.info().container, local.info().container);
+        CHECK(std::abs(remote.info().duration_us - local.info().duration_us) < 1000);
+        StreamFormat lf, rf;
+        const int v = local.info().best(TrackType::Video)->index, a = local.info().best(TrackType::Audio)->index;
+        REQUIRE(local.select(v, a, ndl_like_caps(), &lf, &err));
+        REQUIRE(remote.select(v, a, ndl_like_caps(), &rf, &err));
+        Drained l = drain(local), r = drain(remote);
+        CHECK_EQ(r.video.size(), l.video.size());
+        CHECK_EQ(r.audio.size(), l.audio.size());
+        bool same = r.video.size() == l.video.size();
+        for (size_t i = 0; same && i < l.video.size(); ++i) {
+            same = l.video[i].data == r.video[i].data && l.video[i].pts_us == r.video[i].pts_us;
+        }
+        CHECK(same);
+        // Seek back into the middle: lands on the same keyframe as the local file.
+        if (std::string(name).find(".ts") != std::string::npos) continue;  // no index: seeks by timestamp
+        REQUIRE(local.seek(1200000, &err));
+        REQUIRE(remote.seek(1200000, &err));
+        Packet lp, rp;
+        do {
+            REQUIRE(local.read(&lp, &err) == MediaSource::Read::Packet);
+        } while (lp.type != TrackType::Video);
+        do {
+            REQUIRE(remote.read(&rp, &err) == MediaSource::Read::Packet);
+        } while (rp.type != TrackType::Video);
+        CHECK(rp.key);
+        CHECK_EQ(rp.pts_us, lp.pts_us);
+    }
+}
+
+TEST("ffmpeg source over HTTP: missing resource reports the status; no transport; interrupt") {
+    SKIP_WITHOUT_FFMPEG();
+    SKIP_WITHOUT_SERVER();
+    std::string err;
+    FfmpegSource s(with_http());
+    CHECK(!s.open(env("WNK_TEST_HTTP_BASE") + "/files/nope.mkv", &err));
+    CHECK_EQ(err, std::string("HTTP 404"));
+    FfmpegSource bare;
+    CHECK(!bare.open(env("WNK_TEST_HTTP_BASE") + "/files/nope.mkv", &err));
+    CHECK(err.find("no HTTP transport") != std::string::npos);
+
+    REQUIRE(make_clip("h264_aac.mp4", "libx264", "aac"));
+    const std::string url = serve_clip("h264_aac.mp4");
+    s.interrupt();
+    CHECK(!s.open(url, &err));
+    CHECK_EQ(err, std::string("interrupted"));
+    s.reset_interrupt();
+    REQUIRE(s.open(url, &err));
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, -1, ndl_like_caps(), &f, &err));
+    Packet p;
     CHECK(s.read(&p, &err) == MediaSource::Read::Packet);
 }
 

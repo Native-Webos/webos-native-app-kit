@@ -13,19 +13,27 @@
 //   time   microseconds from the start of the media (the container's start_time is subtracted, so
 //          MPEG-TS clips start at 0 like the others).
 //
-// Network URIs are not opened here yet: the bundled FFmpeg has only the file protocol, and HTTP will
-// come through the kit's own HTTP client.
+// http:// and https:// URIs are read through the kit's HTTP client (wnk/net/http_stream.hpp: range
+// requests, read-ahead, reconnects) behind a custom AVIOContext, so TLS and certificate rules are the
+// kit's and the bundled FFmpeg needs no network protocols. That needs FfmpegSourceOptions::http; the
+// stream is seekable when the server honours byte ranges.
 #pragma once
 
 #include "wnk/media/media.hpp"
+#include "wnk/net/http_stream.hpp"
 
 #include <memory>
 
 namespace wnk::media {
 
+struct FfmpegSourceOptions {
+    std::shared_ptr<net::HttpTransport> http;  // for http(s) URIs; without it they fail to open
+    net::HttpStreamOptions http_stream;
+};
+
 class FfmpegSource : public MediaSource {
  public:
-    FfmpegSource();
+    explicit FfmpegSource(FfmpegSourceOptions options = {});
     ~FfmpegSource() override;
 
     bool open(const std::string &uri, std::string *error) override;

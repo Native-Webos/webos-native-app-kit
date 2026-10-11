@@ -158,6 +158,12 @@ if (TARGET wnk_media_ffmpeg)
     target_include_directories(test_ffmpeg_source PRIVATE unit)
     target_link_libraries(test_ffmpeg_source PRIVATE wnk_media_ffmpeg)
     add_test(NAME integration.ffmpeg_source COMMAND test_ffmpeg_source)
+    if (Python3_FOUND)
+        # The same suite with a local HTTP server: clips streamed through HttpStream + custom AVIO.
+        add_test(NAME integration.ffmpeg_source_http
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                        "$<TARGET_FILE:test_ffmpeg_source>")
+    endif ()
 endif ()
 
 # End-to-end runs of Example D on the host: bundled FFmpeg demuxing real clips into the controller,

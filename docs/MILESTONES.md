@@ -261,7 +261,25 @@ On hardware (OLED65C1PTB, webOS 6.5.3, 2026-10-11; `docs/compatibility/records.j
 and H.264+MP3 1080p25 play with picture and sound in sync once feeding is paced; NDL offers no backpressure;
 MP3 passthrough is silent (so MP3 is decoded); the PTS unit could not be told apart by eye.
 
-Open: HTTP sources (custom AVIO over the kit's HTTP client), subtitles, HDR metadata, VP9/AV1 on the TV,
+HTTP sources (2026-10-11): `net::HttpStream` reads one resource with byte-range requests through the kit's
+`HttpTransport` (new streaming entry point: body to a sink, stall timeout instead of a transfer timeout, no
+content encoding), keeps a read-ahead ring buffer filled by its own download thread, serves short seeks from
+the buffer and reconnects at the first missing byte after drops, 502/503/504 or truncation (a reconnect must
+get 206 for that offset and the same size). `FfmpegSource` opens http(s) URIs through it with a custom
+AVIOContext, so the bundled FFmpeg stays without network protocols and TLS follows the kit's rules. Example D
+plays `{"uri": "http://..."}` (0.2.0).
+
+| Item | Evidence |
+|---|---|
+| 12 HttpStream tests on a scripted range server (seek, refill, drops, retries, no ranges, interrupt); 30 ThreadSanitizer runs | `[TEST]` |
+| curl streaming against the local server: chunks, receiver stop, ranges, resume after drops, HTTPS | `[TEST]` |
+| FFmpeg over HTTP = local file, packet for packet (MP4 index first and last, MKV, TS); 404 reported as "HTTP 404" | `[TEST]` |
+| ARM build: player 0.2.0 loads on 5.3.1–11.2.0, no new DT_NEEDED (libcurl stays dlopened) | `[BUILD]` `[FWDB]` |
+
+Found on the way: MPEG-TS seeks land on the timestamp, not a keyframe (no index), so video is dropped until
+the next keyframe.
+
+Open: subtitles, HDR metadata, VP9/AV1 on the TV,
 Opus passthrough, resampling for sample rates NDL lacks, video-only files (reported to need an audio prime),
 a decoder-side position, real pause via Starfish, and a PTS-unit test that does not feed in real time.
 

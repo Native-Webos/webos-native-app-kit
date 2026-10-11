@@ -51,6 +51,7 @@ add_subdirectory(image)
 add_subdirectory(ui)
 add_subdirectory(diagnostics)
 add_subdirectory(app)
+add_subdirectory(media)
 
 if (WNK_BUILD_EXAMPLES)
     include(WebOSPackage)

@@ -163,6 +163,7 @@ class PacedBackend : public MediaBackend {
         std::atomic<bool> first_was_key{false};
         std::atomic<bool> pause_drains{false};
         std::atomic<bool> seek_splices{false};
+        std::atomic<bool> splice_settled{true};  // what splice_settled() answers
         std::atomic<int64_t> last_video_pts{kNoTime};
         const std::atomic<int> *source_video_read = nullptr;
         std::atomic<int> video_read_at_first_feed{-1};
@@ -185,6 +186,7 @@ class PacedBackend : public MediaBackend {
         return c;
     }
     void set_event_callback(EventFn fn) override { events_ = std::move(fn); }
+    bool splice_settled() const override { return log_->splice_settled; }
     bool load(const StreamFormat &f, std::string *) override {
         ++log_->loads;
         if (f.audio) {
@@ -618,6 +620,18 @@ TEST("ndl splice: PTS after a seek continue just after the highest one fed, forw
     CHECK_EQ(s.map(7000000), int64_t{7000000});
 }
 
+TEST("splice: new content keeps a decode lead over the decoder's clock when little was buffered") {
+    PtsSplice s(200000, kNoTime, 600000);
+    s.map(0);
+    s.map(30450000);  // fed up to 30.45 s
+    s.splice();
+    // The clock (30.385 s) has nearly caught up: max_out + gap would be only 0.265 s ahead of it.
+    CHECK_EQ(s.map(30000000, 30385000), int64_t{30985000});
+    s.splice();
+    // With plenty buffered (clock far behind) the usual max_out + gap applies.
+    CHECK_EQ(s.map(50000000, 20000000), int64_t{30985000 + 200000});
+}
+
 TEST("splice: a start offset moves the first packet after a reset to the start of the decoder's timeline") {
     PtsSplice s(200000, 100000);
     CHECK_EQ(s.map(54066667), int64_t{100000});     // a live stream joined 54 s in
@@ -642,6 +656,33 @@ TEST("splice: new content never lands behind the decoder's clock (a burst of see
     s.splice();
     CHECK_EQ(s.map(5000000, 100000), int64_t{2940000});    // a floor behind what was fed changes nothing
     CHECK_EQ(s.unmap(2740000), int64_t{30040000});
+}
+
+TEST("controller: a seek waits until the last splice has settled (at most 2.5 s); later ones coalesce") {
+    PlaybackOptions o;
+    o.max_lead_us = 600000;
+    o.seek_settle = std::chrono::milliseconds(0);
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/true, o);
+    r.log->seek_splices = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.log->splice_settled = false;           // the first seek's content is not on screen yet
+    r.pc->seek(20000000);
+    REQUIRE(r.wait([&] { return r.log->flushes.load() == 1; }));
+    r.pc->seek(30000000);                     // stacked: held
+    r.pc->seek(40000000);                     // coalesces with it
+    std::this_thread::sleep_for(300ms);
+    CHECK_EQ(r.log->flushes.load(), 1);
+    r.log->splice_settled = true;             // now it may splice again
+    REQUIRE(r.wait([&] { return r.log->flushes.load() == 2; }));
+    REQUIRE(r.wait([&] { return r.log->first_video_after_flush.load() >= 40000000; }));
+    CHECK(r.log->first_video_after_flush.load() < 41000000);  // the newest target, once
+    r.log->splice_settled = false;            // never settles: the cap lets the seek through
+    r.pc->seek(10000000);
+    std::this_thread::sleep_for(500ms);
+    CHECK_EQ(r.log->flushes.load(), 2);
+    REQUIRE(r.wait([&] { return r.log->flushes.load() == 3; }, 4000ms));
+    r.pc->stop();
 }
 
 TEST("controller: a splicing backend's new content waits for the backlog; the shown position holds at the target") {

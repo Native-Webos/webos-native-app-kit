@@ -20,8 +20,12 @@ class PtsSplice {
     // `start_us`: where the first packet after a reset lands (kNoTime: where it is). Starfish's clock
     // starts at 0 and holds the first frame until it reaches its PTS, so a live stream joined 54 s
     // into its window must be moved to the start of the decoder's timeline.
-    explicit PtsSplice(int64_t gap_us, int64_t start_us = kNoTime) : gap_us_(gap_us), start_us_(start_us) {}
-    void reset() { *this = PtsSplice(gap_us_, start_us_); }
+    // `clock_lead_us`: how far ahead of the decoder's clock new content must land at least, so the
+    // decoder has time to take the keyframe. Frames that arrive late stay late on Starfish: a splice
+    // 0.27 s ahead of its clock dropped every frame for the rest of playback (OLED65C1PTB).
+    explicit PtsSplice(int64_t gap_us, int64_t start_us = kNoTime, int64_t clock_lead_us = 0)
+        : gap_us_(gap_us), start_us_(start_us), clock_lead_us_(clock_lead_us) {}
+    void reset() { *this = PtsSplice(gap_us_, start_us_, clock_lead_us_); }
     void splice() { pending_ = true; }
     // kNoTime stays kNoTime. `clock_out_us`: where the decoder's clock is now, if known (only used
     // for the first packet after a splice).
@@ -36,6 +40,7 @@ class PtsSplice {
     };
     int64_t gap_us_;
     int64_t start_us_;
+    int64_t clock_lead_us_;
     int64_t shift_us_ = 0;
     bool pending_ = false;
     int64_t max_out_us_ = kNoTime;

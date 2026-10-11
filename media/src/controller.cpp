@@ -72,6 +72,8 @@ struct PlaybackController::Core {
     void post(Command c);
     void run();
     bool apply(const Command &c);  // false: leave the loop
+    bool hold_seek(const Command &c) const;  // mutex_ held
+    bool has_commands() const;
     void do_open(const std::string &uri);
     void do_seek(int64_t pts_us);
     void do_pause(bool release);
@@ -116,6 +118,7 @@ struct PlaybackController::Core {
     bool priming_ = false;
     bool eos_sent_ = false;  // backend told everything is fed
     std::atomic<int64_t> last_seek_request_ms_{0};  // steady clock, from seek() on the main thread
+    int64_t last_seek_applied_ms_ = 0;               // playback thread
     SubtitleStore subtitles_;
     std::atomic<int> subtitle_track_{-1};
     std::atomic<bool> eos_seen_{false};
@@ -346,7 +349,7 @@ void PlaybackController::Core::run() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!feeding_) cv_.wait(lock, [this] { return !commands_.empty(); });
-            if (!commands_.empty()) {
+            if (!commands_.empty() && !hold_seek(commands_.front())) {
                 cmd = std::move(commands_.front());
                 commands_.pop_front();
             }
@@ -355,8 +358,34 @@ void PlaybackController::Core::run() {
             if (!apply(*cmd)) return;
             continue;
         }
+        if (has_commands()) {
+            // A seek held until the last one's content is on screen (hold_seek): keep the decoder fed
+            // with what is queued meanwhile, without spinning on a source that has been interrupted.
+            feed_one();
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, std::chrono::milliseconds(20));
+            continue;
+        }
         feed_one();
     }
+}
+
+// Splicing backends: a seek waits until the previous seek's content has reached the screen (at most
+// 2.5 s), as PlxNative does: a second splice stacked on one still pending left Starfish dropping
+// every frame for the rest of playback. Seeks requested meanwhile coalesce into the newest. Called
+// with mutex_ held.
+bool PlaybackController::Core::hold_seek(const Command &c) const {
+    if (c.cmd != Cmd::Seek || commands_.size() > 1 || !loaded_ || !backend_->caps().seek_splices) return false;  // Stop & co. go through
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    if (now_ms - last_seek_applied_ms_ > 2500) return false;
+    return !backend_->splice_settled();
+}
+
+bool PlaybackController::Core::has_commands() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !commands_.empty();
 }
 
 bool PlaybackController::Core::apply(const Command &c) {
@@ -384,7 +413,12 @@ bool PlaybackController::Core::apply(const Command &c) {
                 loaded_ = false;
             }
             break;
-        case Cmd::Seek: do_seek(c.pts_us); break;
+        case Cmd::Seek:
+            last_seek_applied_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count();
+            do_seek(c.pts_us);
+            break;
         case Cmd::Stop:
             feeding_ = false;
             clear_lanes();

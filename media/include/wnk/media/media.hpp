@@ -213,6 +213,10 @@ class MediaBackend {
     virtual bool pause(bool) { return false; }
     // Everything has been fed (until the next flush or load): let the decoder drain.
     virtual void end_of_stream() {}
+    // Splicing backends: whether the decoder has reached the content fed after the last splice.
+    // Another splice before that stacks one seek on another, which Starfish does not survive (every
+    // frame dropped for the rest of playback, OLED65C1PTB), so the controller holds the next seek.
+    virtual bool splice_settled() const { return true; }
 };
 
 }  // namespace wnk::media

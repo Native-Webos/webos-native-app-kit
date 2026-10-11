@@ -35,6 +35,7 @@ class AutoBackend : public MediaBackend {
     int64_t position_us() const override { return active().position_us(); }
     bool pause(bool paused) override { return active().pause(paused); }
     void end_of_stream() override { active().end_of_stream(); }
+    bool splice_settled() const override { return active().splice_settled(); }
 
     // Whether `b` can be given this media's tracks (exposed for tests and logs).
     static bool takes(const MediaBackend &b, const TrackInfo *video, const TrackInfo *audio, std::string *why);

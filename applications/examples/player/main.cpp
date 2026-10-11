@@ -19,6 +19,8 @@
 //                                          the kit's HTTP client (byte ranges make them seekable); .mpd
 //                                          and .m3u8 URIs play as DASH/HLS (AdaptiveSource)
 //   {"lang": "de"}                         preferred audio language for DASH/HLS
+//   {"seeks": "15:+10,17:+10"}             scripted relative seeks (seconds after the player opens:
+//                                          seconds to seek), for reproducing seek bugs without a remote
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"backend": "ndl"}                     force NDL (default: Starfish when the codecs suit it, else NDL)
 //   {"backend": "starfish"}                force LG's Starfish pipeline
@@ -76,6 +78,7 @@ struct Settings {
     int lead_ms = 1000;
     bool ac3 = true;  // re-encode audio Starfish cannot take to AC-3
     std::string language;  // preferred audio language for DASH/HLS
+    std::vector<std::pair<double, double>> seeks;  // scripted: (seconds after opening, relative seek)
     DeviceMediaCaps device;
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
 };
@@ -132,7 +135,7 @@ std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &u
 class PlayerScreen : public Screen {
  public:
     PlayerScreen(wnk::app::Context &ctx, const Settings &s, std::string uri, std::string title)
-        : Screen(title), ctx_(ctx), uri_(std::move(uri)) {
+        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks) {
         name = "player";
         // Under the controls: subtitles over the whole picture.
         subs_view_ = &add<SubtitleView>();
@@ -253,6 +256,12 @@ class PlayerScreen : public Screen {
 
     void update(Ui &ui, float) override {
         if (!controller_) return;
+        if (opened_ms_ < 0) opened_ms_ = ui.now_ms();
+        while (next_seek_ < seeks_.size() && ui.now_ms() - opened_ms_ >= seeks_[next_seek_].first * 1000) {
+            WNK_LOGI(kCat, "scripted seek %+.0f s", seeks_[next_seek_].second);
+            controller_->seek_relative(static_cast<int64_t>(seeks_[next_seek_].second * 1e6));
+            ++next_seek_;
+        }
         const PlaybackSnapshot s = controller_->snapshot();
         const bool busy = s.state == PlayState::Opening || s.state == PlayState::Seeking;
         spinner_->set_visible(busy);
@@ -343,6 +352,9 @@ class PlayerScreen : public Screen {
     bool opened_ = false;
     double last_input_ms_ = 0;
     double last_log_ms_ = 0;
+    double opened_ms_ = -1;
+    std::vector<std::pair<double, double>> seeks_;
+    size_t next_seek_ = 0;
 };
 
 // ---- clip list -------------------------------------------------------------------------------------
@@ -413,6 +425,17 @@ class Player : public wnk::app::Delegate {
             }
             if (params.contains("ac3") && params["ac3"].is_boolean()) s.ac3 = params["ac3"];
             if (params.contains("lang") && params["lang"].is_string()) s.language = params["lang"];
+            if (params.contains("seeks") && params["seeks"].is_string()) {
+                const std::string list = params["seeks"];
+                size_t i = 0;
+                while (i < list.size()) {
+                    double at = 0, by = 0;
+                    if (std::sscanf(list.c_str() + i, "%lf:%lf", &at, &by) == 2) s.seeks.emplace_back(at, by);
+                    const size_t comma = list.find(',', i);
+                    if (comma == std::string::npos) break;
+                    i = comma + 1;
+                }
+            }
             if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
             if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
         }

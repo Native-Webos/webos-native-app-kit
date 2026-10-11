@@ -81,6 +81,7 @@ class StarfishBackend : public MediaBackend {
     void set_area(const Rect &pixels) override;  // main thread
     int64_t position_us() const override;
     bool pause(bool paused) override;
+    bool splice_settled() const override;
     void end_of_stream() override;
 
     // Pure helpers, exposed for tests.
@@ -111,9 +112,12 @@ class StarfishBackend : public MediaBackend {
     std::atomic<bool> seen_frame_{false};
     std::atomic<int64_t> presented_out_us_{kNoTime};
     std::atomic<int64_t> presented_at_ns_{0};  // steady clock when presented_out_us_ arrived
+    std::atomic<int64_t> splice_first_out_us_{kNoTime};  // where the content after the last splice starts
     // Where the decoder's clock is now: the last presented PTS plus the time since (when playing).
     int64_t clock_out_us(bool paused) const;
-    std::atomic<int> events_logged_{0};
+    std::atomic<long long> dropped_{0}, displayed_{0}, frameready_{0};  // since the last summary
+    std::atomic<int64_t> summary_at_ns_{0};
+    bool log_next_video_ = false;  // guarded by mutex_
     std::mutex events_mutex_;
     EventFn events_;
     std::mutex unload_mutex_;

@@ -23,6 +23,8 @@ namespace {
 constexpr const char *kCat = "starfish";
 constexpr size_t kObjectSize = 65536;  // generous: the class's real size is not published
 constexpr int64_t kSpliceGapUs = 200000;
+// New content after a seek lands at least this far ahead of the decoder's clock (see PtsSplice).
+constexpr int64_t kSpliceClockLeadUs = 600000;
 
 using EventCb = void (*)(int type, long long num, const char *str, void *ctx);
 
@@ -212,7 +214,7 @@ bool StarfishBackend::available(std::string *why) {
 // of the first video frame): the pipeline's clock starts at 0 (a live stream joined at 54 s held its
 // first frame, measured on the OLED65C1PTB).
 StarfishBackend::StarfishBackend(StarfishOptions options)
-    : options_(std::move(options)), splice_(kSpliceGapUs, 100000) {
+    : options_(std::move(options)), splice_(kSpliceGapUs, 100000, kSpliceClockLeadUs) {
     if (options_.app_id.empty()) {
         const char *id = std::getenv("APPID");
         options_.app_id = id != nullptr ? id : "";
@@ -258,14 +260,25 @@ void StarfishBackend::on_event(int type, long long num, const char *str) {
     }
     if (type == 0) {  // FRAMEREADY: the presented PTS, in ns
         presented_out_us_ = num / 1000;
-        presented_at_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                               std::chrono::steady_clock::now().time_since_epoch()).count();
+        const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count();
+        presented_at_ns_ = now;
+        ++frameready_;
+        // Every 5 s: the sink's own counters and how many FRAMEREADY callbacks came.
+        if (now - summary_at_ns_.load() >= 5000000000LL) {
+            summary_at_ns_ = now;
+            WNK_LOGI(kCat, "sink: %lld displayed, %lld dropped, %lld FRAMEREADY in 5 s (presented pts %.3f s)",
+                     displayed_.exchange(0), dropped_.exchange(0), frameready_.exchange(0), num / 1e9);
+        }
         if (!seen_frame_.exchange(true)) WNK_LOGI(kCat, "first frame presented (pts %lld ns)", num);
         return;
     }
     const std::string s = str != nullptr ? str : "";
-    // Type 49 (a frame counter, 5 Hz) only at first; everything else is rare and worth having.
-    if (type != 49 || events_logged_.fetch_add(1) < 40) {
+    // 48/49 are the sink's dropped and displayed frames per 200 ms poll (webOS 5+ numbering,
+    // PlxNative's decompile): summed into one line every 5 s; everything else is rare and logged.
+    if (type == 48 || type == 49) {
+        (type == 48 ? dropped_ : displayed_) += num;
+    } else {
         WNK_LOGI(kCat, "event type=%d num=%lld %s", type, num, s.substr(0, 300).c_str());
     }
     EventFn fn;
@@ -348,6 +361,7 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         paused_ = false;
         splice_.reset();
         replayed_ = false;
+        splice_first_out_us_ = kNoTime;
     }
     // Placing the window is an SDL call: the main thread does it through set_area().
     return true;
@@ -364,7 +378,22 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
         if (p.type == TrackType::Audio && !format_.audio) return Feed::Accepted;
         object = object_;
         // After a seek the new content goes after the decoder's clock if it ran past what was fed.
-        out_us = splice_.map(p.pts_us, clock_out_us(paused_));
+        const int64_t before = splice_.shift_us();
+        const int64_t clock = clock_out_us(paused_);
+        out_us = splice_.map(p.pts_us, clock);
+        if (splice_.shift_us() != before) {
+            log_next_video_ = true;
+            splice_first_out_us_ = out_us;
+        }
+        if (p.type == TrackType::Video && log_next_video_ && out_us != kNoTime) {
+            log_next_video_ = false;
+            WNK_LOGI(kCat, "splice: first video pts %.3f s -> %.3f s%s", p.pts_us / 1e6, out_us / 1e6, p.key ? " (key)" : "");
+        }
+        if (splice_.shift_us() != before) {
+            WNK_LOGI(kCat, "splice: %s pts %.3f s -> %.3f s (decoder clock %.3f s, shift %+.3f s)",
+                     p.type == TrackType::Video ? "video" : "audio", p.pts_us / 1e6, out_us / 1e6,
+                     clock == kNoTime ? -1.0 : clock / 1e6, splice_.shift_us() / 1e6);
+        }
         // Play issued before loadCompleted is queued; it is issued once more after it (samples README).
         if (!paused_ && !play_issued_) play = play_issued_ = true;
         if (!paused_ && load_completed_ && !replayed_) replay = replayed_ = true;
@@ -383,6 +412,16 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
     if (std::strstr(s, "Ok") != nullptr) return Feed::Accepted;
     WNK_LOGW(kCat, "Feed reply \"%s\"", s);
     return Feed::Error;
+}
+
+bool StarfishBackend::splice_settled() const {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!loaded_ || paused_) return true;  // a stopped clock cannot run past anything
+    }
+    const int64_t first = splice_first_out_us_.load();
+    const int64_t at = presented_out_us_.load();
+    return first == kNoTime || (at != kNoTime && at >= first - 50000);
 }
 
 int64_t StarfishBackend::clock_out_us(bool paused) const {

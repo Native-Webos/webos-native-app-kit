@@ -124,9 +124,13 @@ int64_t PtsSplice::map(int64_t pts_us, int64_t clock_out_us) {
     if (pending_ || segments_.empty()) {
         if (segments_.empty() && !pending_ && start_us_ != kNoTime) shift_us_ = start_us_ - pts_us;
         if (pending_) {
-            int64_t after = max_out_us_;
-            if (clock_out_us != kNoTime && (after == kNoTime || clock_out_us > after)) after = clock_out_us;
-            shift_us_ = (after == kNoTime ? pts_us : after + gap_us_) - pts_us;
+            // After what was fed (plus the gap), and at least clock_lead ahead of the decoder.
+            int64_t at = max_out_us_ == kNoTime ? kNoTime : max_out_us_ + gap_us_;
+            if (clock_out_us != kNoTime) {
+                const int64_t floor = clock_out_us + std::max(gap_us_, clock_lead_us_);
+                if (at == kNoTime || floor > at) at = floor;
+            }
+            shift_us_ = (at == kNoTime ? pts_us : at) - pts_us;
         }
         pending_ = false;
         segments_.push_back({pts_us + shift_us_, shift_us_});

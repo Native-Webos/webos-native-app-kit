@@ -220,7 +220,8 @@ struct AdaptiveSource::Impl {
     int64_t clock_offset_us = 0;           // server time minus this device's (DASH UTCTiming)
     std::map<long, int64_t> window_first;  // rendition → number of its oldest segment still listed
     std::thread refresh_thread;
-    std::mutex refresh_mutex;
+    std::mutex refresh_mutex;              // also guards live_subtitles
+    std::vector<long> live_subtitles;      // subtitle renditions the refresher merges too (DASH)
     std::condition_variable refresh_cv;
     std::vector<int> ladder;        // video renditions that can replace each other, bandwidth ascending
     std::vector<int> active_ladder; // the part of it the backend can follow (select)
@@ -317,7 +318,7 @@ struct AdaptiveSource::Impl {
             if (!parse_hls_media(body, final_url, &fresh, &live, error)) return false;
             std::lock_guard<std::mutex> lock(pres_mutex);
             if (live) {
-                pres.live = true;
+                if (!pres.live) pres.live = true;  // written once: other threads read it
                 align_to_video(&r - pres.renditions.data(), fresh);
             }
             r.segments = std::move(fresh.segments);
@@ -566,6 +567,10 @@ struct AdaptiveSource::Impl {
                     active.push_back(l.rendition);
                     if (l.next) active.push_back(l.next->rendition);
                 }
+            }
+            if (pres.format == Presentation::Format::Dash) {
+                std::lock_guard<std::mutex> lock(refresh_mutex);
+                active.insert(active.end(), live_subtitles.begin(), live_subtitles.end());
             }
             std::string error;
             bool ok = true;
@@ -879,22 +884,67 @@ struct AdaptiveSource::Impl {
         subs_cv.notify_all();
     }
 
-    // WebVTT files (HLS segments or one DASH file): fetched and parsed in order.
-    void load_vtt(const SubtitleChoice &c) {
-        Rendition &r = pres.renditions[static_cast<size_t>(c.rendition)];
-        std::string error;
-        if (!ensure_segments(r, &error, Ctx::Subtitles)) {
-            if (!subs_stop) WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
-            return;
-        }
-        const int64_t origin = hls_origin_us != kNoTime ? hls_origin_us : 0;
+    // One subtitle track being loaded: where it has got to.
+    struct SubState {
+        SubtitleChoice choice;
+        size_t next = 0;           // first segment not fetched yet
+        bool failed = false;
+        uint32_t timescale = 0;    // wvtt: from the init segment, once
         size_t cues = 0;
-        for (const MediaSegment &seg : r.segments) {
-            if (subs_stop) return;
-            std::string body;
-            if (!fetch(seg.url, &seg.range, &body, nullptr, &error, Ctx::Subtitles)) {
-                if (!subs_stop) WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
-                return;
+    };
+
+    // Fetches and parses the segments listed since the last call. False when the track gave up.
+    bool load_new(SubState &st) {
+        Rendition &r = pres.renditions[static_cast<size_t>(st.choice.rendition)];
+        std::string error, body;
+        auto fail = [&] {
+            if (!subs_stop) WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
+            st.failed = true;
+            return false;
+        };
+        const bool mp4 = st.choice.kind == SubKind::Mp4;
+        if (mp4 && st.timescale == 0) {
+            std::optional<MediaSegment> init;
+            {
+                std::lock_guard<std::mutex> lock(pres_mutex);
+                init = r.init;
+            }
+            if (!init || !fetch(init->url, &init->range, &body, nullptr, &error, Ctx::Subtitles) ||
+                !parse_wvtt_init(reinterpret_cast<const uint8_t *>(body.data()), body.size(), &st.timescale, &error)) {
+                if (error.empty()) error = "no initialisation segment";
+                return fail();
+            }
+        }
+        std::vector<MediaSegment> todo;
+        int64_t origin = 0;
+        {
+            std::lock_guard<std::mutex> lock(pres_mutex);
+            for (size_t i = st.next; i < r.segments.size(); ++i) todo.push_back(r.segments[i]);
+            origin = mp4 ? (r.time_origin_us != kNoTime ? r.time_origin_us : 0) : (hls_origin_us != kNoTime ? hls_origin_us : 0);
+        }
+        std::optional<SubtitleCue> held;  // wvtt: a cue split across fragments, joined again
+        for (const MediaSegment &seg : todo) {
+            if (subs_stop) return false;
+            if (!fetch(seg.url, &seg.range, &body, nullptr, &error, Ctx::Subtitles)) return fail();
+            ++st.next;
+            if (mp4) {
+                std::vector<SubtitleCue> got;
+                if (!parse_wvtt_fragment(reinterpret_cast<const uint8_t *>(body.data()), body.size(), st.timescale, &got,
+                                         &error)) {
+                    return fail();
+                }
+                for (SubtitleCue &cue : got) {
+                    cue.track = st.choice.track;
+                    cue.start_us -= origin;
+                    cue.end_us -= origin;
+                    if (held && held->text == cue.text && std::llabs(held->end_us - cue.start_us) <= 1000) {
+                        held->end_us = cue.end_us;
+                        continue;
+                    }
+                    if (held) push_cue(std::move(*held)), ++st.cues;
+                    held = std::move(cue);
+                }
+                continue;
             }
             WebVttFile f;
             if (!parse_webvtt(body, &f, &error)) continue;
@@ -905,57 +955,83 @@ struct AdaptiveSource::Impl {
                 offset = f.map_mpegts * 1000000 / 90000 - f.map_local_us - origin;
             }
             for (SubtitleCue &cue : f.cues) {
-                cue.track = c.track;
+                cue.track = st.choice.track;
                 cue.start_us += offset;
                 if (cue.end_us != kNoTime) cue.end_us += offset;
                 push_cue(std::move(cue));
-                ++cues;
+                ++st.cues;
             }
         }
-        WNK_LOGI(kCat, "subtitles %s (%s): %zu cues from %zu files", r.id.c_str(), r.language.c_str(), cues,
-                 r.segments.size());
+        // Live: a held cue goes out now rather than waiting for the next refresh; its continuation,
+        // if any, follows as a cue of its own.
+        if (held) push_cue(std::move(*held)), ++st.cues;
+        return true;
     }
 
-    // WebVTT in MP4 (DASH wvtt, ISO/IEC 14496-30), which FFmpeg does not read: the init segment's
-    // timescale, then each fragment's cues. A cue spanning fragments arrives once per fragment; the
-    // pieces are joined again.
-    void load_mp4(const SubtitleChoice &c) {
-        Rendition &r = pres.renditions[static_cast<size_t>(c.rendition)];
-        std::string error, body;
-        auto fail = [&] {
-            if (!subs_stop) WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
-        };
-        if (!ensure_segments(r, &error, Ctx::Subtitles)) return fail();
-        uint32_t timescale = 0;
-        if (!r.init || !fetch(r.init->url, &r.init->range, &body, nullptr, &error, Ctx::Subtitles) ||
-            !parse_wvtt_init(reinterpret_cast<const uint8_t *>(body.data()), body.size(), &timescale, &error)) {
-            if (error.empty()) error = "no initialisation segment";
-            return fail();
-        }
-        const int64_t origin = r.time_origin_us != kNoTime ? r.time_origin_us : 0;
-        std::optional<SubtitleCue> held;
-        size_t cues = 0;
-        for (const MediaSegment &seg : r.segments) {
-            if (subs_stop) return;
-            if (!fetch(seg.url, &seg.range, &body, nullptr, &error, Ctx::Subtitles)) return fail();
-            std::vector<SubtitleCue> got;
-            if (!parse_wvtt_fragment(reinterpret_cast<const uint8_t *>(body.data()), body.size(), timescale, &got, &error)) {
-                return fail();
+    // The subtitle loader: every readable track once (VOD), or (live) what each list gains as the
+    // presentation runs, from shortly before the join point.
+    void load_subtitles(std::vector<SubtitleChoice> todo, int64_t join_us) {
+        std::vector<SubState> states;
+        for (const SubtitleChoice &c : todo) {
+            Rendition &r = pres.renditions[static_cast<size_t>(c.rendition)];
+            std::string error;
+            if (!ensure_segments(r, &error, Ctx::Subtitles)) {
+                if (!subs_stop) WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
+                continue;
             }
-            for (SubtitleCue &cue : got) {
-                cue.track = c.track;
-                cue.start_us -= origin;
-                cue.end_us -= origin;
-                if (held && held->text == cue.text && std::llabs(held->end_us - cue.start_us) <= 1000) {
-                    held->end_us = cue.end_us;
-                    continue;
+            SubState st;
+            st.choice = c;
+            if (pres.live) {
+                std::lock_guard<std::mutex> lock(pres_mutex);
+                st.next = segment_at(r.segments, std::max<int64_t>(0, join_us - 10000000));
+            }
+            states.push_back(st);
+        }
+        if (pres.live) {
+            std::lock_guard<std::mutex> lock(refresh_mutex);
+            for (const SubState &st : states) live_subtitles.push_back(st.choice.rendition);  // DASH: merged by the refresher
+        }
+        for (;;) {
+            for (SubState &st : states) {
+                if (subs_stop) return;
+                if (!st.failed) load_new(st);
+            }
+            bool ended;
+            {
+                std::lock_guard<std::mutex> lock(pres_mutex);
+                ended = !pres.live || live_ended;
+            }
+            if (ended || subs_stop) break;
+            // Live: wait a segment's time, then (HLS) reload the subtitle playlists; a DASH MPD is
+            // reloaded by the refresher, which merges these renditions too.
+            int64_t period = 2000000;
+            {
+                std::lock_guard<std::mutex> lock(pres_mutex);
+                if (!states.empty()) {
+                    const Rendition &r = pres.renditions[static_cast<size_t>(states.front().choice.rendition)];
+                    if (r.target_duration_us > 0) period = r.target_duration_us;
+                    else if (!r.segments.empty() && r.segments.back().duration_us > 0) period = r.segments.back().duration_us;
                 }
-                if (held) push_cue(std::move(*held)), ++cues;
-                held = std::move(cue);
+            }
+            {
+                std::unique_lock<std::mutex> lock(subs_mutex);
+                subs_cv.wait_for(lock, std::chrono::microseconds(std::clamp<int64_t>(period, 500000, 10000000)),
+                                 [&] { return subs_stop.load(); });
+            }
+            if (subs_stop) break;
+            if (pres.format == Presentation::Format::Hls) {
+                for (const SubState &st : states) {
+                    std::string error;
+                    if (!st.failed && !refresh_rendition(st.choice.rendition, Ctx::Subtitles, &error) && !subs_stop) {
+                        WNK_LOGW(kCat, "subtitle refresh: %s", error.c_str());
+                    }
+                }
             }
         }
-        if (held) push_cue(std::move(*held)), ++cues;
-        WNK_LOGI(kCat, "subtitles %s (%s): %zu cues", r.id.c_str(), r.language.c_str(), cues);
+        for (const SubState &st : states) {
+            const Rendition &r = pres.renditions[static_cast<size_t>(st.choice.rendition)];
+            WNK_LOGI(kCat, "subtitles %s (%s): %zu cues from %zu segments", r.id.c_str(), r.language.c_str(), st.cues, st.next);
+        }
     }
 
     // Starts loading every decodable subtitle track (the default first), once per open.
@@ -977,15 +1053,8 @@ struct AdaptiveSource::Impl {
             std::lock_guard<std::mutex> lock(subs_mutex);
             subs_running = true;
         }
-        subs_thread = std::thread([this, todo] {
-            for (const SubtitleChoice &c : todo) {
-                if (subs_stop) break;
-                if (c.kind == SubKind::VttFiles) {
-                    load_vtt(c);
-                } else {
-                    load_mp4(c);
-                }
-            }
+        subs_thread = std::thread([this, todo, join = position_us] {
+            load_subtitles(todo, join);
             std::lock_guard<std::mutex> lock(subs_mutex);
             subs_running = false;
             subs_cv.notify_all();
@@ -993,7 +1062,15 @@ struct AdaptiveSource::Impl {
     }
 
     void stop_subtitles() {
-        subs_stop = true;
+        {
+            std::lock_guard<std::mutex> lock(subs_mutex);
+            subs_stop = true;
+            subs_cv.notify_all();
+        }
+        {
+            std::lock_guard<std::mutex> lock(refresh_mutex);
+            live_subtitles.clear();
+        }
         {
             std::lock_guard<std::mutex> lock(fetch_mutex);
             subs_cancel->cancel();
@@ -1096,7 +1173,7 @@ struct AdaptiveSource::Impl {
             SubtitleChoice c;
             c.rendition = static_cast<int>(i);
             c.track = static_cast<int>(info.tracks.size());
-            c.kind = pres.live ? SubKind::None : subtitle_kind_of(r);  // live subtitle lists are not followed yet
+            c.kind = subtitle_kind_of(r);
             TrackInfo t;
             t.index = c.track;
             t.type = TrackType::Subtitle;

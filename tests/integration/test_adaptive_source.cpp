@@ -494,6 +494,60 @@ TEST("adaptive source live: HLS sliding window followed by sequence number until
     CHECK(run.seconds > 1.0);  // it had to wait for the playlist to grow
 }
 
+TEST("adaptive source live: HLS WebVTT subtitles follow their growing playlist") {
+    SKIP_UNLESS_READY();
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    // s.m3u8's renditions (s_0_00N.ts, s_0N.vtt) published as a live event that grows every second.
+    write_file(d + "/ls.m3u8", "#EXTM3U\n#EXT-X-VERSION:3\n"
+                               "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",DEFAULT=YES,LANGUAGE=\"en\",URI=\"ls_vtt.m3u8\"\n"
+                               "#EXT-X-STREAM-INF:BANDWIDTH=75900,RESOLUTION=320x240,CODECS=\"avc1.64000d,mp4a.40.2\",SUBTITLES=\"subs\"\n"
+                               "ls_v.m3u8\n");
+    auto publish = [&](int count, bool end) {
+        std::string v = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n", t = v;
+        for (int i = 0; i < count; ++i) {
+            char line[64];
+            std::snprintf(line, sizeof line, "#EXTINF:2.000000,\ns_0_%03d.ts\n", i);
+            v += line;
+            std::snprintf(line, sizeof line, "#EXTINF:2.000000,\ns_0%d.vtt\n", i);
+            t += line;
+        }
+        if (end) v += "#EXT-X-ENDLIST\n", t += "#EXT-X-ENDLIST\n";
+        write_file(d + "/ls_v.m3u8", v);
+        write_file(d + "/ls_vtt.m3u8", t);
+    };
+    publish(2, false);
+    std::atomic<bool> stop{false};
+    std::thread server([&] {
+        for (int n = 3; n <= 5 && !stop; ++n) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            publish(n, n == 5);
+        }
+    });
+    AdaptiveSource s(options());
+    std::string err;
+    const bool opened = s.open(url("ls.m3u8"), &err);
+    std::vector<std::shared_ptr<const SubtitleCue>> cues;
+    MediaSource::Read end = MediaSource::Read::Error;
+    if (opened) {
+        CHECK(s.presentation().live);
+        CHECK(s.info().tracks[2].subtitle == SubtitleKind::Text);
+        StreamFormat f;
+        if (s.select(0, 1, starfish_like(), &f, &err)) {
+            Packet p;
+            while ((end = s.read(&p, &err)) == MediaSource::Read::Packet) {
+                if (p.type == TrackType::Subtitle && p.subtitle) cues.push_back(p.subtitle);
+            }
+        }
+    }
+    stop = true;
+    server.join();
+    REQUIRE(opened);
+    CHECK(end == MediaSource::Read::EndOfStream);
+    std::sort(cues.begin(), cues.end(), [](const auto &a, const auto &b) { return a->start_us < b->start_us; });
+    REQUIRE(cues.size() == 10);  // the last three files were listed only after playback had started
+    CHECK_EQ(cues[9]->text, std::string("Cue 9"));
+}
+
 TEST("adaptive source live: dynamic DASH segments become available by the clock; static ends it") {
     SKIP_UNLESS_READY();
     const std::string d = env("WNK_TEST_FILES_DIR");

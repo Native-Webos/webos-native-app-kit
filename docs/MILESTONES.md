@@ -313,7 +313,8 @@ and Shaka DASH play and seek in sync. Example D 0.9 declares single-layer Dolby 
 Atmos (immersive) to Starfish when the TV reports support: the TV shows both. Example D 0.10 switches
 video bitrate with the measured throughput (TV: Mux 720p to 1080p seamlessly); 0.11 shows the manifests'
 subtitles (HLS WebVTT, DASH text/vtt and wvtt); 0.12 plays live DASH and HLS (TV: livesim2 and Unified
-Streaming). Open: audio bitrate switching, TTML subtitles, live subtitles, startup latency,
+Streaming). Live subtitles
+follow their lists (0.13). Open: audio bitrate switching, TTML subtitles,
 live, subtitles from manifests, WebM renditions, DRM (refused).
 
 Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from

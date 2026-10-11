@@ -438,8 +438,8 @@ class Player : public wnk::app::Delegate {
             {"Mux test stream", "HLS · MPEG-TS · H.264 + AAC muxed", "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"},
             {"Shaka angel-one", "DASH · SegmentBase (sidx) · H.264 · AAC in six languages",
              "https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd"},
-            {"DASH-IF livesim2 (live)", "DASH · dynamic · 2 s segments · 1 min time-shift window",
-             "https://livesim2.dashif.org/livesim2/testpic_2s/Manifest.mpd"},
+            {"DASH-IF livesim2 (live)", "DASH · dynamic · 2 s segments · 1 min time-shift window · live WebVTT (Down)",
+             "https://livesim2.dashif.org/livesim2/timesubswvtt_en/testpic_2s/Manifest.mpd"},
             {"Unified Streaming (live)", "HLS · live · MPEG-TS · H.264 + AAC renditions",
              "https://demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8"},
         };

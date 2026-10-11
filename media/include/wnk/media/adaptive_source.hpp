@@ -39,9 +39,11 @@
 //             (HLS: every target duration) or the MPD (minimumUpdatePeriod) and appends new segments,
 //             by sequence number, to the open-ended readers of every rendition in use, including a
 //             bitrate switch in progress. HLS ENDLIST or an MPD turned static ends the stream.
-//             Subtitles of live presentations are listed but not loaded yet.
+//             Live subtitles are followed too: from shortly before the join point, each list's
+//             new segments as it grows (HLS: the loader reloads the subtitle playlists; DASH: the
+//             refresher merges the subtitle renditions with the MPD).
 //
-// Not yet: audio bitrate switching, TTML subtitles, live subtitles,
+// Not yet: audio bitrate switching, TTML subtitles,
 // encrypted renditions (refused), WebM renditions (left out), more than the first DASH Period.
 #pragma once
 

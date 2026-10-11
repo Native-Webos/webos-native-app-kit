@@ -23,6 +23,7 @@
 #include "wnk/input/sdl_input.hpp"
 #include "wnk/log.hpp"
 #include "wnk/storage/kv.hpp"
+#include "wnk/storage/secret.hpp"
 #include "wnk/async/async.hpp"
 #include "wnk/net/http.hpp"
 #include "wnk/image/image.hpp"
@@ -703,6 +704,21 @@ int main(int argc, char **argv) {
                 std::string store_error;
                 auto store = wnk::storage::open_default_store(launch.app_id, &store_error);
                 const SavedState saved = load_state(store.get(), store_error);
+                if (store) {
+                    // Secret storage probe: is keymanager3 usable from a Developer Mode app here?
+                    wnk::storage::SecretStore secrets(*store, wnk::storage::luna_keymanager3(), launch.app_id + ".secrets.v1");
+                    const auto prot = secrets.protection();
+                    std::string previous;
+                    const auto prev = secrets.get("demo.secret", &previous);
+                    const std::string value = "launch-" + std::to_string(saved.launches);
+                    const auto put = secrets.put("demo.secret", value);
+                    std::string back;
+                    const auto got = secrets.get("demo.secret", &back);
+                    WNK_LOGI("secret", "protection=%s previous=%s(%s) put=%s get=%s round_trip=%s last_error=%s",
+                             wnk::storage::protection_name(prot), wnk::storage::secret_status_name(prev), previous.c_str(),
+                             wnk::storage::secret_status_name(put), wnk::storage::secret_status_name(got),
+                             back == value ? "ok" : "MISMATCH", secrets.last_error().c_str());
+                }
                 Demo demo(*renderer, regular, bold, saved.note, saved.focus_tile);
                 wnk::async::MainDispatcher dispatcher;
                 wnk::async::WorkerPool pool(2);

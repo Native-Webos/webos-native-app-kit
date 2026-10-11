@@ -16,11 +16,11 @@ wnk_add_webos_package(
         TARGET wnk-hello
         APPID org.wnk.examples.hello
         TITLE "WNK Hello"
-        VERSION 0.6.0
+        VERSION 0.7.0
         VENDOR "webos-native-app-kit"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"
         ICON_COLOR "#1f6feb"
         EXPECTED_NEEDED "${CMAKE_CURRENT_SOURCE_DIR}/expected-needed.txt"
         EXTRA_DIRS "${WNK_FONT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/posters"
-        REQUIRED_PERMISSIONS database.operation)
+        REQUIRED_PERMISSIONS database.operation securitykey.operation)

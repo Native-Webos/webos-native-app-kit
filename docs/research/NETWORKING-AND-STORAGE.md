@@ -79,9 +79,11 @@ firmware, jail profiles or rooted installs.
 2. Atomic writes: write to `name.tmp.<pid>` in the same directory → `fsync` → `rename` → `fsync` the
    directory.
 3. Files 0600, directories 0700; logs 0640 if Dev Manager must read them (plx rationale) `[SRC]`.
-4. Secrets (tokens) go into a separate `SecretStore` interface. The first implementation is a 0600 file
-   in the durable data dir, documented as **not** hardware-backed. `securitykey.operation` appears in
-   plx's `requiredPermissions` `[SRC]`; whether a keystore Luna API is usable by native apps is `[UNK]`.
+4. Secrets (tokens) go into `storage::SecretStore`: envelopes in the key/value store (DB8; the jail has no
+   durable writable filesystem), sealed with `com.webos.service.keymanager3` AES-256-GCM when present and
+   permitted (PlxNative's protocol, `securitykey.operation`), otherwise a labelled plain envelope; never a
+   silent downgrade. **Measured** `[HW]` (OLED65C1PTB, webOS 6.5.3): keymanager3 does not exist there
+   ("Service does not exist"), so secrets are stored unprotected on that firmware.
 5. Bounded LRU disk cache with a size cap; corruption → delete and refetch; cache is always disposable.
 6. SQLite: `libsqlite3.so.0` exists on all firmware `[FWDB]`, but its SQLite version and compile
    options are `[UNK]`. Prefer a bundled amalgamation if a database is ever needed.

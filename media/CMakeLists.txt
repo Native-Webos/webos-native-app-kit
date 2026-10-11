@@ -3,3 +3,9 @@
 add_library(wnk_media STATIC src/media.cpp src/controller.cpp)
 target_include_directories(wnk_media PUBLIC include)
 target_link_libraries(wnk_media PUBLIC wnk_core wnk_async wnk_logging)
+
+# MediaSource on the bundled FFmpeg.
+if (TARGET wnk_ffmpeg)
+    add_library(wnk_media_ffmpeg STATIC src/ffmpeg_source.cpp)
+    target_link_libraries(wnk_media_ffmpeg PUBLIC wnk_media PRIVATE wnk_ffmpeg)
+endif ()

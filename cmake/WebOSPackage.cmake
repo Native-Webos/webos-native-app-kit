@@ -13,6 +13,7 @@
 #     [EXTRA_FILES <file>...]            copied next to the executable
 #     [EXTRA_DIRS <dir>...]              copied next to the executable as <basename>/ (e.g. fonts)
 #     [REQUIRED_PERMISSIONS <acg>...]    appinfo.json requiredPermissions (e.g. database.operation)
+#     [BUNDLED_LIBS <so>...]             further libraries for lib/ (e.g. WNK_FFMPEG_RUNTIME_LIBS)
 # )
 #
 # Adds, for webOS builds only:
@@ -31,7 +32,7 @@ set(WNK_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}/../tools")
 
 function(wnk_add_webos_package)
     cmake_parse_arguments(P "" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE"
-            "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS" ${ARGN})
+            "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS;BUNDLED_LIBS" ${ARGN})
     foreach (req TARGET APPID TITLE VERSION VENDOR ICON LARGE_ICON)
         if (NOT P_${req})
             message(FATAL_ERROR "wnk_add_webos_package: ${req} is required")
@@ -88,6 +89,14 @@ function(wnk_add_webos_package)
                 COMMAND "${CMAKE_COMMAND}" -E copy "${WNK_SDL_WEBOS_LIBRARY}" "${_stage}/lib/libSDL2-2.0.so.0"
                 COMMAND "${_strip}" --strip-unneeded "${_stage}/lib/libSDL2-2.0.so.0")
     endif ()
+    # Further shared libraries for lib/ (found through RPATH $ORIGIN/lib), copied under their own
+    # file name (pass the SONAME file) as real files and stripped.
+    foreach (_lib IN LISTS P_BUNDLED_LIBS)
+        get_filename_component(_lname "${_lib}" NAME)
+        list(APPEND _cmds
+                COMMAND "${CMAKE_COMMAND}" -E copy "${_lib}" "${_stage}/lib/${_lname}"
+                COMMAND "${_strip}" --strip-unneeded "${_stage}/lib/${_lname}")
+    endforeach ()
     foreach (_f IN LISTS P_EXTRA_FILES)
         list(APPEND _cmds COMMAND "${CMAKE_COMMAND}" -E copy "${_f}" "${_stage}/")
     endforeach ()

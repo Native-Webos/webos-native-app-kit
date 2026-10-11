@@ -18,7 +18,9 @@ option(WNK_BUILD_EXAMPLES "Build example applications" ON)
 if (WNK_WEBOS)
     # libstdc++ on the TV ranges from 6.0.16 to 6.0.32 (6.0.25 on webOS 6) and a bundled copy would
     # shadow the TV's own for LG's C++ libraries (docs/research/TOOLCHAIN-AND-BUILD.md, ABI rule 2).
-    add_link_options(-static-libstdc++ -static-libgcc -Wl,--build-id=sha1 -Wl,--as-needed)
+    # -tno-glibc-polyfill: the NDK gcc otherwise links libglibc_polyfills.a (a getauxval shim whose
+    # licence is unknown) whenever something references getauxval.
+    add_link_options(-static-libstdc++ -static-libgcc -Wl,--build-id=sha1 -Wl,--as-needed -tno-glibc-polyfill)
     # Debug info in the build tree for tools/symbolize-crash.py; the ipk's staged copies are stripped.
     add_compile_options(-g)
     # Bundled shared libraries live in lib/ next to the executable.
@@ -51,6 +53,7 @@ add_subdirectory(image)
 add_subdirectory(ui)
 add_subdirectory(diagnostics)
 add_subdirectory(app)
+include(Ffmpeg)
 add_subdirectory(media)
 
 if (WNK_BUILD_EXAMPLES)

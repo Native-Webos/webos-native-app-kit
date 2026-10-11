@@ -458,6 +458,24 @@
       "method": "Example A 0.7.0 (requiredPermissions database.operation, securitykey.operation), SecretStore probe via luna://com.webos.service.keymanager3/generateKey",
       "evidence": "errorCode -1 \"Service does not exist: com.webos.service.keymanager3.\"; the plain envelope in DB8 round-trips and survived a relaunch",
       "limitations": "keymanager3 is documented for webOS TV 24+; the legacy com.palm.keymanager (AES-CFB, unauthenticated) was deliberately not tried"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "net.websocket.ws",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example A 0.7.1 WebSocket probe (CURLOPT_CONNECT_ONLY + curl_easy_send/recv, libcurl/7.61.0) against tests/integration/http_server.py --serve on the LAN",
+      "evidence": "open in 68 ms; UTF-8 text echoed, a 3-fragment message reassembled, a 200000-byte binary message received, a server ping answered; 5 s of keepalive pings; client close 1000 echoed, clean",
+      "limitations": ""
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "net.websocket.wss",
+      "result": "supported",
+      "date": "2026-10-11",
+      "method": "Example A 0.7.1 probe against wss://ws.postman-echo.com/raw (public echo server)",
+      "evidence": "TLS (OpenSSL 1.1.1t, system CA store) and handshake in 1.5 s over the internet; UTF-8 text echoed",
+      "limitations": "close not exercised against that server (the probe closes after a binary reply, which it does not send)"
     }
   ]
 }

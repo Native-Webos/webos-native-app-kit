@@ -10,7 +10,7 @@ level stated. Device items stay open until run on a TV.
 | 2 | Native runtime | 🟡 built, packaged and verified offline; device run pending |
 | 3 | Rendering and input | 🟡 implemented, host-tested, and run on an OLED65C1PTB (webOS 6.5.3) |
 | 4 | UI and navigation | 🟡 implemented, host-tested and run on an OLED65C1PTB (webOS 6.5.3); Magic Remote pointer included |
-| 5 | Platform services | 🟡 storage, background work, HTTP and images done (TV-verified); secrets, WebSocket pending |
+| 5 | Platform services | ✅ storage, background work, HTTP, images, secrets and WebSocket (all run on an OLED65C1PTB, webOS 6.5.3) |
 | 6 | Lifecycle and diagnostics | 🟡 shell, lifecycle, crash record, capabilities, metrics overlay done and run on an OLED65C1PTB (webOS 6.5.3) |
 | 7 | Media foundation | 🟡 controller, FFmpeg source, NDL v2 backend, Example D; plays H.264/HEVC with sound on an OLED65C1PTB (webOS 6.5.3) |
 | 8 | Reference applications | ⬜ |
@@ -190,7 +190,11 @@ URLs; `ImageTextures` uploads through the renderer within a byte budget. 15 test
 LAN-served thumbnails load; a relaunch is served from the disk cache with zero downloads.
 Known cost: each image is its own texture, so tiles break draw-call batching (27 calls for 12 tiles);
 an image atlas would reduce this if profiling on the TV shows it matters.
-Pending: secret storage (keymanager), WebSocket, JSON helpers for apps.
+Added later the same day: `storage::SecretStore` (keymanager3 AES-256-GCM envelopes in DB8 where the firmware
+has it, a labelled plain envelope otherwise, no silent downgrade; on webOS 6.5.3 keymanager3 does not exist)
+and `net::WebSocketClient` (RFC 6455 over libcurl CONNECT_ONLY because the TV's curl 7.61 predates curl's
+WebSocket API; own I/O thread, keepalive, close handshake, reconnect with backoff that only resets after a
+stable connection; ws:// and wss:// verified on the TV). Apps use nlohmann/json directly.
 
 ## M6 — Lifecycle and diagnostics
 

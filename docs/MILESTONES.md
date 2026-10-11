@@ -298,6 +298,12 @@ the TV it plays 24 fps without the NDL judder (24 frames per second presented), 
 decoder's position and AAC passed through. Example D 0.6 chooses per file with `AutoBackend`: Starfish when it
 takes the video and audio codecs as they are, NDL otherwise (AV1, VP9, MP3/Opus/PCM audio).
 
+AC-3 re-encoding (2026-10-11): audio Starfish cannot take (MP3/MP2, Opus, Vorbis, FLAC, TrueHD, DTS, PCM) is
+decoded by the bundled FFmpeg and re-encoded with its native AC-3 encoder (libswresample for 7.1 → 5.1 and
+rates other than 32/44.1/48 kHz), so `AutoBackend` keeps such files on Starfish; `audio_path()` holds the
+rule (as is, else PCM, else AC-3). Example D 0.7 (`{"ac3": false}` turns it off). On the TV: 7.1 FLAC
+96 kHz and Opus in sync; the encoder costs 9% of a core for 7.1 96 kHz, 1.5% for stereo.
+
 Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from
 com.webos.service.config (the decoder table is not visible in the Developer Mode jail).
 

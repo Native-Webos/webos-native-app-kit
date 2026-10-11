@@ -779,6 +779,15 @@ TEST("auto backend: the preferred one when it takes video and audio as they are,
     std::string why;
     CHECK(!AutoBackend::takes(*p, &h264, &mp3, &why));
     CHECK_EQ(why, std::string("audio mp3"));
+
+    TrackInfo mp3_reencodable = mp3;  // the source can turn it into AC-3, which the preferred one takes
+    mp3_reencodable.decodable = mp3_reencodable.ac3_encodable = true;
+    a.prepare(info, &h264, &mp3_reencodable);
+    CHECK(!a.using_fallback());
+    TrackInfo mp3_decodable = mp3;  // PCM only: the fallback
+    mp3_decodable.decodable = true;
+    a.prepare(info, &h264, &mp3_decodable);
+    CHECK(a.using_fallback());
 }
 
 TEST("controller: prepare reaches the backend before tracks are selected") {

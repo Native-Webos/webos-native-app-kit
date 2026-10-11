@@ -12,8 +12,8 @@
 //
 // Every native decoder on webOS takes elementary streams, so the source delivers H.264/HEVC as
 // Annex-B access units (start codes, parameter sets before each keyframe) and audio either as codec
-// frames the backend accepts or as decoded PCM (NDL v2 accepts PCM, MP3 and Opus only; AAC and AC-3
-// are decoded in software). Timestamps are microseconds of content time throughout; a backend
+// frames the backend accepts, as decoded PCM (NDL v2 accepts PCM, MP3 and Opus only; AAC and AC-3
+// are decoded in software), or re-encoded to AC-3 for a backend that takes no PCM (Starfish). Timestamps are microseconds of content time throughout; a backend
 // converts to whatever unit its decoder wants.
 //
 // Threading: a MediaSource and a MediaBackend are driven from the controller's playback thread.
@@ -55,6 +55,8 @@ struct TrackInfo {
     int width = 0, height = 0;  // video
     double frame_rate = 0;
     int sample_rate = 0, channels = 0;  // audio
+    bool decodable = false;      // audio the source can decode to PCM
+    bool ac3_encodable = false;  // audio the source can decode and re-encode to AC-3
     SubtitleKind subtitle = SubtitleKind::None;  // subtitle tracks the source can decode
 };
 
@@ -77,9 +79,9 @@ struct VideoFormat {
     double frame_rate = 0;
 };
 struct AudioFormat {
-    CodecId codec = CodecId::Unknown;  // PcmS16 when the source decodes in software
+    CodecId codec = CodecId::Unknown;  // PcmS16 when the source decodes in software, Ac3 when it re-encodes
     int sample_rate = 0;
-    int channels = 0;                  // PCM is delivered as interleaved stereo
+    int channels = 0;                  // PCM is delivered as interleaved stereo; re-encoded AC-3 has up to 5.1
     std::vector<uint8_t> codec_header;  // e.g. the OpusHead for Opus
 };
 struct StreamFormat {
@@ -137,6 +139,13 @@ struct BackendCaps {
     bool accepts(CodecId c) const;
 };
 
+// How an audio track reaches a backend: as it is, decoded to PCM, or decoded and re-encoded to AC-3,
+// in that order of preference; None if the backend can take it in no way. The source applies this in
+// select() and AutoBackend uses it to choose a backend.
+enum class AudioPath : uint8_t { None, Passthrough, Pcm, Ac3 };
+AudioPath audio_path(const BackendCaps &caps, const TrackInfo &track);
+const char *audio_path_name(AudioPath p);
+
 class MediaSource {
  public:
     enum class Read : uint8_t { Packet, EndOfStream, Error, Interrupted };
@@ -145,8 +154,8 @@ class MediaSource {
     // Blocking. `error` gets a short reason on failure.
     virtual bool open(const std::string &uri, std::string *error) = 0;
     virtual const MediaInfo &info() const = 0;
-    // Chooses the tracks to deliver (-1: none of that type) and how: audio codecs the backend does
-    // not accept are decoded to PCM S16 stereo. Returns false if a selected track cannot be delivered.
+    // Chooses the tracks to deliver (-1: none of that type) and how: audio goes by audio_path(), so
+    // codecs the backend does not accept are decoded to PCM S16 stereo or re-encoded to AC-3. Returns false if a selected track cannot be delivered.
     // Every subtitle track the source can decode (TrackInfo::subtitle) is delivered as well, as
     // Subtitle packets carrying cues, so the viewer can switch between them without a seek.
     virtual bool select(int video_track, int audio_track, const BackendCaps &caps, StreamFormat *out,

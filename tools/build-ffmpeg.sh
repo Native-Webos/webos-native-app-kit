@@ -26,13 +26,18 @@
 #   demuxers  containers and raw streams the kit opens
 #   parsers   fill codec parameters during stream probing
 #   bsf       length-prefixed (MP4/MKV) H.264/HEVC → Annex-B, which NDL requires
-#   decoders  AAC, AC-3, E-AC-3 and MP3, decoded to PCM: PCM is the NDL v2 audio path measured to work
-#             (MP3 passed through to NDL was silent on an OLED65C1PTB, webOS 6.5.3). Video is never
-#             decoded here. Subtitles are decoded to text or bitmaps and drawn by the app (NDL has no
+#   decoders  AAC, AC-3, E-AC-3, MP3/MP2, Opus, Vorbis, FLAC, TrueHD, DTS and the common PCM
+#             flavours, decoded to PCM: PCM is the NDL v2 audio path measured to work (MP3 passed
+#             through to NDL was silent on an OLED65C1PTB, webOS 6.5.3). Video is never decoded here.
+#             Subtitles are decoded to text or bitmaps and drawn by the app (NDL has no
 #             subtitle path): SubRip, ASS/SSA, WebVTT, MP4 timed text, PGS, DVD and DVB bitmaps, the
 #             same list as PlxNative's except that configure calls the MP4 text decoder "movtext"
 #             ("mov_text" is silently ignored).
-#   demuxers  also SRT, WebVTT and ASS files for external subtitle tracks.
+#   encoder   AC-3 (FFmpeg's native float encoder, NEON-assisted on ARM): Starfish takes AAC, AC-3 and
+#             E-AC-3 only, so every other audio codec is decoded and re-encoded to AC-3 for it.
+#   swresample  on that path: resamples (AC-3 allows 32, 44.1 and 48 kHz only) and folds 7.1 into
+#             AC-3's 5.1.
+#   demuxers  also SRT, WebVTT and ASS files for external subtitle tracks, and raw FLAC.
 #   protocol  file only; network reads go through the kit's own HTTP client (custom AVIO).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -47,10 +52,12 @@ PREFIX=$(cd "$PREFIX" && pwd)
 
 COMPONENTS=(
   --disable-everything --disable-autodetect --enable-zlib
-  --enable-demuxer=matroska,mov,mpegts,h264,hevc,aac,mp3,ogg,wav,srt,webvtt,ass
-  --enable-parser=h264,hevc,aac,ac3,mpegaudio,opus,vp9,av1
+  --enable-demuxer=matroska,mov,mpegts,h264,hevc,aac,mp3,ogg,wav,flac,srt,webvtt,ass
+  --enable-parser=h264,hevc,aac,ac3,mpegaudio,opus,vorbis,flac,mlp,dca,vp9,av1
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata
-  --enable-decoder=aac,ac3,eac3,mp3float
+  --enable-decoder=aac,ac3,eac3,mp3float,mp2float,opus,vorbis,flac,truehd,mlp,dca
+  --enable-decoder=pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,pcm_bluray,pcm_dvd
+  --enable-encoder=ac3
   --enable-decoder=subrip,srt,ass,ssa,webvtt,movtext,text,pgssub,dvdsub,dvbsub
   --enable-protocol=file
 )
@@ -58,7 +65,7 @@ COMMON=(
   --prefix=/wnk --build-suffix=-wnk
   --enable-shared --disable-static --enable-pic
   --disable-programs --disable-doc --disable-avdevice --disable-avfilter --disable-swscale
-  --disable-swresample --disable-network --disable-debug --enable-small
+  --disable-network --disable-debug --enable-small
 )
 
 case "$TARGET" in

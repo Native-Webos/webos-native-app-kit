@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # The bundled FFmpeg (tools/build-ffmpeg.sh): built at configure time into the build tree, once per
 # configuration (the script is a no-op when its stamp matches). Provides:
-#   wnk_ffmpeg               INTERFACE target: headers + libavformat/libavcodec/libavutil (-wnk)
+#   wnk_ffmpeg               INTERFACE target: headers + libavformat/libavcodec/libswresample/libavutil (-wnk)
 #   WNK_FFMPEG_RUNTIME_LIBS  the SONAME files to ship in an app's lib/ (BUNDLED_LIBS)
 option(WNK_FFMPEG "Build the bundled FFmpeg demuxer (needed by media sources and Example D)" ON)
 if (NOT WNK_FFMPEG)
@@ -29,7 +29,7 @@ endif ()
 add_library(wnk_ffmpeg INTERFACE)
 target_include_directories(wnk_ffmpeg SYSTEM INTERFACE "${WNK_FFMPEG_PREFIX}/include")
 set(WNK_FFMPEG_RUNTIME_LIBS)
-foreach (_lib avformat avcodec avutil)
+foreach (_lib avformat avcodec swresample avutil)
     target_link_libraries(wnk_ffmpeg INTERFACE "${WNK_FFMPEG_PREFIX}/lib/lib${_lib}-wnk.so")
     file(GLOB _soname "${WNK_FFMPEG_PREFIX}/lib/lib${_lib}-wnk.so.[0-9]*")
     list(FILTER _soname INCLUDE REGEX "lib${_lib}-wnk\\.so\\.[0-9]+$")

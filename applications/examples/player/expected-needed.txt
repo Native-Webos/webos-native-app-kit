@@ -12,3 +12,4 @@ libSDL2-2.0.so.0        # bundled SDL-webOS, lib/ via RPATH $ORIGIN/lib
 libavformat-wnk.so.63   # bundled FFmpeg 9.0 (tools/build-ffmpeg.sh), lib/; needs libz.so.1 from the firmware
 libavcodec-wnk.so.63    # bundled FFmpeg, lib/
 libavutil-wnk.so.61     # bundled FFmpeg, lib/
+libswresample-wnk.so.7  # bundled FFmpeg (AC-3 re-encoding: rate and layout conversion), lib/

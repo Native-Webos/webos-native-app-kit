@@ -11,7 +11,7 @@ target_include_directories(wnk-player SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/thir
 # A/V test clips, generated with the host's ffmpeg CLI (tools/make-test-clips.sh).
 set(WNK_CLIPS_DIR "${CMAKE_CURRENT_BINARY_DIR}/clips")
 set(WNK_CLIPS "${WNK_CLIPS_DIR}/h264-aac.mp4" "${WNK_CLIPS_DIR}/hevc-ac3-5.1.mkv" "${WNK_CLIPS_DIR}/h264-mp3.ts"
-    "${WNK_CLIPS_DIR}/h264-aac-subs.mkv")
+    "${WNK_CLIPS_DIR}/h264-aac-subs.mkv" "${WNK_CLIPS_DIR}/h264-flac-7.1.mkv" "${WNK_CLIPS_DIR}/h264-opus.mkv")
 find_program(WNK_FFMPEG_CLI ffmpeg)
 if (WNK_FFMPEG_CLI)
     add_custom_command(OUTPUT ${WNK_CLIPS}
@@ -35,7 +35,7 @@ wnk_add_webos_package(
         TARGET wnk-player
         APPID org.wnk.examples.player
         TITLE "WNK Player"
-        VERSION 0.6.1
+        VERSION 0.7.0
         VENDOR "webos-native-app-kit"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"

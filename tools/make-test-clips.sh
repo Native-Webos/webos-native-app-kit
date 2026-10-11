@@ -19,6 +19,12 @@ ffmpeg "${common[@]}" -c:v libx265 -preset veryfast -crf 34 -x265-params log-lev
        -c:a ac3 -ac 6 -b:a 384k "$out/hevc-ac3-5.1.mkv"
 ffmpeg "${common[@]}" -c:v libx264 -preset veryfast -crf 33 -pix_fmt yuv420p -c:a libmp3lame -b:a 128k \
        -f mpegts "$out/h264-mp3.ts"
+# Audio Starfish cannot take, re-encoded to AC-3 by the source: 7.1 FLAC at 96 kHz (resampled and
+# folded to 5.1) and Opus.
+ffmpeg "${common[@]}" -c:v libx264 -preset veryfast -crf 33 -pix_fmt yuv420p -c:a flac -ac 8 -ar 96000 \
+       "$out/h264-flac-7.1.mkv"
+ffmpeg "${common[@]}" -c:v libx264 -preset veryfast -crf 33 -pix_fmt yuv420p -c:a libopus -b:a 128k -ac 2 \
+       "$out/h264-opus.mkv"
 # Subtitles: H.264 + AAC with two SubRip tracks, English (default) naming each second from 0.2 s to
 # 0.9 s of it, French with two-line cues every three seconds.
 srt_en="$out/.en.srt"; srt_fr="$out/.fr.srt"; : > "$srt_en"; : > "$srt_fr"

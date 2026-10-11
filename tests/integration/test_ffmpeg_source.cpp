@@ -321,6 +321,178 @@ TEST("ffmpeg source: AAC passed through to a backend that wants ADTS gets a head
     CHECK_EQ((d.audio[0].data[2] >> 2) & 0xF, 3);  // 48 kHz
 }
 
+// ---- AC-3 re-encoding (a backend that takes AC-3 but no PCM: Starfish) -------------------------
+
+namespace {
+
+BackendCaps starfish_like_caps() {
+    BackendCaps c;
+    c.video_codecs = {CodecId::H264, CodecId::Hevc};
+    c.audio_codecs = {CodecId::Aac, CodecId::Ac3, CodecId::Eac3};
+    c.aac_adts = true;
+    return c;
+}
+
+struct Ac3Frame {
+    int fscod = -1;  // 0: 48 kHz, 1: 44.1 kHz, 2: 32 kHz
+    int acmod = -1;  // 1: mono, 2: stereo, 7: 3/2
+};
+
+bool parse_ac3(const std::vector<uint8_t> &d, Ac3Frame *f) {
+    if (d.size() < 7 || d[0] != 0x0B || d[1] != 0x77) return false;
+    f->fscod = d[4] >> 6;
+    f->acmod = d[6] >> 5;
+    return true;
+}
+
+// Writes the packets as a raw .ac3 file and has the ffmpeg CLI decode it: duration in seconds and
+// peak level in dB (both NaN on failure).
+std::pair<double, double> decode_with_cli(const std::vector<Packet> &audio, const std::string &name) {
+    const std::string path = dir() + "/" + name;
+    if (FILE *f = std::fopen(path.c_str(), "wb")) {
+        for (const Packet &p : audio) std::fwrite(p.data.data(), 1, p.data.size(), f);
+        std::fclose(f);
+    }
+    const std::string cmd = "ffmpeg -hide_banner -nostats -i '" + path + "' -af volumedetect -f null - 2>&1";
+    FILE *pipe = popen(cmd.c_str(), "r");
+    if (pipe == nullptr) return {NAN, NAN};
+    double duration = NAN, peak = NAN;
+    char line[512];
+    while (std::fgets(line, sizeof line, pipe) != nullptr) {
+        const std::string l = line;
+        if (const auto at = l.find("time="); at != std::string::npos) {
+            int h = 0, m = 0;
+            double sec = 0;
+            if (std::sscanf(l.c_str() + at + 5, "%d:%d:%lf", &h, &m, &sec) == 3) duration = h * 3600 + m * 60 + sec;
+        }
+        if (const auto at = l.find("max_volume:"); at != std::string::npos) peak = std::atof(l.c_str() + at + 11);
+    }
+    pclose(pipe);
+    return {duration, peak};
+}
+
+}  // namespace
+
+TEST("audio path: as it is, else PCM, else re-encoded to AC-3, else none") {
+    TrackInfo flac;
+    flac.type = TrackType::Audio;
+    flac.codec = CodecId::Unknown;
+    flac.codec_label = "flac";
+    CHECK(audio_path(starfish_like_caps(), flac) == AudioPath::None);
+    flac.decodable = true;
+    CHECK(audio_path(ndl_like_caps(), flac) == AudioPath::Pcm);
+    CHECK(audio_path(starfish_like_caps(), flac) == AudioPath::None);
+    flac.ac3_encodable = true;
+    CHECK(audio_path(starfish_like_caps(), flac) == AudioPath::Ac3);
+    CHECK(audio_path(ndl_like_caps(), flac) == AudioPath::Pcm);  // PCM is preferred
+    TrackInfo aac = flac;
+    aac.codec = CodecId::Aac;
+    CHECK(audio_path(starfish_like_caps(), aac) == AudioPath::Passthrough);
+}
+
+TEST("ffmpeg source: 7.1 FLAC at 96 kHz → AC-3 5.1 at 48 kHz, 1536-sample frames, continuous time") {
+    SKIP_WITHOUT_FFMPEG();
+    if (!make_clip("h264_flac71.mkv", "libx264", "flac", "-ac 8 -ar 96000")) {
+        std::printf("  SKIP: no flac encoder\n");
+        return;
+    }
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/h264_flac71.mkv", &err));
+    const TrackInfo *v = s.info().best(TrackType::Video);
+    const TrackInfo *a = s.info().best(TrackType::Audio);
+    REQUIRE(v && a);
+    CHECK(a->codec == CodecId::Unknown);
+    CHECK_EQ(a->channels, 8);
+    CHECK(a->decodable && a->ac3_encodable);
+    StreamFormat f;
+    REQUIRE(s.select(v->index, a->index, starfish_like_caps(), &f, &err));
+    REQUIRE(f.audio.has_value());
+    CHECK(f.audio->codec == CodecId::Ac3);
+    CHECK_EQ(f.audio->channels, 6);
+    CHECK_EQ(f.audio->sample_rate, 48000);
+    const Drained d = drain(s);
+    CHECK_EQ(d.video.size(), size_t{50});
+    REQUIRE(d.audio.size() >= 60);  // 2 s / 32 ms
+    for (size_t i = 0; i < d.audio.size(); ++i) {
+        Ac3Frame fr;
+        REQUIRE(parse_ac3(d.audio[i].data, &fr));
+        CHECK_EQ(fr.fscod, 0);
+        CHECK_EQ(fr.acmod, 7);
+        CHECK_EQ(d.audio[i].data.size(), size_t{2560});  // 640 kb/s
+        CHECK_EQ(d.audio[i].duration_us, 32000);
+        if (i > 0) CHECK_EQ(d.audio[i].pts_us - d.audio[i - 1].pts_us, 32000);
+    }
+    CHECK(d.audio[0].pts_us >= 0 && d.audio[0].pts_us < 50000);
+    const auto [duration, peak] = decode_with_cli(d.audio, "flac71.ac3");
+    CHECK(std::abs(duration - 2.0) < 0.1);
+    CHECK(peak > -30.0);  // the sine survives
+}
+
+TEST("ffmpeg source: mono MP3 and 44.1 kHz stereo 24-bit PCM keep their layout and rate in AC-3") {
+    SKIP_WITHOUT_FFMPEG();
+    REQUIRE(make_clip("h264_mp3.ts", "libx264", "libmp3lame"));
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/h264_mp3.ts", &err));
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, s.info().best(TrackType::Audio)->index,
+                     starfish_like_caps(), &f, &err));
+    REQUIRE(f.audio && f.audio->codec == CodecId::Ac3);
+    CHECK_EQ(f.audio->channels, 1);
+    CHECK_EQ(f.audio->sample_rate, 48000);
+    Drained d = drain(s);
+    REQUIRE(!d.audio.empty());
+    Ac3Frame fr;
+    REQUIRE(parse_ac3(d.audio[0].data, &fr));
+    CHECK_EQ(fr.acmod, 1);
+    CHECK_EQ(d.audio[0].data.size(), size_t{768});  // 192 kb/s
+
+    if (!make_clip("h264_pcm441.mkv", "libx264", "pcm_s24le", "-ac 2 -ar 44100")) {
+        std::printf("  SKIP: no pcm_s24le encoder\n");
+        return;
+    }
+    FfmpegSource p;
+    REQUIRE(p.open(dir() + "/h264_pcm441.mkv", &err));
+    REQUIRE(p.select(p.info().best(TrackType::Video)->index, p.info().best(TrackType::Audio)->index,
+                     starfish_like_caps(), &f, &err));
+    REQUIRE(f.audio && f.audio->codec == CodecId::Ac3);
+    CHECK_EQ(f.audio->channels, 2);
+    CHECK_EQ(f.audio->sample_rate, 44100);
+    d = drain(p);
+    REQUIRE(!d.audio.empty());
+    REQUIRE(parse_ac3(d.audio[0].data, &fr));
+    CHECK_EQ(fr.fscod, 1);
+    CHECK_EQ(fr.acmod, 2);
+    const auto [duration, peak] = decode_with_cli(d.audio, "pcm441.ac3");
+    CHECK(std::abs(duration - 2.0) < 0.1);
+    CHECK(peak > -30.0);
+}
+
+TEST("ffmpeg source: AC-3 re-encoding restarts its timeline at a seek") {
+    SKIP_WITHOUT_FFMPEG();
+    if (!make_clip("h264_flac71.mkv", "libx264", "flac", "-ac 8 -ar 96000")) {
+        std::printf("  SKIP: no flac encoder\n");
+        return;
+    }
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/h264_flac71.mkv", &err));
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, s.info().best(TrackType::Audio)->index,
+                     starfish_like_caps(), &f, &err));
+    Packet p;
+    for (int i = 0; i < 20; ++i) REQUIRE(s.read(&p, &err) == MediaSource::Read::Packet);
+    REQUIRE(s.seek(1000000, &err));
+    const Drained d = drain(s);
+    REQUIRE(!d.video.empty() && !d.audio.empty());
+    CHECK(d.video[0].key);
+    CHECK_EQ(d.video[0].pts_us, 1000000);
+    // Audio resumes near the video, not where the encoder stood before the seek.
+    CHECK(std::llabs(d.audio[0].pts_us - d.video[0].pts_us) < 100000);
+    for (size_t i = 1; i < d.audio.size(); ++i) CHECK_EQ(d.audio[i].pts_us - d.audio[i - 1].pts_us, 32000);
+}
+
 // ---- subtitles ---------------------------------------------------------------------------------
 
 namespace {

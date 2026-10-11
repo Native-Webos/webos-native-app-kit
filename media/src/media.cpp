@@ -66,6 +66,23 @@ bool BackendCaps::accepts(CodecId c) const {
     return std::find(list.begin(), list.end(), c) != list.end();
 }
 
+AudioPath audio_path(const BackendCaps &caps, const TrackInfo &t) {
+    if (t.codec != CodecId::Unknown && caps.accepts(t.codec)) return AudioPath::Passthrough;
+    if (t.decodable && caps.accepts(CodecId::PcmS16)) return AudioPath::Pcm;
+    if (t.ac3_encodable && caps.accepts(CodecId::Ac3)) return AudioPath::Ac3;
+    return AudioPath::None;
+}
+
+const char *audio_path_name(AudioPath p) {
+    switch (p) {
+        case AudioPath::None: return "none";
+        case AudioPath::Passthrough: return "passthrough";
+        case AudioPath::Pcm: return "pcm";
+        case AudioPath::Ac3: return "ac3";
+    }
+    return "?";
+}
+
 bool adts_header(const std::vector<uint8_t> &asc, size_t payload_size, uint8_t out[7]) {
     if (asc.size() < 2) return false;
     uint32_t bits = 0;

@@ -14,7 +14,7 @@ bool AutoBackend::takes(const MediaBackend &b, const TrackInfo *video, const Tra
         if (why != nullptr) *why = "video " + video->codec_label;
         return false;
     }
-    if (audio != nullptr && !c.accepts(audio->codec)) {
+    if (audio != nullptr && audio_path(c, *audio) == AudioPath::None) {
         if (why != nullptr) *why = "audio " + audio->codec_label;
         return false;
     }

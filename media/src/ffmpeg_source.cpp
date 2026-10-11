@@ -9,8 +9,10 @@ extern "C" {
 #include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
+#include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
+#include <libswresample/swresample.h>
 }
 
 #include <algorithm>
@@ -21,6 +23,8 @@ extern "C" {
 #include <deque>
 #include <map>
 #include <mutex>
+
+#include <time.h>
 
 namespace wnk::media {
 namespace {
@@ -147,6 +151,23 @@ struct FfmpegSource::Impl {
     MediaInfo info;
     int video = -1, audio = -1;
     bool decode_audio = false;
+    // AudioPath::Ac3: decoded audio is converted by `swr` (made for the first frame and remade when
+    // the frames change) into planar float at the encoder's layout and rate, collected in `fifo` and
+    // encoded in frames of enc->frame_size samples. enc_base_us is the time of the fifo's first
+    // sample counted from the last discontinuity, enc_samples the samples encoded since then.
+    AVCodecContext *enc = nullptr;
+    SwrContext *swr = nullptr;
+    AVAudioFifo *fifo = nullptr;
+    AVFrame *enc_frame = nullptr;
+    int swr_format = -1, swr_rate = 0;
+    AVChannelLayout swr_layout{};
+    int64_t enc_base_us = kNoTime;
+    int64_t enc_samples = 0;
+    int64_t next_in_us = kNoTime;  // where the next decoded frame should start if there is no gap
+    std::vector<uint8_t *> enc_planes;
+    std::vector<float> enc_buffer;
+    double enc_cpu_s = 0;          // thread CPU time spent converting and encoding, for the log
+    int64_t enc_cpu_samples = 0;   // output samples that took
     std::vector<uint8_t> adts_config;  // AAC passthrough to a backend that wants ADTS: the AudioSpecificConfig
     int64_t start_us = 0;  // subtracted from every timestamp
     bool need_key = false;  // after a seek: drop video until a keyframe
@@ -164,6 +185,185 @@ struct FfmpegSource::Impl {
 
     ~Impl() { close(); }
 
+    void free_ac3() {
+        avcodec_free_context(&enc);
+        swr_free(&swr);
+        if (fifo != nullptr) av_audio_fifo_free(fifo);
+        fifo = nullptr;
+        av_frame_free(&enc_frame);
+        av_channel_layout_uninit(&swr_layout);
+        swr_format = -1;
+        reset_ac3();
+    }
+
+    // Forgets the audio waiting to be encoded (seek, discontinuity).
+    void reset_ac3() {
+        if (fifo != nullptr) av_audio_fifo_reset(fifo);
+        swr_free(&swr);  // remade with an empty history by the next frame
+        enc_base_us = kNoTime;
+        enc_samples = 0;
+        next_in_us = kNoTime;
+    }
+
+    // Opens the AC-3 encoder for a track decoded by `dec`.
+    bool open_ac3(const TrackInfo &t, std::string *error) {
+        const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_AC3);
+        enc = codec != nullptr ? avcodec_alloc_context3(codec) : nullptr;
+        if (enc == nullptr) {
+            *error = "no AC-3 encoder";
+            return false;
+        }
+        const int ch = t.channels > 0 ? t.channels : dec->ch_layout.nb_channels;
+        if (ch == 1) {
+            enc->ch_layout = AV_CHANNEL_LAYOUT_MONO;
+        } else if (ch == 2) {
+            enc->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+        } else {
+            enc->ch_layout = AV_CHANNEL_LAYOUT_5POINT1;
+        }
+        const int rate = t.sample_rate > 0 ? t.sample_rate : dec->sample_rate;
+        enc->sample_rate = rate == 48000 || rate == 44100 || rate == 32000 ? rate : 48000;
+        enc->sample_fmt = AV_SAMPLE_FMT_FLTP;
+        // The usual rates for discs and broadcast: transparent enough for a re-encode.
+        enc->bit_rate = ch == 1 ? 192000 : ch == 2 ? 256000 : 640000;
+        enc->time_base = AVRational{1, enc->sample_rate};
+        if (avcodec_open2(enc, codec, nullptr) < 0) {
+            *error = "could not open the AC-3 encoder";
+            avcodec_free_context(&enc);
+            return false;
+        }
+        const int out_ch = enc->ch_layout.nb_channels;
+        fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, out_ch, enc->frame_size * 4);
+        enc_frame = av_frame_alloc();
+        if (fifo == nullptr || enc_frame == nullptr) {
+            *error = "out of memory";
+            free_ac3();
+            return false;
+        }
+        return true;
+    }
+
+    // (Re)creates the converter when a decoded frame's format differs from the last one's.
+    bool ensure_swr(const AVFrame *f) {
+        AVChannelLayout in{};
+        if (f->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC) {
+            av_channel_layout_default(&in, f->ch_layout.nb_channels);
+        } else {
+            av_channel_layout_copy(&in, &f->ch_layout);
+        }
+        if (swr != nullptr && swr_format == f->format && swr_rate == f->sample_rate &&
+            av_channel_layout_compare(&swr_layout, &in) == 0) {
+            av_channel_layout_uninit(&in);
+            return true;
+        }
+        swr_free(&swr);
+        av_channel_layout_uninit(&swr_layout);
+        swr_layout = in;
+        swr_format = f->format;
+        swr_rate = f->sample_rate;
+        if (swr_alloc_set_opts2(&swr, &enc->ch_layout, AV_SAMPLE_FMT_FLTP, enc->sample_rate, &swr_layout,
+                                static_cast<AVSampleFormat>(f->format), f->sample_rate, 0, nullptr) < 0 ||
+            swr_init(swr) < 0) {
+            WNK_LOGW(kCat, "cannot convert %d-channel %s at %d Hz for AC-3", f->ch_layout.nb_channels,
+                     av_get_sample_fmt_name(static_cast<AVSampleFormat>(f->format)), f->sample_rate);
+            swr_free(&swr);
+            return false;
+        }
+        return true;
+    }
+
+    // Converts one decoded frame (nullptr: flush the converter) into the fifo.
+    void convert_ac3(const AVFrame *f) {
+        if (swr == nullptr) return;
+        const int in_samples = f != nullptr ? f->nb_samples : 0;
+        const int max = swr_get_out_samples(swr, in_samples);
+        if (max <= 0) return;
+        const int out_ch = enc->ch_layout.nb_channels;
+        enc_buffer.resize(static_cast<size_t>(out_ch) * max);
+        enc_planes.resize(static_cast<size_t>(out_ch));
+        for (int c = 0; c < out_ch; ++c) {
+            enc_planes[c] = reinterpret_cast<uint8_t *>(enc_buffer.data() + static_cast<size_t>(c) * max);
+        }
+        const int got = swr_convert(swr, enc_planes.data(), max,
+                                    f != nullptr ? const_cast<const uint8_t **>(f->extended_data) : nullptr, in_samples);
+        if (got > 0) av_audio_fifo_write(fifo, reinterpret_cast<void **>(enc_planes.data()), got);
+    }
+
+    // Encodes every full frame in the fifo; at the end (`last`) also the rest, padded with silence.
+    void encode_ac3(bool last) {
+        const int fs = enc->frame_size;
+        while (av_audio_fifo_size(fifo) >= fs || (last && av_audio_fifo_size(fifo) > 0)) {
+            av_frame_unref(enc_frame);
+            enc_frame->nb_samples = fs;
+            enc_frame->format = AV_SAMPLE_FMT_FLTP;
+            av_channel_layout_copy(&enc_frame->ch_layout, &enc->ch_layout);
+            enc_frame->sample_rate = enc->sample_rate;
+            if (av_frame_get_buffer(enc_frame, 0) < 0) return;
+            const int n = av_audio_fifo_read(fifo, reinterpret_cast<void **>(enc_frame->extended_data), fs);
+            if (n < fs) {
+                av_samples_set_silence(enc_frame->extended_data, n, fs - n, enc->ch_layout.nb_channels,
+                                       AV_SAMPLE_FMT_FLTP);
+            }
+            const int64_t pts_us = enc_base_us + enc_samples * 1000000 / enc->sample_rate;
+            enc_frame->pts = enc_samples;
+            enc_samples += fs;
+            // The AC-3 encoder has no delay: one frame in, one packet out.
+            if (avcodec_send_frame(enc, enc_frame) < 0) continue;
+            AVPacket *out = av_packet_alloc();
+            while (out != nullptr && avcodec_receive_packet(enc, out) == 0) {
+                Packet a;
+                a.type = TrackType::Audio;
+                a.key = true;
+                a.data.assign(out->data, out->data + out->size);
+                a.pts_us = pts_us;
+                a.duration_us = static_cast<int64_t>(fs) * 1000000 / enc->sample_rate;
+                ready.push_back(std::move(a));
+                av_packet_unref(out);
+            }
+            av_packet_free(&out);
+        }
+    }
+
+    // Takes one decoded frame into the AC-3 path.
+    void queue_ac3(const AVFrame *f, AVRational tb) {
+        if (f->nb_samples <= 0 || f->sample_rate <= 0) return;
+        const int64_t pts = to_us(f->best_effort_timestamp != AV_NOPTS_VALUE ? f->best_effort_timestamp : f->pts, tb);
+        // A gap or overlap of more than 100 ms (a cut in a TS, a damaged frame) restarts the timeline
+        // there instead of drifting off the video.
+        if (pts != kNoTime && next_in_us != kNoTime && std::llabs(pts - next_in_us) > 100000) {
+            WNK_LOGW(kCat, "audio jumps by %lld ms; AC-3 timeline restarted", static_cast<long long>((pts - next_in_us) / 1000));
+            reset_ac3();
+        }
+        if (!ensure_swr(f)) return;
+        if (enc_base_us == kNoTime) {
+            if (pts == kNoTime) return;  // wait for a timed frame
+            enc_base_us = pts;
+            enc_samples = 0;
+        }
+        const int64_t start = pts != kNoTime ? pts : next_in_us;
+        next_in_us = start + static_cast<int64_t>(f->nb_samples) * 1000000 / f->sample_rate;
+        const double t0 = thread_cpu_s();
+        const int64_t before = enc_samples;
+        convert_ac3(f);
+        encode_ac3(false);
+        enc_cpu_s += thread_cpu_s() - t0;
+        enc_cpu_samples += enc_samples - before;
+        // Every 10 s of audio: what the re-encode costs (decoding not included).
+        if (enc_cpu_samples >= static_cast<int64_t>(enc->sample_rate) * 10) {
+            const double audio_s = static_cast<double>(enc_cpu_samples) / enc->sample_rate;
+            WNK_LOGI(kCat, "AC-3 re-encode: %.1f ms CPU per s of audio (%.1f%% of a core)", enc_cpu_s * 1000 / audio_s,
+                     enc_cpu_s * 100 / audio_s);
+            enc_cpu_s = 0;
+            enc_cpu_samples = 0;
+        }
+    }
+
+    static double thread_cpu_s() {
+        timespec ts{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+        return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+    }
+
     void clear_replay() {
         for (AVPacket *p : replay) av_packet_free(&p);
         replay.clear();
@@ -173,6 +373,7 @@ struct FfmpegSource::Impl {
         clear_replay();
         free_subtitle_decoders();
         av_bsf_free(&bsf);
+        free_ac3();
         avcodec_free_context(&dec);
         avformat_close_input(&fmt);  // leaves a custom AVIOContext alone
         if (avio != nullptr) {
@@ -473,7 +674,11 @@ struct FfmpegSource::Impl {
 
     void drain_decoder(AVRational tb) {
         while (avcodec_receive_frame(dec, frame) == 0) {
-            queue_pcm(frame, tb);
+            if (enc != nullptr) {
+                queue_ac3(frame, tb);
+            } else {
+                queue_pcm(frame, tb);
+            }
             av_frame_unref(frame);
         }
     }
@@ -597,6 +802,8 @@ bool FfmpegSource::open(const std::string &uri, std::string *error) {
                 t.type = TrackType::Audio;
                 t.sample_rate = par->sample_rate;
                 t.channels = par->ch_layout.nb_channels;
+                t.decodable = avcodec_find_decoder(par->codec_id) != nullptr;
+                t.ac3_encodable = t.decodable && m.options.ac3_encode && avcodec_find_encoder(AV_CODEC_ID_AC3) != nullptr;
                 break;
             case AVMEDIA_TYPE_SUBTITLE:
                 t.type = TrackType::Subtitle;
@@ -621,6 +828,7 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
     m.clear_replay();
     m.free_subtitle_decoders();
     av_bsf_free(&m.bsf);
+    m.free_ac3();
     avcodec_free_context(&m.dec);
     m.video = m.audio = -1;
     for (const TrackInfo &t : m.info.tracks) {
@@ -683,7 +891,8 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
             return false;
         }
         const AVCodecParameters *par = m.fmt->streams[audio_track]->codecpar;
-        if (caps.accepts(t->codec)) {
+        const AudioPath path = audio_path(caps, *t);
+        if (path == AudioPath::Passthrough) {
             AudioFormat a{t->codec, t->sample_rate, t->channels, {}};
             m.adts_config.clear();
             if (t->codec == CodecId::Aac && caps.aac_adts && par->extradata_size >= 2) {
@@ -692,9 +901,7 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
             if (par->extradata_size > 0) a.codec_header.assign(par->extradata, par->extradata + par->extradata_size);
             out->audio = a;
             m.audio = audio_track;
-        } else if (caps.accepts(CodecId::PcmS16) &&
-                   (t->codec == CodecId::Aac || t->codec == CodecId::Ac3 || t->codec == CodecId::Eac3 ||
-                    t->codec == CodecId::Mp3)) {
+        } else if (path == AudioPath::Pcm || path == AudioPath::Ac3) {
             const AVCodec *codec = avcodec_find_decoder(par->codec_id);
             m.dec = codec != nullptr ? avcodec_alloc_context3(codec) : nullptr;
             if (m.dec == nullptr || avcodec_parameters_to_context(m.dec, par) < 0) {
@@ -704,7 +911,7 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
             }
             m.dec->pkt_timebase = m.fmt->streams[audio_track]->time_base;
             // AC-3/E-AC-3 can downmix inside the decoder, which also applies the stream's mix levels.
-            if (t->codec == CodecId::Ac3 || t->codec == CodecId::Eac3) {
+            if (path == AudioPath::Pcm && (t->codec == CodecId::Ac3 || t->codec == CodecId::Eac3)) {
                 AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
                 av_opt_set_chlayout(m.dec->priv_data, "downmix", &stereo, 0);
             }
@@ -713,9 +920,20 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
                 avcodec_free_context(&m.dec);
                 return false;
             }
+            if (path == AudioPath::Ac3) {
+                if (!m.open_ac3(*t, error)) {
+                    avcodec_free_context(&m.dec);
+                    return false;
+                }
+                out->audio = AudioFormat{CodecId::Ac3, m.enc->sample_rate, m.enc->ch_layout.nb_channels, {}};
+                WNK_LOGI(kCat, "audio %s %d ch %d Hz re-encoded to AC-3 %d ch %d Hz %lld kb/s", t->codec_label.c_str(),
+                         t->channels, t->sample_rate, out->audio->channels, out->audio->sample_rate,
+                         static_cast<long long>(m.enc->bit_rate / 1000));
+            } else {
+                out->audio = AudioFormat{CodecId::PcmS16, t->sample_rate, 2, {}};
+            }
             m.decode_audio = true;
             m.audio = audio_track;
-            out->audio = AudioFormat{CodecId::PcmS16, t->sample_rate, 2, {}};
         } else {
             // Play the picture without sound rather than refusing the file.
             WNK_LOGW(kCat, "audio codec %s cannot be played here; video only", t->codec_label.c_str());
@@ -753,6 +971,10 @@ FfmpegSource::Read FfmpegSource::read(Packet *out, std::string *error) {
             if (m.dec != nullptr) {
                 avcodec_send_packet(m.dec, nullptr);
                 m.drain_decoder(m.fmt->streams[m.audio]->time_base);
+                if (m.enc != nullptr && m.enc_base_us != kNoTime) {
+                    m.convert_ac3(nullptr);
+                    m.encode_ac3(true);
+                }
             }
             continue;
         }
@@ -804,6 +1026,7 @@ bool FfmpegSource::seek(int64_t pts_us, std::string *error) {
     }
     if (m.bsf != nullptr) av_bsf_flush(m.bsf);
     if (m.dec != nullptr) avcodec_flush_buffers(m.dec);
+    m.reset_ac3();
     // Keep the subtitles decoded while looking for the keyframe; drop everything else.
     m.ready.erase(std::remove_if(m.ready.begin(), m.ready.end(),
                                  [](const Packet &p) { return p.type != TrackType::Subtitle; }),

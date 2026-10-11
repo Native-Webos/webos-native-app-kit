@@ -7,9 +7,13 @@
 //   video  H.264/HEVC as Annex-B access units: MP4/MKV length-prefixed samples go through FFmpeg's
 //          h264_mp4toannexb / hevc_mp4toannexb, which also insert the parameter sets before every
 //          keyframe; streams that are already Annex-B (MPEG-TS, raw) pass through. VP9/AV1 as is.
-//   audio  passed through when the backend accepts the codec; AAC, AC-3, E-AC-3 and MP3 otherwise
-//          decoded to interleaved S16 stereo (more channels are downmixed: L = FL + 0.707·C +
-//          0.707·SL, LFE dropped), at the stream's own sample rate.
+//   audio  by audio_path(): passed through when the backend accepts the codec; otherwise, for every
+//          codec this FFmpeg build decodes (AAC, AC-3, E-AC-3, MP3/MP2, Opus, Vorbis, FLAC, TrueHD,
+//          DTS, PCM), decoded to interleaved S16 stereo for a backend that takes PCM (more channels
+//          are downmixed: L = FL + 0.707·C + 0.707·SL, LFE dropped) at the stream's own sample rate,
+//          or re-encoded to AC-3 for a backend that takes AC-3 but no PCM (Starfish): mono and
+//          stereo stay so, more channels become 5.1, rates other than 32/44.1/48 kHz become 48 kHz,
+//          one 1536-sample frame per packet.
 //   time   microseconds from the start of the media (the container's start_time is subtracted, so
 //          MPEG-TS clips start at 0 like the others).
 //
@@ -29,6 +33,7 @@ namespace wnk::media {
 struct FfmpegSourceOptions {
     std::shared_ptr<net::HttpTransport> http;  // for http(s) URIs; without it they fail to open
     net::HttpStreamOptions http_stream;
+    bool ac3_encode = true;  // offer AudioPath::Ac3 (TrackInfo::ac3_encodable)
 };
 
 class FfmpegSource : public MediaSource {

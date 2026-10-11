@@ -4,9 +4,10 @@
 // otherwise, chosen per media in prepare() (after the source is open, before tracks are selected).
 //
 // The rule: the preferred backend is used when it accepts the video codec (if there is video) and
-// the audio codec directly (if there is audio). On webOS that is Starfish for H.264/HEVC with
-// AAC/AC-3/E-AC-3, which plays 24p without judder and has a real pause, and NDL for the rest (AV1,
-// VP9, and audio Starfish cannot take, which the source decodes to PCM for NDL). Every other call
+// can be given the audio (if there is audio) in some way of audio_path(): as it is, or re-encoded to
+// AC-3 by the source. On webOS that is Starfish for H.264/HEVC with any audio the source can decode,
+// which plays 24p without judder and has a real pause, and NDL for the rest (AV1, VP9, and audio the
+// source cannot decode). Every other call
 // goes to the chosen backend; before prepare() the preferred one answers.
 #pragma once
 
@@ -35,7 +36,7 @@ class AutoBackend : public MediaBackend {
     bool pause(bool paused) override { return active().pause(paused); }
     void end_of_stream() override { active().end_of_stream(); }
 
-    // Whether `b` takes this media's codecs as they are (exposed for tests and logs).
+    // Whether `b` can be given this media's tracks (exposed for tests and logs).
     static bool takes(const MediaBackend &b, const TrackInfo *video, const TrackInfo *audio, std::string *why);
     bool using_fallback() const { return use_fallback_.load(); }
 

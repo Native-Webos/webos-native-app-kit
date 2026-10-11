@@ -22,7 +22,9 @@
 //   {"backend": "starfish"}                force LG's Starfish pipeline
 //   {"ndlReload": 1}                       pause and seek by reloading NDL (black picture; comparison)
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
-//   {"autoplay": 0}                        open that bundled clip at start (scripted runs: 0..3)
+//   {"ac3": false}                         never re-encode audio to AC-3 (audio Starfish cannot take
+//                                          then sends the file to NDL, as before)
+//   {"autoplay": 0}                        open that bundled clip at start (scripted runs: 0..5)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
 #include "wnk/media/auto_backend.hpp"
@@ -64,6 +66,7 @@ struct Settings {
     bool ndl_reload = false;
     std::string backend = "auto";  // auto (Starfish when the codecs suit it, else NDL), starfish, ndl
     int lead_ms = 1000;
+    bool ac3 = true;  // re-encode audio Starfish cannot take to AC-3
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
 };
 
@@ -128,7 +131,7 @@ class PlayerScreen : public Screen {
         backend_name_ = backend->name();
         PlaybackOptions po;
         po.max_lead_us = static_cast<int64_t>(s.lead_ms) * 1000;
-        controller_ = std::make_unique<PlaybackController>(std::make_unique<FfmpegSource>(FfmpegSourceOptions{s.http, {}}),
+        controller_ = std::make_unique<PlaybackController>(std::make_unique<FfmpegSource>(FfmpegSourceOptions{s.http, {}, s.ac3}),
                                                            std::move(backend), ctx.dispatcher(), po);
         controller_->set_state_callback([this](PlayState from, PlayState to, const PlaybackSnapshot &snap) {
             WNK_LOGI(kCat, "player state %s -> %s%s%s", play_state_name(from), play_state_name(to),
@@ -366,6 +369,7 @@ class Player : public wnk::app::Delegate {
             if (params.contains("leadMs") && params["leadMs"].is_number_integer()) {
                 s.lead_ms = std::clamp(params["leadMs"].get<int>(), 100, 5000);
             }
+            if (params.contains("ac3") && params["ac3"].is_boolean()) s.ac3 = params["ac3"];
             if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
             if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
         }
@@ -373,10 +377,12 @@ class Player : public wnk::app::Delegate {
         WNK_LOGI(kCat, "%s; PTS unit %s; NDL pause/seek by %s; lead %d ms", FfmpegSource::version().c_str(),
                  s.pts_unit == PtsUnit::Milliseconds ? "ms" : "us", s.ndl_reload ? "reload" : "hold/splice", s.lead_ms);
         const std::vector<Clip> clips = {
-            {"H.264 + AAC", "MP4 · 1080p25 · AAC decoded to PCM", "h264-aac.mp4"},
-            {"HEVC + AC-3 5.1", "MKV · 1080p25 · AC-3 downmixed to PCM stereo", "hevc-ac3-5.1.mkv"},
-            {"H.264 + MP3", "MPEG-TS · 1080p25 · MP3 decoded to PCM", "h264-mp3.ts"},
+            {"H.264 + AAC", "MP4 · 1080p25 · AAC as is (Starfish) or decoded to PCM (NDL)", "h264-aac.mp4"},
+            {"HEVC + AC-3 5.1", "MKV · 1080p25 · AC-3 as is (Starfish) or downmixed to PCM stereo (NDL)", "hevc-ac3-5.1.mkv"},
+            {"H.264 + MP3", "MPEG-TS · 1080p25 · MP3 re-encoded to AC-3 (Starfish) or decoded to PCM (NDL)", "h264-mp3.ts"},
             {"Subtitles", "MKV · H.264 + AAC · SubRip English (default) and French · Down switches", "h264-aac-subs.mkv"},
+            {"H.264 + FLAC 7.1", "MKV · 1080p25 · 96 kHz 7.1 FLAC re-encoded to AC-3 5.1 48 kHz (Starfish)", "h264-flac-7.1.mkv"},
+            {"H.264 + Opus", "MKV · 1080p25 · Opus re-encoded to AC-3 (Starfish) or as is (NDL)", "h264-opus.mkv"},
         };
         Ui &ui = ctx.ui();
         nav_ = &ui.root().add<Navigator>();

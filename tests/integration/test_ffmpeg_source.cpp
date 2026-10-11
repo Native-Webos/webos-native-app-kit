@@ -251,6 +251,30 @@ TEST("ffmpeg source: seek lands on a keyframe at or before the target") {
     CHECK_EQ(p.pts_us, int64_t{0});
 }
 
+TEST("ffmpeg source: MPEG-TS (no index) seeks back to the keyframe before the target") {
+    SKIP_WITHOUT_FFMPEG();
+    REQUIRE(make_clip("h264_mp3.ts", "libx264", "libmp3lame"));
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/h264_mp3.ts", &err));
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, s.info().best(TrackType::Audio)->index, ndl_like_caps(), &f, &err));
+    for (const int64_t target : {int64_t{1500000}, int64_t{1000000}, int64_t{600000}, int64_t{0}}) {
+        REQUIRE(s.seek(target, &err));
+        Packet p;
+        do {
+            REQUIRE(s.read(&p, &err) == MediaSource::Read::Packet);
+        } while (p.type != TrackType::Video);
+        // Keyframes every second; video starts a little after 0 here (the MP3 encoder delay).
+        CHECK(p.key);
+        CHECK(p.pts_us <= std::max<int64_t>(target, 100000));  // nothing before the first frame at 0.023 s
+        CHECK(target - p.pts_us < 1000000);
+        // The rest of the clip follows, through to the end.
+        const Drained rest = drain(s);
+        CHECK_EQ(rest.video.size(), static_cast<size_t>(p.pts_us > 500000 ? 24 : 49));
+    }
+}
+
 TEST("ffmpeg source: unsupported video codec and missing files are refused with a reason; interrupt stops reads") {
     SKIP_WITHOUT_FFMPEG();
     REQUIRE(make_clip("h264_aac.mp4", "libx264", "aac"));
@@ -334,7 +358,6 @@ TEST("ffmpeg source over HTTP: same packets as the local file, for MP4 (index fi
         }
         CHECK(same);
         // Seek back into the middle: lands on the same keyframe as the local file.
-        if (std::string(name).find(".ts") != std::string::npos) continue;  // no index: seeks by timestamp
         REQUIRE(local.seek(1200000, &err));
         REQUIRE(remote.seek(1200000, &err));
         Packet lp, rp;

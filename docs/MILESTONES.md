@@ -276,8 +276,10 @@ plays `{"uri": "http://..."}` (0.2.0).
 | FFmpeg over HTTP = local file, packet for packet (MP4 index first and last, MKV, TS); 404 reported as "HTTP 404" | `[TEST]` |
 | ARM build: player 0.2.0 loads on 5.3.1–11.2.0, no new DT_NEEDED (libcurl stays dlopened) | `[BUILD]` `[FWDB]` |
 
-Found on the way: MPEG-TS seeks land on the timestamp, not a keyframe (no index), so video is dropped until
-the next keyframe.
+Found on the way and fixed: MPEG-TS has no keyframe index, so FFmpeg's seek lands near the timestamp (before
+or after it) and video was dropped until the next keyframe. `FfmpegSource::seek` now reads forward to the
+target and replays from the last keyframe before it, starting 1–16 s further back (or at the first byte)
+when there is none.
 
 Open: subtitles, HDR metadata, VP9/AV1 on the TV,
 Opus passthrough, resampling for sample rates NDL lacks, video-only files (reported to need an audio prime),

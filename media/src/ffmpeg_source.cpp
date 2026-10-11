@@ -133,12 +133,19 @@ struct FfmpegSource::Impl {
     bool need_key = false;  // after a seek: drop video until a keyframe
     bool eof = false;
     std::deque<Packet> ready;
+    std::deque<AVPacket *> replay;  // demuxed by seek() while looking for a keyframe; read() goes first
     std::atomic<bool> interrupted{false};
     std::vector<float> planar_tmp;
 
     ~Impl() { close(); }
 
+    void clear_replay() {
+        for (AVPacket *p : replay) av_packet_free(&p);
+        replay.clear();
+    }
+
     void close() {
+        clear_replay();
         av_bsf_free(&bsf);
         avcodec_free_context(&dec);
         avformat_close_input(&fmt);  // leaves a custom AVIOContext alone
@@ -283,6 +290,78 @@ struct FfmpegSource::Impl {
         ready.push_back(std::move(p));
     }
 
+    // Turns one demuxed packet of a selected stream into ready packets.
+    void consume(AVPacket *p) {
+        const int si = p->stream_index;
+        const AVRational tb = fmt->streams[si]->time_base;
+        if (si == video) {
+            if (bsf != nullptr) {
+                if (av_bsf_send_packet(bsf, p) == 0) drain_bsf(tb);  // takes the packet's reference
+            } else {
+                queue_video(p, tb);
+            }
+        } else if (si == audio) {
+            if (decode_audio) {
+                if (avcodec_send_packet(dec, p) == 0) drain_decoder(tb);
+            } else if (!need_key || video < 0) {
+                Packet a;
+                a.type = TrackType::Audio;
+                a.key = true;
+                a.data.assign(p->data, p->data + p->size);
+                a.pts_us = to_us(p->pts != AV_NOPTS_VALUE ? p->pts : p->dts, tb);
+                a.duration_us = p->duration > 0 ? av_rescale_q(p->duration, tb, kMicros) : 0;
+                ready.push_back(std::move(a));
+            }
+        }
+    }
+
+    enum class Scan { Found, NotFound, NoVideo };
+
+    // After a seek: demuxes forward to the target `limit` (video stream time base) and keeps, for
+    // read(), everything from the last video keyframe at or before it. NotFound if the video passes
+    // the target (or the stream ends) without one, so the caller must start further back; replay then
+    // holds the overshooting packet if it is a keyframe.
+    Scan scan_to_keyframe(int64_t limit) {
+        clear_replay();
+        bool found = false, saw_video = false;
+        for (int n = 0; n < 50000; ++n) {
+            AVPacket *p = av_packet_alloc();
+            if (p == nullptr || av_read_frame(fmt, p) < 0) {
+                av_packet_free(&p);
+                break;  // end, error or interrupt: read() will meet it again
+            }
+            const bool is_video = p->stream_index == video;
+            const bool wanted = is_video || p->stream_index == audio;
+            if (is_video) {
+                saw_video = true;
+                const int64_t ts = p->pts != AV_NOPTS_VALUE ? p->pts : p->dts;
+                if (ts != AV_NOPTS_VALUE && ts > limit) {
+                    if (!found) {
+                        // Kept in case the caller cannot go further back (nothing precedes it).
+                        if ((p->flags & AV_PKT_FLAG_KEY) != 0) {
+                            replay.push_back(p);
+                        } else {
+                            av_packet_free(&p);
+                        }
+                        return Scan::NotFound;
+                    }
+                    replay.push_back(p);
+                    return Scan::Found;
+                }
+                if ((p->flags & AV_PKT_FLAG_KEY) != 0) {
+                    clear_replay();  // a later keyframe, still before the target
+                    found = true;
+                }
+            }
+            if (wanted && found) {
+                replay.push_back(p);
+            } else {
+                av_packet_free(&p);
+            }
+        }
+        return found ? Scan::Found : saw_video ? Scan::NotFound : Scan::NoVideo;
+    }
+
     void drain_decoder(AVRational tb) {
         while (avcodec_receive_frame(dec, frame) == 0) {
             queue_pcm(frame, tb);
@@ -420,6 +499,7 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
         *error = "not open";
         return false;
     }
+    m.clear_replay();
     av_bsf_free(&m.bsf);
     avcodec_free_context(&m.dec);
     m.video = m.audio = -1;
@@ -515,6 +595,13 @@ FfmpegSource::Read FfmpegSource::read(Packet *out, std::string *error) {
             return Read::Packet;
         }
         if (m.interrupted) return Read::Interrupted;
+        if (!m.replay.empty()) {
+            AVPacket *p = m.replay.front();
+            m.replay.pop_front();
+            m.consume(p);
+            av_packet_free(&p);
+            continue;
+        }
         if (m.eof) return Read::EndOfStream;
         const int rc = av_read_frame(m.fmt, m.pkt);
         if (rc == AVERROR_EOF) {
@@ -535,27 +622,7 @@ FfmpegSource::Read FfmpegSource::read(Packet *out, std::string *error) {
             *error = m.io_error(rc);
             return Read::Error;
         }
-        const int si = m.pkt->stream_index;
-        const AVRational tb = m.fmt->streams[si]->time_base;
-        if (si == m.video) {
-            if (m.bsf != nullptr) {
-                if (av_bsf_send_packet(m.bsf, m.pkt) == 0) m.drain_bsf(tb);  // takes the packet's reference
-            } else {
-                m.queue_video(m.pkt, tb);
-            }
-        } else if (si == m.audio) {
-            if (m.decode_audio) {
-                if (avcodec_send_packet(m.dec, m.pkt) == 0) m.drain_decoder(tb);
-            } else if (!m.need_key || m.video < 0) {
-                Packet a;
-                a.type = TrackType::Audio;
-                a.key = true;
-                a.data.assign(m.pkt->data, m.pkt->data + m.pkt->size);
-                a.pts_us = m.to_us(m.pkt->pts != AV_NOPTS_VALUE ? m.pkt->pts : m.pkt->dts, tb);
-                a.duration_us = m.pkt->duration > 0 ? av_rescale_q(m.pkt->duration, tb, kMicros) : 0;
-                m.ready.push_back(std::move(a));
-            }
-        }
+        m.consume(m.pkt);
         av_packet_unref(m.pkt);
     }
 }
@@ -566,14 +633,33 @@ bool FfmpegSource::seek(int64_t pts_us, std::string *error) {
         *error = "not open";
         return false;
     }
-    // Seek on the video stream when there is one, so the landing point is a video keyframe.
+    // Seek on the video stream when there is one, so the landing point is a video keyframe. Formats
+    // with a keyframe index (MP4, MKV) land on one; MPEG-TS and other index-less formats land on the
+    // timestamp (before or after it), so read forward to the target and replay from the last keyframe
+    // before it, starting further back while there is none.
     const int stream = m.video >= 0 ? m.video : -1;
-    const int64_t target_us = pts_us + m.start_us;
-    const int64_t ts = stream >= 0 ? av_rescale_q(target_us, kMicros, m.fmt->streams[stream]->time_base) : target_us;
-    const int rc = av_seek_frame(m.fmt, stream, ts, AVSEEK_FLAG_BACKWARD);
-    if (rc < 0) {
-        *error = m.io_error(rc);
-        return false;
+    m.clear_replay();
+    int64_t back_us = 0;
+    for (;;) {
+        const int64_t from_us = std::max<int64_t>(pts_us - back_us, 0);
+        const int64_t ts = stream >= 0 ? av_rescale_q(from_us + m.start_us, kMicros, m.fmt->streams[stream]->time_base)
+                                       : from_us + m.start_us;
+        int rc = -1;
+        // A timestamp search for the start can land after it; go to the first byte instead.
+        if (from_us == 0 && back_us > 0) rc = av_seek_frame(m.fmt, -1, 0, AVSEEK_FLAG_BYTE);
+        if (rc < 0) rc = av_seek_frame(m.fmt, stream, ts, AVSEEK_FLAG_BACKWARD);
+        if (rc < 0) {
+            m.clear_replay();
+            *error = m.io_error(rc);
+            return false;
+        }
+        if (stream < 0) break;
+        const int64_t limit = av_rescale_q(pts_us + m.start_us, kMicros, m.fmt->streams[stream]->time_base);
+        if (m.scan_to_keyframe(limit) != Impl::Scan::NotFound || m.interrupted || (from_us == 0 && back_us > 0) ||
+            back_us >= 16000000) {
+            break;
+        }
+        back_us = back_us == 0 ? 1000000 : back_us * 2;  // 1, 2, 4, 8, 16 s
     }
     if (m.bsf != nullptr) av_bsf_flush(m.bsf);
     if (m.dec != nullptr) avcodec_flush_buffers(m.dec);

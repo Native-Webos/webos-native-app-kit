@@ -10,6 +10,7 @@
 #include "wnk_test.hpp"
 
 #include "wnk/media/controller.hpp"
+#include "wnk/media/device_caps.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -665,4 +666,37 @@ TEST("pts splice: unmap gives content time for timestamps from before and after 
     CHECK_EQ(s.unmap(1200000), int64_t{30000000});
     CHECK_EQ(s.unmap(1300000), int64_t{30100000});
     CHECK_EQ(s.unmap(kNoTime), kNoTime);
+}
+
+TEST("device caps: parses a getConfigs reply (OLED65C1PTB, webOS 6.5.3); unknown stays unknown") {
+    // Captured from the TV on 2026-10-11 (the keys this module asks for).
+    const std::string reply =
+        R"({"subscribed":false,"configs":{"tv.conti.supportHevc":true,"tv.hw.panelResolution":"UD",)"
+        R"("tv.hw.panelOutputFrameRate":"120Hz","tv.model.supportHDR":true,"tv.config.supportDolbyHDRContents":true,)"
+        R"("tv.config.supportDolbyTVATMOS":true,"tv.hw.SoCChipType":"O20N"},"returnValue":true})";
+    const DeviceMediaCaps d = DeviceMediaCaps::parse(reply);
+    CHECK(d.measured);
+    CHECK(d.hevc == true);
+    CHECK(d.uhd_panel == true);
+    CHECK(d.panel_hz == 120);
+    CHECK(d.hdr == true);
+    CHECK(d.dolby_vision == true);
+    CHECK(d.dolby_atmos == true);
+    CHECK_EQ(d.soc, std::string("O20N"));
+    CHECK_EQ(d.summary(), std::string("hevc yes, uhd yes, 120 Hz, hdr yes, dv yes, atmos yes, soc O20N"));
+
+    const DeviceMediaCaps partial = DeviceMediaCaps::parse(
+        R"({"configs":{"tv.hw.panelResolution":"FHD","tv.conti.supportHevc":"maybe"},"returnValue":true})");
+    CHECK(partial.measured);
+    CHECK(partial.uhd_panel == false);
+    CHECK(!partial.hevc.has_value());  // wrong type: unknown, not "no"
+    CHECK(!partial.dolby_vision.has_value());
+    CHECK(!partial.panel_hz.has_value());
+
+    const DeviceMediaCaps bad = DeviceMediaCaps::parse("not json");
+    CHECK(!bad.measured);
+    CHECK(bad.summary().find("not measured") == 0);
+    CHECK(DeviceMediaCaps::request().find("tv.conti.supportHevc") != std::string::npos);
+    // Off webOS the call is unsupported and says so.
+    CHECK(!DeviceMediaCaps::detect(100).measured);
 }

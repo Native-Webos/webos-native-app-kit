@@ -25,6 +25,7 @@
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
 #include "wnk/media/controller.hpp"
+#include "wnk/media/device_caps.hpp"
 #include "wnk/media/ffmpeg_source.hpp"
 #include "wnk/media/ndl_backend.hpp"
 #include "wnk/media/pacing_backend.hpp"
@@ -363,6 +364,7 @@ class Player : public wnk::app::Delegate {
             if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
             if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
         }
+        if (wnk::platform::kIsWebOS) WNK_LOGI(kCat, "device media: %s", DeviceMediaCaps::detect().summary().c_str());
         WNK_LOGI(kCat, "%s; PTS unit %s; NDL pause/seek by %s; lead %d ms", FfmpegSource::version().c_str(),
                  s.pts_unit == PtsUnit::Milliseconds ? "ms" : "us", s.ndl_reload ? "reload" : "hold/splice", s.lead_ms);
         const std::vector<Clip> clips = {

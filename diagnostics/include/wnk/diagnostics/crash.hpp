@@ -43,6 +43,12 @@ struct PreviousCrash {
 // Reads a record left by an earlier run and renames it to <path>.prev, so it is reported once.
 PreviousCrash take_previous_crash(const std::string &path);
 
+// A function the handler calls after writing the record and before re-raising, e.g. to release a
+// hardware decoder that would otherwise stay acquired after the process dies (lgnome releases NDL
+// this way). It runs in signal context, so it should do as little as possible; an alarm(2) bounds
+// it in case it hangs. Up to 4; registration is not thread-safe (call it from the main thread).
+void add_crash_cleanup(void (*fn)());
+
 // Hex GNU build id of the main executable (NT_GNU_BUILD_ID), or empty if it has none.
 std::string own_build_id();
 

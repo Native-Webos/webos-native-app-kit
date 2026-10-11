@@ -9,3 +9,10 @@ if (TARGET wnk_ffmpeg)
     add_library(wnk_media_ffmpeg STATIC src/ffmpeg_source.cpp)
     target_link_libraries(wnk_media_ffmpeg PUBLIC wnk_media PRIVATE wnk_ffmpeg)
 endif ()
+
+# LG NDL DirectMedia v2 backend. Builds everywhere (the library is dlopened); only works on webOS 5.3.1+.
+add_library(wnk_media_ndl STATIC src/ndl_backend.cpp)
+target_link_libraries(wnk_media_ndl PUBLIC wnk_media PRIVATE wnk_diagnostics ${CMAKE_DL_LIBS})
+if (WNK_WEBOS)
+    target_sources(wnk_media_ndl PRIVATE src/ndl_abi_check.c)  # layout asserts against the NDK header
+endif ()

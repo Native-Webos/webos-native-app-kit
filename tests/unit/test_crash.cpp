@@ -14,6 +14,7 @@
 #include <sstream>
 #include <string>
 
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -73,6 +74,29 @@ TEST("crash: a real segfault writes a record and the process still dies with SIG
     CHECK(rec.find(" r-xp ") != std::string::npos);  // executable mappings for offline symbolisation
     CHECK(rec.find("end\n") != std::string::npos);
     munmap(page, 4096);
+    std::remove(path.c_str());
+}
+
+namespace {
+void touch_marker() {
+    // Signal context: only async-signal-safe calls.
+    const char *p = std::getenv("WNK_TEST_MARKER");
+    if (p != nullptr) close(open(p, O_CREAT | O_WRONLY, 0600));
+}
+}  // namespace
+
+TEST("crash: cleanup hooks run after the record is written") {
+    const std::string path = temp_path("hook");
+    const std::string marker = path + ".marker";
+    std::remove(marker.c_str());
+    setenv("WNK_TEST_MARKER", marker.c_str(), 1);
+    const int sig = crash_child(path, [] {
+        add_crash_cleanup(&touch_marker);
+        std::abort();
+    });
+    CHECK_EQ(sig, SIGABRT);
+    CHECK(access(marker.c_str(), F_OK) == 0);
+    std::remove(marker.c_str());
     std::remove(path.c_str());
 }
 

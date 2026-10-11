@@ -35,6 +35,8 @@ char g_maps_buf[2048];
 char g_line[512];
 
 constexpr int kSignals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+void (*g_cleanup[4])() = {};
+std::atomic<int> g_cleanup_count{0};
 
 void copy(char *dst, size_t cap, const std::string &src) {
     const size_t n = std::min(cap - 1, src.size());
@@ -189,6 +191,14 @@ void handler(int sig, siginfo_t *info, void *context) {
         put(fd, "end\n");
         close(fd);
     }
+    // Best effort, bounded: if a cleanup hangs, SIGALRM (default action) ends the process.
+    const int cleanups = g_cleanup_count.load();
+    if (cleanups > 0) {
+        alarm(2);
+        for (int i = 0; i < cleanups; ++i) {
+            if (g_cleanup[i] != nullptr) g_cleanup[i]();
+        }
+    }
     errno = saved_errno;
     // SA_RESETHAND restored the default action. Re-raise so the process dies with the real signal;
     // for a hardware fault, returning re-executes the faulting instruction with the same effect.
@@ -263,6 +273,17 @@ bool install_crash_handler(const CrashConfig &config, std::string *error) {
 }
 
 void set_crash_state(const char *state) { g_state.store(state, std::memory_order_relaxed); }
+
+void add_crash_cleanup(void (*fn)()) {
+    const int n = g_cleanup_count.load();
+    for (int i = 0; i < n; ++i) {
+        if (g_cleanup[i] == fn) return;
+    }
+    if (n < 4) {
+        g_cleanup[n] = fn;
+        g_cleanup_count.store(n + 1);
+    }
+}
 
 PreviousCrash take_previous_crash(const std::string &path) {
     PreviousCrash out;

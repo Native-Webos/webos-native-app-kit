@@ -388,3 +388,28 @@ TEST("controller: destroying a playing controller stops it cleanly") {
     CHECK_EQ(log->unloads.load(), 1);
     main.drain();  // callbacks posted before destruction must not touch the dead controller
 }
+
+#include "wnk/media/ndl_backend.hpp"
+
+TEST("ndl backend: PTS conversion, PCM rate table, and a clear failure where NDL is absent") {
+    CHECK_EQ(NdlBackend::convert_pts(1500000, PtsUnit::Microseconds), 1500000LL);
+    CHECK_EQ(NdlBackend::convert_pts(1500000, PtsUnit::Milliseconds), 1500LL);
+    CHECK_EQ(NdlBackend::convert_pts(kNoTime, PtsUnit::Milliseconds), 0LL);
+    CHECK_EQ(NdlBackend::pcm_rate_enum(48000), 1);
+    CHECK_EQ(NdlBackend::pcm_rate_enum(44100), 2);
+    CHECK_EQ(NdlBackend::pcm_rate_enum(96000), 0);
+    std::string why;
+    if (!NdlBackend::available(&why)) {  // the host: no LG library
+        NdlBackend b;
+        StreamFormat f;
+        f.video = VideoFormat{CodecId::H264, 1920, 1080, 25};
+        std::string err;
+        CHECK(!b.load(f, &err));
+        CHECK(err.find("NDL unavailable") != std::string::npos);
+        CHECK(b.feed(Packet{}) == MediaBackend::Feed::Error);
+    }
+    const BackendCaps c = NdlBackend().caps();
+    CHECK(c.accepts(CodecId::Hevc));
+    CHECK(!c.accepts(CodecId::Aac));  // decoded to PCM by the source
+    CHECK(!c.pause);
+}

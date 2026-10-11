@@ -29,6 +29,7 @@ using EventCb = void (*)(int type, long long num, const char *str, void *ctx);
 struct Api {
     void *handle = nullptr;
     void (*ctor)(void *self, const char *uid) = nullptr;
+    void (*dtor)(void *self) = nullptr;
     int (*load)(void *self, const char *payload, EventCb cb, void *ctx) = nullptr;
     void (*feed)(void *sret, void *self, const char *payload) = nullptr;  // returns std::string via sret
     int (*play)(void *self) = nullptr;
@@ -65,6 +66,7 @@ const Api &api() {
         return g_api;
     }
     bool ok = sym(h, g_api.ctor, "_ZN17StarfishMediaAPIsC1EPKc");
+    ok = sym(h, g_api.dtor, "_ZN17StarfishMediaAPIsD1Ev") && ok;
     ok = sym(h, g_api.load, "_ZN17StarfishMediaAPIs4LoadEPKcPFvixS1_PvES2_") && ok;
     ok = sym(h, g_api.feed, "_ZN17StarfishMediaAPIs4FeedB5cxx11EPKc") && ok;
     ok = sym(h, g_api.play, "_ZN17StarfishMediaAPIs4PlayEv") && ok;
@@ -236,6 +238,11 @@ void StarfishBackend::set_event_callback(EventFn fn) {
 }
 
 void StarfishBackend::on_event(int type, long long num, const char *str) {
+    if (type == 23) {  // unload completed: the destructor may run
+        std::lock_guard<std::mutex> lock(unload_mutex_);
+        unload_completed_ = true;
+        unload_cv_.notify_all();
+    }
     if (type == 0) {  // FRAMEREADY: the presented PTS, in ns
         presented_out_us_ = num / 1000;
         if (!seen_frame_.exchange(true)) WNK_LOGI(kCat, "first frame presented (pts %lld ns)", num);
@@ -292,6 +299,10 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
     }
     load_completed_ = false;
     seen_frame_ = false;
+    {
+        std::lock_guard<std::mutex> lock(unload_mutex_);
+        unload_completed_ = false;
+    }
     presented_out_us_ = kNoTime;
     // uid NULL: the pipeline registers on the pre-authorised media namespace (PlxNative).
     api().ctor(object, nullptr);
@@ -373,11 +384,21 @@ void StarfishBackend::unload() {
     }
     const auto t = std::chrono::steady_clock::now();
     const int rc = api().unload(object);
-    WNK_LOGI(kCat, "Unload -> %d (%.1f ms)", rc,
+    // The destructor is what gives the decoders back (a Load after an Unload without it waited for
+    // them forever on webOS 6.5.3), and PlxNative runs it only after UnloadCompleted (type 23).
+    bool completed;
+    {
+        std::unique_lock<std::mutex> lock(unload_mutex_);
+        completed = unload_cv_.wait_for(lock, std::chrono::seconds(3), [this] { return unload_completed_; });
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_registry_mutex);
+        g_registry.erase(epoch);  // later callbacks are dropped
+    }
+    if (completed) api().dtor(object);
+    WNK_LOGI(kCat, "Unload -> %d, %s (%.1f ms)", rc, completed ? "destroyed" : "no UnloadCompleted: object kept",
              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count());
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
-    g_registry.erase(epoch);
-    // The object block is intentionally never freed (see the header).
+    // The memory block itself is never freed or reused: a late callback carries only its address.
 }
 
 bool StarfishBackend::pause(bool paused) {

@@ -11,8 +11,9 @@
 // GPL-3.0-or-later; THIRD-PARTY-NOTICES.md):
 //   * The C++ class is reached through its mangled symbols, dlsym'd from a dlopen'd libplayerAPIs
 //     (no DT_NEEDED). The object is constructed in place in a 64 KiB, 16-byte aligned block (its real
-//     size is unknown, so never new/delete) with uid NULL. Each Load gets a fresh block that is never
-//     freed or reused: a late callback carries only the object's address.
+//     size is unknown, so never new/delete) with uid NULL. Each Load gets a fresh block. After Unload
+//     and UnloadCompleted (type 23) the destructor runs, which releases the decoders; the block itself
+//     is never freed or reused, as a late callback carries only the object's address.
 //   * Feed returns a std::string through a hidden sret pointer; its char* is at offset 0 (the short
 //     replies "Ok" / "BufferFull" live in the small-string buffer).
 //   * Video binds through an SDL-webOS exported window: created on the main thread, its id goes into
@@ -31,6 +32,7 @@
 #include "wnk/media/pts_splice.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -102,6 +104,9 @@ class StarfishBackend : public MediaBackend {
     std::atomic<int> events_logged_{0};
     std::mutex events_mutex_;
     EventFn events_;
+    std::mutex unload_mutex_;
+    std::condition_variable unload_cv_;
+    bool unload_completed_ = false;  // UnloadCompleted (type 23) for the current object
 };
 
 }  // namespace wnk::media

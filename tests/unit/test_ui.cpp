@@ -865,3 +865,136 @@ TEST("spring: starts gently, never overshoots, keeps velocity when retargeted, d
     d.target = 200;
     CHECK_EQ(d.velocity, v);
 }
+
+// ---- text field -----------------------------------------------------------------------------------
+
+TEST("text field: OK starts editing and claims text input; typed text, Backspace and arrows edit it") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(10);
+    auto &field = col.add<TextField>("Search");
+    field.name = "search";
+    auto &after = col.add<Button>("Go", [](Ui &) {});
+    int changes = 0;
+    field.set_on_change([&changes](Ui &, const std::string &) { ++changes; });
+    env.ui.focus(&field);
+    env.frame();
+    CHECK(env.r.drew_text("Search"));  // placeholder while empty
+    CHECK(env.ui.text_input_view() == nullptr);
+    CHECK(env.press(Action::Confirm));
+    CHECK(field.editing());
+    CHECK(env.ui.text_input_view() == &field);
+    CHECK(env.ui.handle_text("caf\xC3\xA9"));  // café: the é is two bytes
+    CHECK(env.ui.handle_text(" au lait"));
+    CHECK_EQ(field.text(), std::string("caf\xC3\xA9 au lait"));
+    CHECK_EQ(field.cursor(), field.text().size());
+    for (int i = 0; i < 9; ++i) env.ui.handle_edit_key(input::EditKey::Left);
+    CHECK_EQ(field.cursor(), size_t{3});  // before the é, not inside it
+    env.ui.handle_edit_key(input::EditKey::Delete);
+    CHECK_EQ(field.text(), std::string("caf au lait"));
+    env.ui.handle_edit_key(input::EditKey::Right);
+    env.ui.handle_edit_key(input::EditKey::Backspace);
+    CHECK_EQ(field.text(), std::string("cafau lait"));
+    env.ui.handle_edit_key(input::EditKey::Home);
+    env.ui.handle_text("\xE2\x9C\x93");  // ✓ inserted at the start
+    CHECK_EQ(field.text(), std::string("\xE2\x9C\x93" "cafau lait"));
+    CHECK_EQ(changes, 5);
+    env.ui.handle_edit_key(input::EditKey::End);
+    for (int i = 0; i < 3; ++i) env.ui.handle_edit_key(input::EditKey::Backspace);
+    CHECK_EQ(field.text(), std::string("\xE2\x9C\x93" "cafau l"));
+    env.frame();
+    CHECK(env.r.drew_text("\xE2\x9C\x93" "cafau l"));
+    // Down leaves the field: editing ends with the text kept.
+    CHECK(env.press(Action::Down));
+    CHECK(env.ui.is_focused(&after));
+    CHECK(!field.editing());
+    CHECK(env.ui.text_input_view() == nullptr);
+    CHECK(!env.ui.handle_text("x"));
+    CHECK_EQ(field.text(), std::string("\xE2\x9C\x93" "cafau l"));
+}
+
+TEST("text field: Enter submits and ends editing; Back ends editing without submitting") {
+    Env env;
+    auto &field = env.ui.root().add<TextField>();
+    std::vector<std::string> submitted;
+    field.set_on_submit([&submitted](Ui &, const std::string &t) { submitted.push_back(t); });
+    env.ui.focus(&field);
+    env.press(Action::Confirm);
+    env.ui.handle_text("hello");
+    env.ui.handle_edit_key(input::EditKey::Enter);
+    CHECK(!field.editing());
+    REQUIRE(submitted.size() == 1u);
+    CHECK_EQ(submitted[0], std::string("hello"));
+    // OK as an action (no shell routing) submits too.
+    env.press(Action::Confirm);
+    env.ui.handle_text("!");
+    env.press(Action::Confirm);
+    REQUIRE(submitted.size() == 2u);
+    CHECK_EQ(submitted[1], std::string("hello!"));
+    // Back while editing is consumed by the field; at rest it bubbles.
+    env.press(Action::Confirm);
+    CHECK(env.press(Action::Back));
+    CHECK(!field.editing());
+    CHECK(!env.press(Action::Back));
+    CHECK_EQ(submitted.size(), size_t{2});
+}
+
+TEST("text field: control characters are dropped, max length cuts input, password shows bullets") {
+    Env env;
+    auto &field = env.ui.root().add<TextField>();
+    field.set_max_length(6).set_password(true);
+    env.ui.focus(&field);
+    env.press(Action::Confirm);
+    env.ui.handle_text("a\nb\tc\x7F");
+    CHECK_EQ(field.text(), std::string("abc"));
+    env.ui.handle_text("d\xC3\xA9" "fgh");  // only three more code points fit
+    CHECK_EQ(field.text(), std::string("abcd\xC3\xA9" "f"));
+    CHECK_EQ(field.display_text(), std::string("\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2"));
+    env.frame();
+    CHECK(!env.r.drew_text("abcd\xC3\xA9" "f"));  // the text itself is never drawn
+    env.ui.handle_edit_key(input::EditKey::Clear);
+    CHECK(field.text().empty());
+    field.set_text("toolongvalue");
+    CHECK_EQ(field.text(), std::string("toolon"));
+}
+
+TEST("text field: composition is shown until committed; a closed keyboard ends editing") {
+    Env env;
+    auto &field = env.ui.root().add<TextField>();
+    env.ui.focus(&field);
+    env.press(Action::Confirm);
+    env.ui.handle_composition("\xE3\x84\xB1");  // ㄱ being composed
+    CHECK_EQ(field.composition(), std::string("\xE3\x84\xB1"));
+    CHECK(field.text().empty());
+    env.frame();
+    CHECK(env.r.drew_text("\xE3\x84\xB1"));
+    env.ui.handle_text("\xEA\xB0\x80");  // 가 committed
+    CHECK(field.composition().empty());
+    CHECK_EQ(field.text(), std::string("\xEA\xB0\x80"));
+    env.ui.text_input_closed();
+    CHECK(!field.editing());
+    CHECK(env.ui.text_input_view() == nullptr);
+    CHECK(env.ui.is_focused(&field));  // focus stays: OK opens the keyboard again
+    env.press(Action::Confirm);
+    CHECK(field.editing());
+}
+
+TEST("text field: removing the editing field releases text input; long text scrolls to the caret") {
+    Env env;
+    auto &col = env.ui.root().add<Column>();
+    auto &field = col.add<TextField>();
+    field.set_width(Dim::fixed(400));  // content 344 wide: 21 characters of 16 in the fake metrics
+    env.ui.focus(&field);
+    env.press(Action::Confirm);
+    env.ui.handle_text("abcdefghijklmnopqrstuvwxyz0123456789");
+    env.frame();
+    REQUIRE(!env.r.texts.empty());
+    // The text before the caret is drawn shifted left so its end (the caret) stays inside the field.
+    const auto &before = env.r.texts.front();
+    const float end = before.baseline.x + 36 * 16;
+    const Rect c = field.content_rect();
+    CHECK(end <= c.x + c.w);
+    CHECK(end >= c.x + c.w - 20);
+    col.remove_child(&field);
+    CHECK(env.ui.text_input_view() == nullptr);
+    CHECK(!env.ui.handle_text("x"));
+}

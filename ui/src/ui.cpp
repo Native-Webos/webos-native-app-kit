@@ -305,6 +305,59 @@ bool Ui::route(const input::ActionEvent &ev) {
     return false;
 }
 
+// ---- text input -----------------------------------------------------------------------------------
+
+void Ui::begin_text_input(View *v) { text_view_ = v != nullptr ? v->id_ : 0; }
+
+void Ui::end_text_input(View *v) {
+    if (v != nullptr && v->id_ == text_view_) text_view_ = 0;
+}
+
+View *Ui::text_input_view() {
+    if (text_view_ == 0) return nullptr;
+    // An entry point: the holder may have been removed since the last refresh.
+    Entry e(depth_);
+    if (e.outermost()) {
+        views_.clear();
+        graveyard_.clear();
+    }
+    refresh();
+    View *v = find(text_view_);
+    if (v == nullptr) text_view_ = 0;
+    return v;
+}
+
+bool Ui::handle_text(const std::string &utf8) {
+    View *v = text_input_view();
+    if (v == nullptr) return false;
+    Entry e(depth_);
+    const bool used = v->on_text(*this, utf8);
+    refresh();
+    return used;
+}
+
+bool Ui::handle_edit_key(input::EditKey key) {
+    View *v = text_input_view();
+    if (v == nullptr) return false;
+    Entry e(depth_);
+    const bool used = v->on_edit_key(*this, key);
+    refresh();
+    return used;
+}
+
+void Ui::handle_composition(const std::string &utf8) {
+    if (View *v = text_input_view()) v->on_composition(*this, utf8);
+}
+
+void Ui::text_input_closed() {
+    View *v = text_input_view();
+    text_view_ = 0;
+    if (v == nullptr) return;
+    Entry e(depth_);
+    v->on_text_input_closed(*this);
+    refresh();
+}
+
 // ---- pointer --------------------------------------------------------------------------------------
 
 View *Ui::hit(View &v, Point p, Point offset, Rect clip, bool focusable_only) {

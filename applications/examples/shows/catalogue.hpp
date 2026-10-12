@@ -90,6 +90,9 @@ bool contains(const std::vector<Show> &list, int id);
 std::vector<Show> top_rated(const std::vector<Show> &all, size_t n);
 std::vector<Show> most_popular(const std::vector<Show> &all, size_t n);
 std::vector<Show> recently_updated(const std::vector<Show> &all, size_t n);
+// Shows whose name contains every word of `query`, ignoring ASCII case, in catalogue order; all of
+// them for a blank query.
+std::vector<Show> search_by_name(const std::vector<Show> &all, std::string_view query);
 
 // "just now", "5 min ago", "3 h ago", "2 days ago"; "" for a time in the future (wrong TV clock).
 std::string age_text(int64_t seconds);

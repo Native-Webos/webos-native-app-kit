@@ -368,6 +368,35 @@ std::vector<Show> recently_updated(const std::vector<Show> &all, size_t n) {
                   [](const Show &s) { return s.updated > 0; });
 }
 
+std::vector<Show> search_by_name(const std::vector<Show> &all, std::string_view query) {
+    auto lower = [](std::string_view in) {
+        std::string out(in);
+        for (char &c : out) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        return out;
+    };
+    std::vector<std::string> words;
+    std::string word;
+    for (char c : lower(query) + " ") {
+        if (c == ' ' || c == '\t') {
+            if (!word.empty()) words.push_back(std::move(word));
+            word.clear();
+        } else {
+            word += c;
+        }
+    }
+    if (words.empty()) return all;
+    std::vector<Show> out;
+    for (const Show &s : all) {
+        const std::string name = lower(s.name);
+        if (std::all_of(words.begin(), words.end(), [&name](const std::string &w) { return name.find(w) != std::string::npos; })) {
+            out.push_back(s);
+        }
+    }
+    return out;
+}
+
 std::string age_text(int64_t seconds) {
     if (seconds < 0) return "";
     if (seconds < 60) return "just now";

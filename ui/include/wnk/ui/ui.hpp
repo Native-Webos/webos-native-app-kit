@@ -143,6 +143,20 @@ class Ui {
     void snap_focus_ring() { ring_snap_ = true; }
     focus::FocusManager &focus_manager() { return fm_; }
 
+    // ---- text input ----------------------------------------------------------------------------------
+    // A view that edits text (TextField) calls begin_text_input while it edits. While a view holds text
+    // input the app shell turns SDL text input on (on the TV: LG's on-screen keyboard), and sends typed
+    // text and editing keys here instead of mapping those keys to actions. One view at a time.
+    void begin_text_input(View *v);
+    void end_text_input(View *v);  // no effect unless `v` holds text input
+    // The view holding text input, or nullptr (also once that view has been removed from the tree).
+    View *text_input_view();
+    bool handle_text(const std::string &utf8);
+    bool handle_edit_key(input::EditKey key);
+    void handle_composition(const std::string &utf8);
+    // The system closed the keyboard: text input ends and the view is told.
+    void text_input_closed();
+
     // ---- overlays ----------------------------------------------------------------------------------
     // Shows a modal dialog: focus is trapped in it until it is dismissed, then restored.
     Dialog &show_dialog(std::unique_ptr<Dialog> dialog);
@@ -198,6 +212,7 @@ class Ui {
     float alpha_ = 1;
     bool layout_dirty_ = true;
     uint64_t layouts_ = 0;
+    ViewId text_view_ = 0;  // holds text input
     ViewId pending_focus_ = 0;
     ViewId pending_within_ = 0;
     focus::NodeId notified_focus_ = focus::kNoNode;

@@ -187,3 +187,19 @@ TEST("age and card text") {
     s.rating = 6.6f;
     CHECK_EQ(card_subtitle(s), std::string("2013 · 6.6"));
 }
+
+TEST("search matches every word of the query in the name, ignoring case") {
+    std::vector<Show> all(4);
+    all[0].name = "Northern Signal 1";
+    all[1].name = "Quiet Harbour 2";
+    all[2].name = "Signal Fires";
+    all[3].name = "Caf\xC3\xA9 Society";
+    CHECK_EQ(search_by_name(all, "").size(), size_t{4});
+    CHECK_EQ(search_by_name(all, "   ").size(), size_t{4});
+    auto r = search_by_name(all, "SIGNAL");
+    REQUIRE(r.size() == 2u);
+    CHECK_EQ(r[0].name, std::string("Northern Signal 1"));
+    CHECK_EQ(search_by_name(all, "signal north").size(), size_t{1});
+    CHECK_EQ(search_by_name(all, "north  fires").size(), size_t{0});
+    CHECK_EQ(search_by_name(all, "caf\xC3\xA9").size(), size_t{1});
+}

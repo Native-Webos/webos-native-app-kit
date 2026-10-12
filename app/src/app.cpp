@@ -107,7 +107,8 @@ class Watchdog {
 
 // Scripted input for host tests: <prefix>_KEYS is a comma-separated list, one step every 6 loop
 // iterations after the 20th: SDL scancode names, move@X:Y / click@X:Y (logical units), wheel@N,
-// bg / fg (the SDL app background/foreground event pairs SDL-webOS sends). <prefix>_SHOT saves the
+// bg / fg (the SDL app background/foreground event pairs SDL-webOS sends), text@STRING (typed text as
+// SDL_TEXTINPUT, what LG's keyboard sends; no commas), kbclose (the viewer closes the keyboard). <prefix>_SHOT saves the
 // last drawn frame as BMP. The app quits when the script ends.
 class Script {
  public:
@@ -137,9 +138,10 @@ class Script {
 
  private:
     struct Step {
-        enum Kind { Key, Move, Click, Wheel, Background, Foreground } kind = Key;
+        enum Kind { Key, Move, Click, Wheel, Background, Foreground, Text, KeyboardClosed } kind = Key;
         SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
         float x = 0, y = 0;
+        std::string text;
     };
     void parse(const std::string &list) {
         size_t start = 0;
@@ -153,6 +155,11 @@ class Script {
                 st.kind = Step::Click;
             } else if (std::sscanf(name.c_str(), "wheel@%f", &st.y) == 1) {
                 st.kind = Step::Wheel;
+            } else if (name.rfind("text@", 0) == 0) {
+                st.kind = Step::Text;
+                st.text = name.substr(5);
+            } else if (name == "kbclose") {
+                st.kind = Step::KeyboardClosed;
             } else if (name == "bg") {
                 st.kind = Step::Background;
             } else if (name == "fg") {
@@ -221,6 +228,17 @@ class Script {
                 ev.wheel.y = static_cast<Sint32>(st.y);
                 ev.wheel.timestamp = SDL_GetTicks();
                 SDL_PushEvent(&ev);
+                break;
+            case Step::Text:
+                ev.type = SDL_TEXTINPUT;
+                SDL_strlcpy(ev.text.text, st.text.c_str(), sizeof ev.text.text);
+                ev.text.timestamp = SDL_GetTicks();
+                SDL_PushEvent(&ev);
+                break;
+            case Step::KeyboardClosed:
+                // What SDL-webOS does when the panel closes: text events off (SDL_IsTextInputActive false).
+                SDL_EventState(SDL_TEXTINPUT, SDL_DISABLE);
+                SDL_EventState(SDL_TEXTEDITING, SDL_DISABLE);
                 break;
             case Step::Background:
                 push_type(SDL_APP_WILLENTERBACKGROUND);
@@ -494,6 +512,7 @@ class Shell final : public Context {
             const float events_ms = static_cast<float>(ms_since(t_events));
 
             dispatcher_->drain(32, std::chrono::milliseconds(4));
+            sync_text_input();
             const bool script_done = script.tick(iteration++, *renderer_, window_);
             if (script_done && !lifecycle_.renders()) {
                 quit("script finished");
@@ -562,6 +581,12 @@ class Shell final : public Context {
             case SDL_MOUSEWHEEL:
                 if (auto p = input::pointer_event_from_sdl(ev, window_)) on_pointer(*p);
                 break;
+            case SDL_TEXTINPUT:
+                if (lifecycle_.renders()) ui_->handle_text(ev.text.text);
+                break;
+            case SDL_TEXTEDITING:
+                if (lifecycle_.renders()) ui_->handle_composition(ev.edit.text);
+                break;
             case SDL_WINDOWEVENT:
                 on_window(ev);
                 break;
@@ -611,6 +636,7 @@ class Shell final : public Context {
 
     void background() {
         release_keys();
+        if (ui_ && ui_->text_input_view() != nullptr) ui_->text_input_closed();  // the keyboard goes with the app
         lifecycle_.dispatch(Event::Background, SDL_GetTicks());
     }
 
@@ -627,7 +653,48 @@ class Shell final : public Context {
                      key->repeat ? 1 : 0, b != nullptr ? input::action_name(b->action) : "unmapped",
                      ui_->pointer_active() ? 1 : 0);
         }
+        // While a view edits text, editing keys go to it and printable keys arrive as SDL_TEXTINPUT, so
+        // neither becomes an action (Backspace is not Back, Space does not pause). Key-ups still reach
+        // the mapper: it ignores ups whose down it never saw, and ends a press that began before.
+        if (key->down && lifecycle_.renders() && ui_->text_input_view() != nullptr) {
+            if (auto edit = input::edit_key_from(*key)) {
+                // Holding OK must not submit again and again; erasing and moving repeat.
+                if (!(key->repeat && *edit == input::EditKey::Enter)) ui_->handle_edit_key(*edit);
+                return;
+            }
+            if (input::key_types_text(*key)) return;
+        }
         if (auto a = mapper_.map(*key)) handle_action(*a);
+    }
+
+    // SDL text input follows the Ui: on while a view edits (on the TV this shows LG's keyboard), off
+    // otherwise. The viewer can close LG's keyboard, which turns SDL text input off underneath us.
+    void sync_text_input() {
+        ui::View *v = lifecycle_.renders() ? ui_->text_input_view() : nullptr;
+        if (v != nullptr && !text_input_on_) {
+            const Rect r = v->screen_rect();
+            const Point a = renderer_->mapping().to_pixels({r.x, r.y});
+            const Point b = renderer_->mapping().to_pixels({r.x + r.w, r.y + r.h});
+            int ww = 0, wh = 0, dw = 0, dh = 0;
+            SDL_GetWindowSize(window_, &ww, &wh);
+            SDL_GL_GetDrawableSize(window_, &dw, &dh);
+            const float sx = static_cast<float>(ww) / std::max(1, dw), sy = static_cast<float>(wh) / std::max(1, dh);
+            SDL_Rect rect{static_cast<int>(a.x * sx), static_cast<int>(a.y * sy), static_cast<int>((b.x - a.x) * sx),
+                          static_cast<int>((b.y - a.y) * sy)};
+            SDL_SetTextInputRect(&rect);
+            SDL_StartTextInput();
+            text_input_on_ = true;
+            WNK_LOGI("text", "text input on for %s (screen keyboard %s)", v->name.empty() ? "a view" : v->name.c_str(),
+                     SDL_HasScreenKeyboardSupport() ? "supported" : "not supported");
+        } else if (v == nullptr && text_input_on_) {
+            SDL_StopTextInput();
+            text_input_on_ = false;
+            WNK_LOGI("text", "text input off");
+        } else if (v != nullptr && !SDL_IsTextInputActive()) {
+            text_input_on_ = false;
+            WNK_LOGI("text", "keyboard closed by the system: editing ends");
+            ui_->text_input_closed();
+        }
     }
 
     void draw_overlay() {
@@ -661,6 +728,7 @@ class Shell final : public Context {
                 return;
             }
             last_back_ = now;
+            WNK_LOGI(kCat, "Back at root: asking for a second Back");
             ui_->toast("Press Back again to exit", kDoubleBackMs);
         }
     }
@@ -770,6 +838,7 @@ class Shell final : public Context {
     diagnostics::DeviceInfo device_;
     bool sdl_ = false;
     bool quit_requested_ = false;
+    bool text_input_on_ = false;  // SDL text input started for a view
     SDL_Window *window_ = nullptr;
     SDL_GLContext gl_ = nullptr;
     std::unique_ptr<render::Gles2Renderer> renderer_;

@@ -199,7 +199,17 @@ if (TARGET wnk-shows AND Python3_FOUND)
     string(REPEAT ",Down" 50 WNK_SHOWS_DOWN50)
     wnk_shows_e2e(grid_pages_to_the_end "" "${WNK_SHOWS_WAIT},Left,Down,Right${WNK_SHOWS_DOWN50}${WNK_SHOWS_DOWN50},${WNK_SHOWS_WAIT}"
             "page 1: 50 shows.*page 2: end of the catalogue at 300 shows")
-    foreach (t details_back_restores_focus retry_after_server_error unreadable_reply back_cancels_details grid_pages_to_the_end)
+    # Search: OK on the field turns text input on; typed text (SDL_TEXTINPUT, as LG's keyboard sends)
+    # filters the grid; Backspace erases instead of going Back; OK submits and moves to the results.
+    wnk_shows_e2e(search_filters_grid "" "${WNK_SHOWS_WAIT},Left,Down,Right,Up,Return,text@embex,Z,Backspace,text@r,Z,Return,Z,Z"
+            "focus browse.search.*text input on for browse.search.*search \"ember\": 36 of 250 shows.*text input off.*focus grid.item0")
+    # The viewer closes the keyboard: editing ends, OK opens it again, Back ends editing on the screen.
+    wnk_shows_e2e(search_keyboard_closed "" "${WNK_SHOWS_WAIT},Left,Down,Right,Up,Return,kbclose,Z,Z,Return,Z,Escape,Z,Z"
+            "text input on for browse.search.*keyboard closed by the system: editing ends.*text input on for browse.search.*text input off")
+    set_tests_properties(e2e.shows.search_keyboard_closed PROPERTIES
+            FAIL_REGULAR_EXPRESSION "Back at root|${WNK_SANITIZER_FAIL}")
+    foreach (t details_back_restores_focus retry_after_server_error unreadable_reply back_cancels_details grid_pages_to_the_end
+            search_filters_grid search_keyboard_closed)
         set_tests_properties(e2e.shows.${t} PROPERTIES FIXTURES_REQUIRED shows_state)
     endforeach ()
     set_tests_properties(e2e.shows.back_cancels_details PROPERTIES

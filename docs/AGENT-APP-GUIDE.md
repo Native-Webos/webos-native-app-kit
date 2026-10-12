@@ -285,6 +285,7 @@ stubbing a lookalike.
 | Details page taller than the screen | `ScrollView` with one `Column` child. It follows focus. |
 | Poster / thumbnail | `ImageView` or `Card`. URL is `https://…` or `file://` + `ctx.launch().app_dir`. |
 | Button, disabled control | `Button`, `set_enabled(false)`. |
+| Search box, server address, user name, password | `TextField` (`set_password`, `set_max_length`, `set_on_change`, `set_on_submit`). OK or a click edits it: the shell opens LG's on-screen keyboard; Back ends editing. See Example C's Browse search. |
 | Modal confirm | `ui.show_dialog`. Focus is trapped; Back dismisses when `back_dismisses` is true; focus returns to the opener. |
 | Transient message | `ui.toast(text)`. |
 | Keep the screen on during video, a slideshow or a game | Hold `ctx.keep_screen_on("video playing")` while it moves; `release()` on pause, end or error. See Example D. |
@@ -713,7 +714,7 @@ Say these are missing. Do not emulate them with a fake.
 
 | Gap | Consequence |
 |---|---|
-| No text field, IME, or on-screen keyboard | You cannot ask the user to type. Pick from lists, or take the string from launch params / a paired client. |
+| No text selection, clipboard, or multi-line text area | `TextField` is one line with a cursor. LG's keyboard opening for it is host-tested, not yet seen on a TV. |
 | No Widevine / PlayReady | Encrypted content plays only with ClearKey (the app has the keys). |
 | No scale or rotation | Focus "zoom" is the ring, not a scaled card. |
 | No complex-script shaping | Arabic, Hebrew, and Indic runs will be wrong. |

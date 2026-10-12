@@ -658,10 +658,15 @@ class HomeScreen : public Screen {
     }
 
     void set_grid_items() {
-        grid_->set_items(all_.size(), [this](Ui &, size_t i) { return make_card(all_[i], "grid.item" + std::to_string(i)); });
+        browse_ = shows::search_by_name(all_, query_);
+        grid_->set_items(browse_.size(), [this](Ui &, size_t i) { return make_card(browse_[i], "grid.item" + std::to_string(i)); });
         char text[96];
-        std::snprintf(text, sizeof text, "%zu shows%s", all_.size(),
-                      from_saved_ ? " in the saved copy" : end_ ? ", the whole catalogue" : "");
+        if (browse_.size() != all_.size()) {
+            std::snprintf(text, sizeof text, "%zu of %zu shows match", browse_.size(), all_.size());
+        } else {
+            std::snprintf(text, sizeof text, "%zu shows%s", all_.size(),
+                          from_saved_ ? " in the saved copy" : end_ ? ", the whole catalogue" : "");
+        }
         browse_info_->set_text(text);
     }
 
@@ -788,12 +793,25 @@ class HomeScreen : public Screen {
         head.add<Label>("All shows", TextRole::Title);
         browse_info_ = &head.add<Label>("", TextRole::Small);
         browse_info_->set_muted(true).set_align(Align::Start, Align::End);
+        // Search filters the shows loaded so far as the viewer types; OK on LG's keyboard goes to the results.
+        search_ = &col.add<TextField>("Search by name");
+        search_->name = "browse.search";
+        search_->set_width(Dim::fixed(720)).set_align(Align::Start, Align::Start);
+        search_->set_max_length(60);
+        search_->set_on_change([this](Ui &, const std::string &q) {
+            query_ = q;
+            set_grid_items();
+        });
+        search_->set_on_submit([this](Ui &ui, const std::string &q) {
+            WNK_LOGI(kCat, "search \"%s\": %zu of %zu shows", q.c_str(), browse_.size(), all_.size());
+            if (!browse_.empty()) ui.focus_within(grid_);
+        });
         grid_ = &col.add<CollectionView>(Axis::Vertical, kGridColumns, kGridCell, 28);
         grid_->set_height(Dim::fill());
         grid_->name = "grid";
-        grid_->on_activate = [this](Ui &ui, size_t i) { open_details(ui, all_[i]); };
+        grid_->on_activate = [this](Ui &ui, size_t i) { open_details(ui, browse_[i]); };
         grid_->on_focus = [this](Ui &, size_t i) {
-            if (i + 2 * kGridColumns >= all_.size()) load_more();
+            if (query_.empty() && i + 2 * kGridColumns >= browse_.size()) load_more();  // a search covers what is loaded
         };
         return col;
     }
@@ -855,6 +873,8 @@ class HomeScreen : public Screen {
     async::CancellationSource refresh_, paging_;
 
     std::vector<Show> all_;          // grid order: API order (live) or popularity (saved copy)
+    std::vector<Show> browse_;       // what the grid shows: all_ filtered by the search
+    std::string query_;
     std::array<std::vector<Show>, 3> rail_data_;
     std::vector<Show> favourites_;
     bool from_saved_ = false, refreshing_ = false, offline_ = false, end_ = false, paging_busy_ = false;
@@ -869,6 +889,7 @@ class HomeScreen : public Screen {
     Button *retry_ = nullptr;
     std::vector<CollectionView *> rails_;
     CollectionView *grid_ = nullptr, *fav_grid_ = nullptr;
+    TextField *search_ = nullptr;
     std::vector<View *> sections_;
     std::vector<NavItem *> nav_items_;
     int current_ = -1;

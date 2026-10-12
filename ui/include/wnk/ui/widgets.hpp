@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Layouts and widgets: Row/Column (Box), Grid, ScrollView, Label, ImageView, Button, Card, Spinner,
-// ProgressBar. Virtualised lists and grids are in collection.hpp; dialogs and the navigation stack in
+// Layouts and widgets: Row/Column (Box), Grid, ScrollView, Label, ImageView, Button, Card, TextField,
+// Spinner, ProgressBar. Virtualised lists and grids are in collection.hpp; dialogs and the navigation stack in
 // navigation.hpp.
 #pragma once
 
@@ -208,6 +208,56 @@ class Card : public View {
     Label *title_;
     Label *subtitle_;
     ClickHandler on_click_;
+};
+
+// A single-line text input. OK or a click starts editing: the shell turns text input on, which opens
+// LG's on-screen keyboard on the TV; a USB or Bluetooth keyboard types directly. While editing:
+// Left/Right/Home/End move the cursor, Backspace/Delete erase, OK/Enter submits and ends editing,
+// Back ends editing and keeps the text, and moving focus away ends it too. Text is UTF-8; the
+// cursor never splits a code point. No selection or clipboard.
+class TextField : public View {
+ public:
+    using TextHandler = std::function<void(Ui &, const std::string &)>;
+    explicit TextField(std::string placeholder = {});
+    TextField &set_text(std::string text);  // replaces the text (no change callback), cursor at the end
+    TextField &set_placeholder(std::string placeholder);
+    TextField &set_password(bool on);        // shows a bullet per character
+    TextField &set_max_length(size_t code_points);  // 0: unlimited; longer input is cut
+    TextField &set_on_change(TextHandler h);  // after every edit
+    TextField &set_on_submit(TextHandler h);  // OK/Enter while editing
+    const std::string &text() const { return text_; }
+    const std::string &placeholder() const { return placeholder_; }
+    size_t cursor() const { return cursor_; }  // byte offset into text()
+    bool editing() const { return editing_; }
+    bool password() const { return password_; }
+    const std::string &composition() const { return composition_; }
+    void begin_editing(Ui &ui);
+    void end_editing(Ui &ui);
+    // What draw() shows for the text (bullets in password mode).
+    std::string display_text() const;
+
+ protected:
+    Size measure_content(Ui &ui, Size available) override;
+    bool on_action(Ui &ui, const input::ActionEvent &e) override;
+    void on_focus_changed(Ui &ui, bool focused) override;
+    bool on_text(Ui &ui, const std::string &utf8) override;
+    bool on_edit_key(Ui &ui, input::EditKey key) override;
+    void on_composition(Ui &ui, const std::string &utf8) override;
+    void on_text_input_closed(Ui &ui) override;
+    void draw(Ui &ui) override;
+
+ private:
+    void insert(Ui &ui, const std::string &utf8);
+    void changed(Ui &ui);
+    void submit(Ui &ui);
+    std::string text_, placeholder_, composition_;
+    size_t cursor_ = 0;
+    size_t max_length_ = 0;
+    bool password_ = false;
+    bool editing_ = false;
+    float scroll_ = 0;          // horizontal, keeps the cursor in view
+    double caret_since_ = 0;    // the caret blinks from here (reset by every edit)
+    TextHandler on_change_, on_submit_;
 };
 
 class Spinner : public View {

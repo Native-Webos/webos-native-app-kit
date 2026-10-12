@@ -145,3 +145,27 @@ TEST("pointer: SDL-webOS cursor pseudo-keys become Shown/Hidden, other keys do n
     k.scancode = 40;
     CHECK(!pointer_visibility_from_key(k).has_value());
 }
+
+TEST("edit keys: editing scancodes and printable keys are recognised") {
+    using wnk::input::EditKey;
+    auto key = [](int sc, int kc) {
+        wnk::input::KeyEvent k;
+        k.scancode = sc;
+        k.keycode = kc;
+        k.down = true;
+        return k;
+    };
+    CHECK(wnk::input::edit_key_from(key(42, 8)) == EditKey::Backspace);
+    CHECK(wnk::input::edit_key_from(key(40, 13)) == EditKey::Enter);
+    CHECK(wnk::input::edit_key_from(key(88, 0x40000058)) == EditKey::Enter);
+    CHECK(wnk::input::edit_key_from(key(156, 0x4000009C)) == EditKey::Clear);
+    CHECK(wnk::input::edit_key_from(key(80, 0x40000050)) == EditKey::Left);
+    CHECK(!wnk::input::edit_key_from(key(81, 0x40000051)));  // Down leaves the field
+    CHECK(!wnk::input::edit_key_from(key(41, 27)));          // Escape stays Back
+    CHECK(wnk::input::key_types_text(key(44, ' ')));
+    CHECK(wnk::input::key_types_text(key(4, 'a')));
+    CHECK(wnk::input::key_types_text(key(0, 0xE9)));  // é on a French keyboard
+    CHECK(!wnk::input::key_types_text(key(41, 27)));
+    CHECK(!wnk::input::key_types_text(key(76, 0x7F)));
+    CHECK(!wnk::input::key_types_text(key(482, 0x400001E2)));  // webOS Back
+}

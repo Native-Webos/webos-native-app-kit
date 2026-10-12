@@ -55,6 +55,18 @@ struct ActionEvent {
     KeyEvent source;       // the raw event, for diagnostics only
 };
 
+// Keys a text field handles itself while it is editing, instead of their actions (Backspace would
+// otherwise be Back, OK/Return Confirm). LG's on-screen keyboard sends Backspace and Return as key
+// events and "clear" as SDL_SCANCODE_CLEAR (SDL-webOS SDL_waylandwebos_osk.c).
+enum class EditKey : uint8_t { Backspace, Delete, Left, Right, Home, End, Enter, Clear };
+
+const char *edit_key_name(EditKey key);
+// The editing key for a raw key event, if it is one (by scancode).
+std::optional<EditKey> edit_key_from(const KeyEvent &key);
+// True for a key whose character arrives separately as text (SDL_TEXTINPUT) while text input is on:
+// printable keycodes, so Space types a space instead of toggling playback.
+bool key_types_text(const KeyEvent &key);
+
 struct KeyBinding {
     enum class Field : uint8_t { Scancode, Keycode };
     Field field;

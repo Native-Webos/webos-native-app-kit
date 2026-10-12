@@ -11,9 +11,9 @@ namespace {
 namespace sc {
 constexpr int Return = 40, Escape = 41, Backspace = 42, Space = 44;
 constexpr int F1 = 58, F2 = 59, F3 = 60, F4 = 61, F12 = 69;
-constexpr int Pause = 72, Home = 74;
+constexpr int Pause = 72, Home = 74, Delete = 76, End = 77;
 constexpr int Right = 79, Left = 80, Down = 81, Up = 82, KpEnter = 88;
-constexpr int Stop = 120, Mute = 127, VolumeUp = 128, VolumeDown = 129;
+constexpr int Stop = 120, Mute = 127, VolumeUp = 128, VolumeDown = 129, Clear = 156;
 constexpr int AudioNext = 258, AudioPrev = 259, AudioStop = 260, AudioPlay = 261, AudioMute = 262;
 constexpr int AcHome = 269, AcBack = 270;
 constexpr int AudioRewind = 285, AudioFastForward = 286;
@@ -48,6 +48,41 @@ std::optional<PointerEvent> pointer_visibility_from_key(const KeyEvent &key) {
     p.type = key.scancode == kScancodeCursorShow ? PointerEvent::Type::Shown : PointerEvent::Type::Hidden;
     p.time_ms = key.time_ms;
     return p;
+}
+
+const char *edit_key_name(EditKey key) {
+    switch (key) {
+        case EditKey::Backspace: return "Backspace";
+        case EditKey::Delete: return "Delete";
+        case EditKey::Left: return "Left";
+        case EditKey::Right: return "Right";
+        case EditKey::Home: return "Home";
+        case EditKey::End: return "End";
+        case EditKey::Enter: return "Enter";
+        case EditKey::Clear: return "Clear";
+    }
+    return "?";
+}
+
+std::optional<EditKey> edit_key_from(const KeyEvent &key) {
+    switch (key.scancode) {
+        case sc::Backspace: return EditKey::Backspace;
+        case sc::Delete: return EditKey::Delete;
+        case sc::Left: return EditKey::Left;
+        case sc::Right: return EditKey::Right;
+        case sc::Home: return EditKey::Home;
+        case sc::End: return EditKey::End;
+        case sc::Return:
+        case sc::KpEnter: return EditKey::Enter;
+        case sc::Clear: return EditKey::Clear;
+        default: return std::nullopt;
+    }
+}
+
+bool key_types_text(const KeyEvent &key) {
+    // SDL keycodes of printable keys are their Unicode code point; others carry SDLK_SCANCODE_MASK.
+    constexpr int kScancodeMask = 1 << 30;
+    return key.keycode >= 0x20 && key.keycode != 0x7F && (key.keycode & kScancodeMask) == 0;
 }
 
 const char *action_name(Action action) {

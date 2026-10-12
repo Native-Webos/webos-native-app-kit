@@ -154,6 +154,14 @@ class View {
     // wheel turned away from the user: scroll towards the start.
     virtual bool on_wheel(Ui &ui, float notches);
 
+    // Text input, delivered only to the view that called Ui::begin_text_input (see Ui). `utf8` is
+    // committed text; a composition is text an input method is still building (empty when it ends).
+    virtual bool on_text(Ui &ui, const std::string &utf8);
+    virtual bool on_edit_key(Ui &ui, input::EditKey key);
+    virtual void on_composition(Ui &ui, const std::string &utf8);
+    // The system closed the keyboard (the viewer dismissed it); text input has already ended.
+    virtual void on_text_input_closed(Ui &ui);
+
     // Draws this view and its subtree (background, draw(), children, draw_over()).
     void draw_tree(Ui &ui);
 

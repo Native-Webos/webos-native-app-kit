@@ -26,6 +26,7 @@
 #include "wnk/ui/collection.hpp"
 #include "wnk/ui/navigation.hpp"
 #include "wnk/ui/ui.hpp"
+#include "wnk/ui/forms.hpp"
 #include "wnk/ui/widgets.hpp"
 
 #include <cstdio>
@@ -151,9 +152,9 @@ class HomeScreen : public Screen {
         content_->set_width(Dim::fill());
         content_->set_padding({60, 60, 0, 0});
 
-        const char *names[] = {"Home", "Browse", "Widgets"};
-        View *sections[] = {&build_home(), &build_browse(), &build_widgets()};
-        for (int i = 0; i < 3; ++i) {
+        const char *names[] = {"Home", "Browse", "Widgets", "Settings"};
+        View *sections[] = {&build_home(), &build_browse(), &build_widgets(), &build_settings()};
+        for (int i = 0; i < 4; ++i) {
             sections_.push_back(sections[i]);
             auto &item = sidebar.add<NavItem>(names[i], [this, i](Ui &) { show_section(i); });
             item.name = std::string("nav.") + names[i];
@@ -268,8 +269,90 @@ class HomeScreen : public Screen {
         return col;
     }
 
+    // A settings screen from the form controls: tabs over three pages of rows, a value row that edits
+    // text in a dialog, and a QR code for continuing on a phone.
+    View &build_settings() {
+        auto &col = content_->add<Column>(28);
+        col.name = "section.settings";
+        col.set_padding({16, 0, 60, 0});
+        col.add<Label>("Settings", TextRole::Title);
+        auto &tabs = col.add<Tabs>(std::vector<std::string>{"General", "Playback", "Pair"}, 0, [this](Ui &, int i) {
+            for (size_t p = 0; p < settings_pages_.size(); ++p) settings_pages_[p]->set_visible(static_cast<int>(p) == i);
+            WNK_LOGI(kCat, "settings tab %d", i);
+        });
+        tabs.name = "settings.tabs";
+        for (size_t i = 0; i < tabs.count(); ++i) tabs.tab(i).name = "settings.tab" + std::to_string(i);
+        auto &stack = col.add<View>();
+        stack.set_height(Dim::fill());
+
+        auto &general = stack.add<Column>(16);
+        general.set_width(Dim::fixed(1100)).set_align(Align::Start, Align::Start);
+        auto log_bool = [](const char *what) { return [what](Ui &, bool on) { WNK_LOGI(kCat, "setting %s = %s", what, on ? "on" : "off"); }; };
+        general.add<Toggle>("Play the next episode automatically", true, log_bool("autoplay")).name = "settings.autoplay";
+        auto &check = general.add<Toggle>("Show clock", false, log_bool("clock"));
+        check.set_style(Toggle::Style::Check);
+        check.name = "settings.clock";
+        auto &size = general.add<Slider>("Subtitle size", 50, 200, 10, 100,
+                                         [](Ui &, float v) { WNK_LOGI(kCat, "setting subtitle size = %.0f", static_cast<double>(v)); });
+        size.set_format([](float v) { return std::to_string(static_cast<int>(v)) + " %"; });
+        size.name = "settings.subsize";
+        auto &device = general.add<ValueRow>("Device name", "Living room TV");
+        device.set_description("Shown to phones that cast to this TV");
+        device.name = "settings.device";
+        device.set_on_click([&device](Ui &ui) {
+            auto d = std::make_unique<Dialog>("Device name");
+            auto &field = d->body().add<TextField>("Name");
+            field.set_text(device.value()).set_max_length(32).set_width(Dim::fill());
+            field.name = "settings.device.field";
+            Dialog *dialog = d.get();
+            field.set_on_submit([&device, dialog](Ui &u, const std::string &text) {
+                if (!text.empty()) device.set_value(text);
+                WNK_LOGI(kCat, "setting device name = %s", device.value().c_str());
+                dialog->dismiss(u);
+            });
+            d->add_button("Cancel");
+            ui.show_dialog(std::move(d));
+            ui.focus(&field);
+        });
+
+        auto &playback = stack.add<Column>(16);
+        playback.set_width(Dim::fixed(1100)).set_align(Align::Start, Align::Start);
+        playback.add<Choice>("Quality", std::vector<std::string>{"Automatic", "2160p", "1080p", "720p", "480p"}, 0,
+                             [](Ui &, int i) { WNK_LOGI(kCat, "setting quality = %d", i); })
+            .name = "settings.quality";
+        playback.add<Choice>("Audio language", std::vector<std::string>{"Original", "English", "Français", "Deutsch", "日本語"}, 0,
+                             [](Ui &, int i) { WNK_LOGI(kCat, "setting audio language = %d", i); })
+            .name = "settings.audio";
+
+        auto &pair = stack.add<Row>(48);
+        pair.set_align(Align::Start, Align::Start);
+        auto &text_col = pair.add<Column>(16);
+        text_col.set_width(Dim::fixed(760));
+        text_col.add<Label>("Continue on your phone", TextRole::Title);
+        text_col.add<Label>("Scan the code, or open example.org/pair and enter WNK-4821.").set_max_lines(2);
+        auto &terms = text_col.add<TextView>(
+            "Pairing links this TV to your account so it can play what you choose on your phone. The TV keeps a token "
+            "for the account, not your password, and you can remove the link from the account page at any time. "
+            "Nothing you watch is shared with the phone beyond what you send to the TV yourself. The code above is "
+            "valid for ten minutes; a new one appears when it expires. This text is long on purpose: it shows a "
+            "TextView, which scrolls with Up and Down when it is focused and passes focus on at either end, so a "
+            "long licence or privacy notice can sit in a settings page without a page of its own. A thin bar on the "
+            "right shows where in the text the frame is.",
+            TextRole::Small);
+        terms.set_height(Dim::fixed(130));
+        terms.name = "settings.terms";
+        auto &qr = pair.add<QrCode>("https://example.org/pair?code=WNK-4821");
+        qr.set_size(320, 320);
+
+        settings_pages_ = {&general, &playback, &pair};
+        playback.set_visible(false);
+        pair.set_visible(false);
+        return col;
+    }
+
     const Catalogue &cat_;
     Navigator &nav_;
+    std::vector<View *> settings_pages_;
     View *content_ = nullptr;
     std::vector<View *> sections_;
     std::vector<NavItem *> nav_items_;

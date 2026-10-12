@@ -6,6 +6,7 @@
 #include "wnk_test.hpp"
 
 #include "wnk/ui/collection.hpp"
+#include "wnk/ui/forms.hpp"
 #include "wnk/ui/navigation.hpp"
 #include "wnk/ui/ui.hpp"
 #include "wnk/ui/widgets.hpp"
@@ -997,4 +998,166 @@ TEST("text field: removing the editing field releases text input; long text scro
     col.remove_child(&field);
     CHECK(env.ui.text_input_view() == nullptr);
     CHECK(!env.ui.handle_text("x"));
+}
+
+// ---- form controls --------------------------------------------------------------------------------
+
+TEST("forms: toggle flips on OK and reports; set_on does not report") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(10);
+    std::vector<bool> seen;
+    auto &t = col.add<Toggle>("Subtitles", false, [&seen](Ui &, bool on) { seen.push_back(on); });
+    env.ui.focus(&t);
+    CHECK(env.press(Action::Confirm));
+    CHECK(t.on());
+    env.press(Action::Confirm, input::Phase::Release);
+    env.press(Action::Confirm);
+    CHECK(!t.on());
+    t.set_on(true);
+    REQUIRE(seen.size() == 2u);
+    CHECK(seen[0] && !seen[1]);
+    env.frames(30);
+    CHECK(env.r.drew_text("Subtitles"));
+    CHECK(!env.press(Action::Left));  // a toggle leaves Left/Right to focus movement
+}
+
+TEST("forms: slider steps with Left/Right, repeats, clamps and snaps; formats its value") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(10);
+    std::vector<float> seen;
+    auto &s = col.add<Slider>("Volume", 0, 10, 0.5f, 3.3f, [&seen](Ui &, float v) { seen.push_back(v); });
+    CHECK_EQ(s.value(), 3.5f);  // snapped to the step
+    CHECK_EQ(s.value_text(), std::string("3.5"));
+    env.ui.focus(&s);
+    CHECK(env.press(Action::Right));
+    CHECK(env.press(Action::Right, input::Phase::Repeat));
+    CHECK_EQ(s.value(), 4.5f);
+    for (int i = 0; i < 30; ++i) env.press(Action::Right, input::Phase::Repeat);
+    CHECK_EQ(s.value(), 10.0f);
+    const size_t at_max = seen.size();
+    CHECK(env.press(Action::Right));  // consumed at the end, no report
+    CHECK_EQ(seen.size(), at_max);
+    CHECK(env.ui.is_focused(&s));
+    s.set_format([](float v) { return std::to_string(static_cast<int>(v * 10)) + " %"; });
+    CHECK_EQ(s.value_text(), std::string("100 %"));
+    env.press(Action::Left);
+    CHECK_EQ(s.value(), 9.5f);
+    env.frames(20);
+    CHECK(env.r.drew_text("95 %"));
+}
+
+TEST("forms: choice steps with Left/Right and OK opens the list on the current option") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(10);
+    std::vector<int> seen;
+    auto &c = col.add<Choice>("Quality", std::vector<std::string>{"Auto", "1080p", "720p"}, 0,
+                              [&seen](Ui &, int i) { seen.push_back(i); });
+    c.name = "quality";
+    env.ui.focus(&c);
+    env.press(Action::Left);  // already first: no change
+    CHECK(seen.empty());
+    env.press(Action::Right);
+    CHECK_EQ(c.selected(), 1);
+    env.frame();
+    CHECK(env.r.drew_text("1080p"));
+    CHECK(env.press(Action::Confirm));
+    REQUIRE(env.ui.top_dialog() != nullptr);
+    CHECK_EQ(env.ui.focused()->name, std::string("quality.option1"));
+    env.press(Action::Down);
+    CHECK_EQ(env.ui.focused()->name, std::string("quality.option2"));
+    env.press(Action::Confirm);
+    env.frames(30);
+    CHECK(env.ui.top_dialog() == nullptr);
+    CHECK_EQ(c.selected(), 2);
+    REQUIRE(seen.size() == 2u);
+    CHECK_EQ(seen[1], 2);
+    CHECK(env.ui.is_focused(&c));  // focus returns to the row
+}
+
+TEST("forms: value row runs its handler; tabs follow key focus but not pointer hover") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(10);
+    int opened = 0;
+    std::vector<int> pages;
+    auto &tabs = col.add<Tabs>(std::vector<std::string>{"General", "Playback", "Account"}, 0,
+                               [&pages](Ui &, int i) { pages.push_back(i); });
+    auto &row = col.add<ValueRow>("Server", "192.168.1.20", [&opened](Ui &) { ++opened; });
+    env.ui.focus_within(&tabs);
+    env.frame();
+    CHECK(env.r.drew_text("192.168.1.20"));
+    env.press(Action::Right);
+    env.press(Action::Right);
+    CHECK_EQ(tabs.selected(), 2);
+    REQUIRE(pages.size() == 2u);
+    env.press(Action::Down);
+    CHECK(env.ui.is_focused(&row));
+    env.press(Action::Confirm);
+    CHECK_EQ(opened, 1);
+    env.press(Action::Up);  // back into the tabs: the remembered tab, no new selection
+    CHECK_EQ(tabs.selected(), 2);
+    CHECK_EQ(pages.size(), size_t{2});
+    // Pointer: hovering a tab focuses it without selecting; a click selects.
+    env.frame();
+    View *first = env.ui.focused()->parent()->children()[0].get();
+    const Rect r = first->screen_rect();
+    input::PointerEvent move;
+    move.type = input::PointerEvent::Type::Move;
+    env.ui.handle_pointer_logical(move, {r.cx(), r.cy()});
+    CHECK(env.ui.is_focused(first));
+    CHECK_EQ(tabs.selected(), 2);
+    input::PointerEvent press = move, release = move;
+    press.type = input::PointerEvent::Type::Press;
+    release.type = input::PointerEvent::Type::Release;
+    env.ui.handle_pointer_logical(press, {r.cx(), r.cy()});
+    env.ui.handle_pointer_logical(release, {r.cx(), r.cy()});
+    CHECK_EQ(tabs.selected(), 0);
+}
+
+TEST("forms: text view scrolls with Up/Down, then lets focus move on; short text is not focusable") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(10);
+    auto &above = col.add<Button>("Above", [](Ui &) {});
+    std::string longtext;
+    for (int i = 0; i < 60; ++i) longtext += "Line of the licence text number " + std::to_string(i) + ". ";
+    auto &tv = col.add<TextView>(longtext);
+    tv.set_size(600, 200);
+    auto &shorttv = col.add<TextView>("Short.");
+    shorttv.set_size(600, 200);
+    auto &below = col.add<Button>("Below", [](Ui &) {});
+    env.ui.focus(&above);
+    env.frame();
+    CHECK(tv.max_scroll() > 400);
+    CHECK(tv.focusable());
+    CHECK(!shorttv.focusable());
+    env.press(Action::Down);
+    CHECK(env.ui.is_focused(&tv));
+    int presses = 0;
+    while (env.press(Action::Down) && env.ui.is_focused(&tv) && presses < 100) ++presses;
+    CHECK(presses > 3);
+    CHECK(std::fabs(tv.scroll() - tv.max_scroll()) < 0.01f);
+    CHECK(env.ui.is_focused(&below));  // the press at the end moved focus past the short text
+    env.press(Action::Up);
+    CHECK(env.ui.is_focused(&tv));
+    CHECK(env.press(Action::Up));
+    CHECK(tv.scroll() < tv.max_scroll());
+}
+
+TEST("qr code: encodes text with finder patterns; too much text is an error, not a crash") {
+    QrCode qr("https://example.org/activate?code=WNK-1234");
+    CHECK(qr.error().empty());
+    CHECK(qr.modules() >= 25);
+    CHECK_EQ((qr.modules() - 17) % 4, 0);  // 4 * version + 17
+    // The finder pattern: a dark 7x7 ring with a dark 3x3 centre, at three corners.
+    for (auto [ox, oy] : {std::pair{0, 0}, std::pair{qr.modules() - 7, 0}, std::pair{0, qr.modules() - 7}}) {
+        CHECK(qr.dark(ox, oy) && qr.dark(ox + 6, oy + 6) && qr.dark(ox + 3, oy + 3));
+        CHECK(!qr.dark(ox + 1, oy + 1) && !qr.dark(ox + 5, oy + 1));
+    }
+    QrCode big(std::string(8000, 'x'));
+    CHECK(!big.error().empty());
+    CHECK_EQ(big.modules(), 0);
+    Env env;
+    auto &v = env.ui.root().add<QrCode>("https://example.org");
+    v.set_align(Align::Start, Align::Start);
+    env.frame();
+    CHECK(env.r.fills.size() > 20);  // runs of dark modules plus the light background
 }

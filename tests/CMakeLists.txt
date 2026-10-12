@@ -112,6 +112,18 @@ if (TARGET wnk-tvui)
             "focus grid.item40")
     wnk_tvui_e2e(dialog_focus_restore "Left,Down,Down,Right,Return,Right,Escape" "dialog closed focus=widgets.dialog")
     wnk_tvui_e2e(double_back_exits "Escape,Escape" "Back twice at root: quitting")
+    # Settings built from the form controls: the slider steps, the check box flips, entering the tabs
+    # from below lands on the selected tab, the option picker's list, and editing text in a dialog.
+    set(WNK_TVUI_SETTINGS "Left,Down,Down,Down,Right")
+    wnk_tvui_e2e(settings_slider_and_toggle "${WNK_TVUI_SETTINGS},Right,Right,Up,Return"
+            "setting subtitle size = 110.*setting subtitle size = 120.*focus settings.clock.*setting clock = on")
+    wnk_tvui_e2e(settings_tabs_and_choice "${WNK_TVUI_SETTINGS},Up,Up,Up,Right,Down,Right,Return,Down,Return"
+            "focus settings.tab0.*settings tab 1.*focus settings.quality.*setting quality = 1.*focus settings.quality.option1.*focus settings.quality.option2.*setting quality = 2.*focus settings.quality")
+    string(REPEAT "Backspace," 14 WNK_TVUI_ERASE)
+    wnk_tvui_e2e(settings_edit_text_in_dialog "${WNK_TVUI_SETTINGS},Down,Return,Return,${WNK_TVUI_ERASE}text@Den,Return,Z"
+            "focus settings.device.field.*text input on for settings.device.field.*setting device name = Den.*text input off.*focus settings.device")
+    wnk_tvui_e2e(settings_text_view_scrolls "${WNK_TVUI_SETTINGS},Up,Up,Up,Right,Right,Down,Down,Down,Down,Down,Down,Up"
+            "focus settings.tab2.*focus settings.terms")
     # A still screen is drawn but not presented: under 100 presents (about 7; 13 under ASan) in ~7 s of
     # waiting, not 400.
     string(REPEAT "Z," 60 WNK_TVUI_IDLE)

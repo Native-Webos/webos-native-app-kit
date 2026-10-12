@@ -131,6 +131,9 @@ class Ui {
 
     // ---- focus -------------------------------------------------------------------------------------
     View *focused() const;
+    // During on_focus_changed / on_descendant_focused: the view focus is moving away from (nullptr if
+    // none or if it no longer exists). Lets a container tell entry from outside from a move inside.
+    View *previous_focus() const { return find(previous_focus_); }
     bool is_focused(const View *v) const { return v != nullptr && focused() == v; }
     bool has_focus_within(const View *v) const;
     // Focus a view now (registering it first if it was just created). If the view is not yet in an
@@ -216,6 +219,7 @@ class Ui {
     ViewId pending_focus_ = 0;
     ViewId pending_within_ = 0;
     focus::NodeId notified_focus_ = focus::kNoNode;
+    focus::NodeId previous_focus_ = focus::kNoNode;
     // Focus ring: follows the focused view; a focus change animates as a decaying offset.
     ViewId ring_view_ = 0;
     Rect ring_rect_;

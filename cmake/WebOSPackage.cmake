@@ -118,7 +118,8 @@ of the same version and options.
     set(_licence_files
             "${_kit}/LICENSE" "${_kit}/THIRD-PARTY-NOTICES.md"
             "${_kit}/third_party/licenses/SDL2-zlib.txt" "${_kit}/third_party/stb/LICENSE"
-            "${_kit}/third_party/nlohmann/LICENSE.MIT" "${_kit}/third_party/curl/COPYING")
+            "${_kit}/third_party/nlohmann/LICENSE.MIT" "${_kit}/third_party/qrcodegen/LICENSE.MIT"
+            "${_kit}/third_party/curl/COPYING")
 
     set(_strip "${WNK_NDK_PREFIX}strip")
     set(_cmds
@@ -129,6 +130,7 @@ of the same version and options.
             COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/SDL2-zlib.txt" "${_stage}/licenses/SDL2-zlib.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/stb/LICENSE" "${_stage}/licenses/stb-MIT-or-public-domain.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/nlohmann/LICENSE.MIT" "${_stage}/licenses/nlohmann-json-MIT.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/qrcodegen/LICENSE.MIT" "${_stage}/licenses/qrcodegen-MIT.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/curl/COPYING" "${_stage}/licenses/curl-headers.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_source_txt}" "${_stage}/licenses/SOURCE.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_appinfo}" "${_stage}/appinfo.json"

@@ -14,7 +14,7 @@ wnk_add_webos_package(
         TARGET wnk-tvui
         APPID org.wnk.examples.tvui
         TITLE "WNK TV UI"
-        VERSION 0.4.1
+        VERSION 0.5.0
         VENDOR "webos-native-app-kit"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"

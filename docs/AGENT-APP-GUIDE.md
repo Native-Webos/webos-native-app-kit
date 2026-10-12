@@ -289,6 +289,8 @@ stubbing a lookalike.
 | Poster / thumbnail | `ImageView` or `Card`. URL is `https://…` or `file://` + `ctx.launch().app_dir`. |
 | Button, disabled control | `Button`, `set_enabled(false)`. |
 | Deep link, launcher shortcut, "open this" from another app | Read `ctx.launch().params_json` in `on_start` and the new object in `on_relaunch`. Log parameter names, not values. |
+| Settings page | `wnk/ui/forms.hpp` rows in a `Column`: `Toggle` (switch or `Style::Check`), `Slider` (Left/Right), `Choice` (Left/Right, OK opens the list), `ValueRow` (label + value, OK opens something), `Tabs` over pages (`set_visible`), `TextView` for long text. See Example B's Settings. |
+| "Continue on your phone", pairing, a link to open elsewhere | `QrCode(url)`; keep it at least 300 units square. |
 | Search box, server address, user name, password | `TextField` (`set_password`, `set_max_length`, `set_on_change`, `set_on_submit`). OK or a click edits it: the shell opens LG's on-screen keyboard; Back ends editing. See Example C's Browse search. |
 | Modal confirm | `ui.show_dialog`. Focus is trapped; Back dismisses when `back_dismisses` is true; focus returns to the opener. |
 | Transient message | `ui.toast(text)`. |

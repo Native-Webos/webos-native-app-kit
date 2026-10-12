@@ -189,6 +189,7 @@ void Ui::dispatch_focus_events() {
         if (now_id == notified_focus_) return;
         View *old = find(notified_focus_);
         View *now = find(now_id);
+        previous_focus_ = notified_focus_;
         notified_focus_ = now_id;
         if (old != nullptr) old->on_focus_changed(*this, false);
         if (now != nullptr) {

@@ -388,6 +388,27 @@ app implements.
 Not yet used by an app: the first will be the Jellyfin client. Not covered: keymanager3 sealing on a
 TV that has it (webOS 6.5.3 does not), and a login UI (the kit has no text input).
 
+### Protected streams: ClearKey (2026-10-12)
+
+Common Encryption with keys the app has. The bundled FFmpeg 9.0 MP4 demuxer already decrypts 'cenc',
+'cens', 'cbc1' and 'cbcs' from a key-ID → key dictionary, so `FfmpegSource` passes
+`decryption_keys` to it and the decoders receive clear data. A sample still encrypted (no key) fails
+the read with a clear message. The DASH parser reads ContentProtection (scheme, default KIDs, and the
+ClearKey licence URL in `clearkey:Laurl` / `dashif:Laurl`). `AdaptiveSource` asks a W3C ClearKey
+licence server for missing keys and plays encrypted renditions it has keys for. `clearkey.hpp` parses
+`kid:key` lists and JWK sets. Example D 0.15 takes `{"keys": ..., "licenseUrl": ...}` and lists three
+protected test streams. Not covered yet: HLS `EXT-X-KEY` (AES-128, SAMPLE-AES), key rotation in live
+streams, Widevine/PlayReady.
+
+| Evidence | Tag |
+|---|---|
+| Key and licence parsing, licence exchange with the test server (ok, 403, no matching key), DASH ContentProtection; a CENC MP4 read with the key equals the clear file packet for packet, a wrong key differs, no key fails | `[TEST]` `integration.clearkey` |
+| On the TV: Shaka angel-one-clearkey (cenc, key given), livesim2 eccp_cenc and eccp_cbcs (live, key from the licence server) through Starfish, 0 dropped frames | `[DEVICE]` records.json |
+
+ffmpeg's own fragmented CENC output does not demux (its sample-encryption boxes are inconsistent),
+so the DASH test checks the manifest and licence path, and fragmented decryption is checked with the
+public streams.
+
 ## Device dependency
 
 Every milestone from M2 has a device column. Without a TV the kit can reach "builds, verifies, host

@@ -803,7 +803,13 @@ int64_t FfmpegSource::time_origin() const { return impl_->start_us; }
 
 bool FfmpegSource::open_input(const std::string &name, const std::string &uri, std::string *error) {
     Impl &m = *impl_;
-    int rc = avformat_open_input(&m.fmt, name.c_str(), nullptr, nullptr);
+    AVDictionary *opts = nullptr;
+    if (!m.options.decryption_keys.empty()) {
+        // Read by the MP4 demuxer (and ignored by the others); the keys never reach a log.
+        av_dict_set(&opts, "decryption_keys", ffmpeg_decryption_keys(m.options.decryption_keys).c_str(), 0);
+    }
+    int rc = avformat_open_input(&m.fmt, name.c_str(), nullptr, &opts);
+    av_dict_free(&opts);
     if (rc < 0) {
         // avformat_open_input frees the context on failure (but not a custom AVIOContext).
         *error = rc == AVERROR_EXIT ? "interrupted" : m.io_error(rc);
@@ -1037,6 +1043,13 @@ FfmpegSource::Read FfmpegSource::read(Packet *out, std::string *error) {
         if (rc < 0) {
             if (rc == AVERROR_EXIT) return Read::Interrupted;
             *error = m.io_error(rc);
+            return Read::Error;
+        }
+        if (av_packet_get_side_data(m.pkt, AV_PKT_DATA_ENCRYPTION_INFO, nullptr) != nullptr &&
+            (m.pkt->stream_index == m.video || m.pkt->stream_index == m.audio)) {
+            // Still encrypted: the demuxer had no key to apply.
+            av_packet_unref(m.pkt);
+            *error = "the media is encrypted and no decryption key was given";
             return Read::Error;
         }
         m.consume(m.pkt);

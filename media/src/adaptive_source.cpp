@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "wnk/media/adaptive_source.hpp"
+#include "wnk/media/clearkey.hpp"
 
 #include "wnk/log.hpp"
 #include "wnk/media/ffmpeg_source.hpp"
@@ -129,10 +130,17 @@ int choose_rung(const std::vector<int64_t> &bw, int current, int64_t estimate, i
     return target;
 }
 
+bool decryptable(const Rendition &r, const ContentKeys &keys) {
+    if (!r.encrypted) return true;
+    if (keys.empty()) return false;
+    // Without default KIDs in the manifest the keys are tried; the demuxer reports a missing one.
+    return std::all_of(r.key_ids.begin(), r.key_ids.end(), [&](const std::string &k) { return keys.count(k) != 0; });
+}
+
 int choose_video(const Presentation &p, const AdaptiveSourceOptions &o) {
     bool any_plain = false;
     for (const Rendition &r : p.renditions) {
-        if (r.type == TrackType::Video && !r.encrypted && r.dolby_vision.empty()) any_plain = true;
+        if (r.type == TrackType::Video && decryptable(r, o.keys) && r.dolby_vision.empty()) any_plain = true;
     }
     int best = -1;
     auto rank = [&](const Rendition &r) {
@@ -141,7 +149,7 @@ int choose_video(const Presentation &p, const AdaptiveSourceOptions &o) {
     };
     for (size_t i = 0; i < p.renditions.size(); ++i) {
         const Rendition &r = p.renditions[i];
-        if (r.type != TrackType::Video || r.encrypted || is_webm(r)) continue;
+        if (r.type != TrackType::Video || !decryptable(r, o.keys) || is_webm(r)) continue;
         if (rank(r) >= static_cast<int>(o.video_codecs.size())) continue;
         if (r.height > o.max_height || r.frame_rate > o.max_frame_rate + 0.01) continue;
         if (o.max_bandwidth > 0 && r.bandwidth > o.max_bandwidth) continue;
@@ -395,7 +403,10 @@ struct AdaptiveSource::Impl {
                 const MediaSegment &at = waiting ? r.segments.back() : r.segments[first];
                 first_url = at.url;
                 first_start = waiting ? at.start_us + at.duration_us : at.start_us;
-                auto src = std::make_unique<FfmpegSource>(FfmpegSourceOptions{nullptr, {}, opt.ac3_encode});
+                FfmpegSourceOptions so;
+                so.ac3_encode = opt.ac3_encode;
+                so.decryption_keys = opt.keys;  // also for encryption the manifest does not declare
+                auto src = std::make_unique<FfmpegSource>(std::move(so));
                 src->set_time_origin(hls ? hls_origin_us : r.time_origin_us);
                 s = src.get();
                 std::lock_guard<std::mutex> lock(lanes_mutex);
@@ -641,7 +652,7 @@ struct AdaptiveSource::Impl {
         const Rendition &b = pres.renditions[static_cast<size_t>(base)];
         for (size_t i = 0; i < pres.renditions.size(); ++i) {
             const Rendition &r = pres.renditions[i];
-            if (r.type != TrackType::Video || r.encrypted || is_webm(r)) continue;
+            if (r.type != TrackType::Video || !decryptable(r, opt.keys) || is_webm(r)) continue;
             if (video_codec(r) != video_codec(b) || r.dolby_vision != b.dolby_vision) continue;
             if (r.height > opt.max_height || r.frame_rate > opt.max_frame_rate + 0.01) continue;
             if (opt.max_bandwidth > 0 && r.bandwidth > opt.max_bandwidth) continue;
@@ -775,6 +786,52 @@ struct AdaptiveSource::Impl {
             }
         }
         return MediaSource::Read::Packet;
+    }
+
+    // ClearKey: the key IDs the encrypted renditions name that the app did not give a key for are
+    // asked from the licence server (the app's, else the manifest's). opt.keys then holds every key
+    // known; renditions still without theirs stay unplayable, and key_error says why.
+    std::string key_error;
+    void resolve_keys() {
+        key_error.clear();
+        std::vector<std::string> missing;
+        std::string url = opt.license_url;
+        size_t encrypted = 0;
+        for (const Rendition &r : pres.renditions) {
+            if (!r.encrypted) continue;
+            ++encrypted;
+            for (const std::string &k : r.key_ids) {
+                if (opt.keys.count(k) == 0 && std::find(missing.begin(), missing.end(), k) == missing.end()) {
+                    missing.push_back(k);
+                }
+            }
+            if (url.empty()) url = r.license_url;
+        }
+        if (encrypted == 0) return;
+        WNK_LOGI(kCat, "%zu encrypted rendition(s) (%s), %zu key(s) given, %zu key ID(s) without a key%s",
+                 encrypted, pres.renditions.empty() ? "" : first_scheme().c_str(), opt.keys.size(), missing.size(),
+                 missing.empty() || url.empty() ? "" : ": asking the licence server");
+        if (missing.empty()) return;
+        if (url.empty() || !opt.fetch_licenses || !opt.http) {
+            key_error = "no key for key ID " + missing.front() + (url.empty() ? " and no licence server" : "");
+            return;
+        }
+        async::CancellationToken token;
+        {
+            std::lock_guard<std::mutex> lock(fetch_mutex);
+            token = fetch_cancel->token();
+        }
+        std::string err;
+        if (!fetch_clearkey_license(*opt.http, url, opt.license_headers, missing, token, &opt.keys, &err)) {
+            WNK_LOGW(kCat, "ClearKey licence: %s", err.c_str());
+            key_error = err;
+        }
+    }
+    std::string first_scheme() const {
+        for (const Rendition &r : pres.renditions) {
+            if (r.encrypted && !r.protection_scheme.empty()) return r.protection_scheme;
+        }
+        return "scheme not stated";
     }
 
     // (Re)opens the selected renditions at `t`.
@@ -1108,7 +1165,7 @@ struct AdaptiveSource::Impl {
             std::vector<int> picks;
             for (size_t i = 0; i < pres.renditions.size(); ++i) {
                 const Rendition &r = pres.renditions[i];
-                if (r.type != TrackType::Audio || r.encrypted || is_webm(r)) continue;
+                if (r.type != TrackType::Audio || !decryptable(r, opt.keys) || is_webm(r)) continue;
                 const bool known = codec_from_rfc6381(r.codecs, TrackType::Audio) != CodecId::Unknown || r.codecs.empty();
                 if (!known) continue;
                 auto same = std::find_if(picks.begin(), picks.end(), [&](int k) {
@@ -1164,7 +1221,7 @@ struct AdaptiveSource::Impl {
         subtitle_choices.clear();
         for (size_t i = 0; i < pres.renditions.size(); ++i) {
             const Rendition &r = pres.renditions[i];
-            if (r.type != TrackType::Subtitle || r.encrypted) continue;
+            if (r.type != TrackType::Subtitle || !decryptable(r, opt.keys)) continue;
             const bool seen = std::any_of(subtitle_choices.begin(), subtitle_choices.end(), [&](const SubtitleChoice &c) {
                 const Rendition &o = pres.renditions[static_cast<size_t>(c.rendition)];
                 return pres.format == Presentation::Format::Dash ? o.group == r.group : o.playlist_url == r.playlist_url;
@@ -1250,11 +1307,17 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
         m.sync_clock();
         if (m.clock_offset_us != 0 && !parse_mpd(body, final_url, &m.pres, error, m.now_us())) return false;
     }
+    m.resolve_keys();
     m.video = choose_video(m.pres, m.opt);
     if (m.video < 0) {
         const bool encrypted = std::any_of(m.pres.renditions.begin(), m.pres.renditions.end(),
                                            [](const Rendition &r) { return r.type == TrackType::Video && r.encrypted; });
-        *error = encrypted ? "the video is encrypted (DRM is not supported)" : "no video rendition this device can play";
+        if (encrypted && !m.key_error.empty()) {
+            *error = "the video is encrypted: " + m.key_error;
+        } else {
+            *error = encrypted ? "the video is encrypted and no key for it was given (only ClearKey is supported)"
+                               : "no video rendition this device can play";
+        }
         return false;
     }
     m.build_ladder(m.video);

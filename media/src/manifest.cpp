@@ -508,6 +508,43 @@ const std::string *find(const std::map<std::string, std::string> &m, const char 
 }
 
 // EXT-X-MAP's "1234@5678" or "1234" (from the start).
+// A cenc:default_KID ("2880fe36-e44b-f9bf-79d2-752e234818a5") as 32 lowercase hex digits, or "".
+std::string kid_hex(const std::string &uuid) {
+    std::string hex;
+    for (const char c : uuid) {
+        if (c == '-') continue;
+        if (!std::isxdigit(static_cast<unsigned char>(c))) return {};
+        hex.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return hex.size() == 32 ? hex : std::string();
+}
+
+// DASH ContentProtection of a Representation and its AdaptationSet: the mp4protection scheme and
+// default KIDs, and a ClearKey licence URL (W3C clearkey:Laurl or DASH-IF dashif:Laurl, under the
+// ClearKey system id e2719d58-a985-b3c9-781a-b030af78d30e or the mp4protection element).
+void read_protection(const XmlNode *as, const XmlNode *rep, const std::string &base, Rendition *r) {
+    for (const XmlNode *owner : {rep, as}) {
+        for (const XmlNode *cp : owner->children_named("ContentProtection")) {
+            const std::string scheme = cp->attribute_or("schemeIdUri", "");
+            if (scheme == "urn:mpeg:dash:mp4protection:2011" && r->protection_scheme.empty()) {
+                r->protection_scheme = cp->attribute_or("value", "");
+            }
+            if (const std::string *kid = cp->attribute("default_KID")) {
+                const std::string hex = kid_hex(*kid);
+                if (!hex.empty() && std::find(r->key_ids.begin(), r->key_ids.end(), hex) == r->key_ids.end()) {
+                    r->key_ids.push_back(hex);
+                }
+            }
+            if (r->license_url.empty()) {
+                if (const XmlNode *la = cp->child("Laurl")) {
+                    const std::string url = trim(la->text);
+                    if (!url.empty()) r->license_url = resolve_url(base, url);
+                }
+            }
+        }
+    }
+}
+
 bool hls_byterange(const std::string &s, ByteRange *out) {
     const size_t at = s.find('@');
     int64_t len = 0, off = 0;
@@ -783,6 +820,7 @@ bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out
             if (const XmlNode *label = as->child("Label")) r.label = trim(label->text);
             r.is_default = as_main;
             r.encrypted = as_protected || rep->child("ContentProtection") != nullptr;
+            if (r.encrypted) read_protection(as, rep, base_url_of(rep, as_base), &r);
             if (is_dolby_vision(r.codecs)) r.dolby_vision = r.codecs;
             r.atmos = as_atmos;
             for (const char *prop : {"SupplementalProperty", "EssentialProperty"}) {

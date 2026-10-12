@@ -28,6 +28,11 @@ Catalogue routes, a synthetic stand-in for the TVmaze API used by Example C (app
     503 (one refresh with its retries), then normal; slow: show details arrive after 4 s; broken:
     page 0 is not JSON
 
+ClearKey licence route (W3C EME Clear Key), for tests/integration/test_clearkey.cpp:
+    /clearkey[/MODE]  POST {"kids":[base64url...],"type":"temporary"} → {"keys":[{"kty":"oct","kid","k"}]}
+                      for the test key IDs it knows (CLEARKEY_KEYS); MODE deny answers 403, empty
+                      answers a key set without the requested keys
+
 WebSocket routes (GET with Upgrade: websocket), for tests/integration/test_websocket_curl.cpp:
     /ws/echo     echoes messages; text commands: ping-me (server ping), close-me (server close 1000
                  "bye"), fragment-me (3-fragment text), big (200000-byte binary), bad-frame (masked
@@ -59,6 +64,8 @@ WS_DROPS = {"n": 0}
 FILES_DIR = {"path": None}
 RANGE_LOG: list[str] = []
 CATALOGUE_FLAKY = {"left": 3}  # Range header of every /range and /files request, for /range-log
+# The test content keys (key ID hex → key hex) the /clearkey licence route hands out.
+CLEARKEY_KEYS = {"0123456789abcdef0123456789abcdef": "00112233445566778899aabbccddeeff"}
 
 
 def parse_range(value: str, size: int) -> tuple[int, int] | None | str:
@@ -269,6 +276,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, json.dumps(show).encode(), js)
         return self._send(404, b"not found")
 
+    def _clearkey(self, mode: str, body: bytes):
+        if self.command != "POST":
+            return self._send(405, b"POST only")
+        if mode == "deny":
+            return self._send(403, b"forbidden")
+        try:
+            kids = json.loads(body.decode())["kids"]
+        except (ValueError, KeyError, TypeError):
+            return self._send(400, b"bad request")
+        keys = []
+        for kid in kids if mode != "empty" else []:
+            raw = base64.urlsafe_b64decode(kid + "=" * (-len(kid) % 4))
+            key = CLEARKEY_KEYS.get(raw.hex())
+            if key is not None:
+                k = base64.urlsafe_b64encode(bytes.fromhex(key)).decode().rstrip("=")
+                keys.append({"kty": "oct", "kid": kid, "k": k})
+        return self._send(200, json.dumps({"keys": keys, "type": "temporary"}).encode(),
+                          {"Content-Type": "application/json"})
+
     def _route(self):
         url = urllib.parse.urlparse(self.path)
         if self.headers.get("Upgrade", "").lower() == "websocket" and url.path.startswith("/ws/"):
@@ -325,6 +351,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             info = {"method": self.command, "body": body.decode("utf-8", "replace"),
                     "x_test": self.headers.get("X-Test", ""), "expect": self.headers.get("Expect", "")}
             return self._send(200, json.dumps(info).encode(), {"Content-Type": "application/json"})
+        if url.path == "/clearkey" or url.path.startswith("/clearkey/"):
+            return self._clearkey(url.path[len("/clearkey/"):] if url.path != "/clearkey" else "", body)
         if url.path == "/gzip":
             return self._send(200, gzip.compress(b"compressed body " * 100),
                               {"Content-Encoding": "gzip", "Content-Type": "text/plain"})

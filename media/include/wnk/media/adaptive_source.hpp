@@ -47,6 +47,7 @@
 // encrypted renditions (refused), WebM renditions (left out), more than the first DASH Period.
 #pragma once
 
+#include "wnk/media/clearkey.hpp"
 #include "wnk/media/manifest.hpp"
 #include "wnk/media/media.hpp"
 #include "wnk/net/http.hpp"
@@ -76,6 +77,13 @@ struct AdaptiveSourceOptions {
     // Media downloaded ahead of the demuxer, per rendition (rounded up to whole segments, at least
     // two). A bitrate switch plays this much of the old rendition out first.
     int64_t max_ahead_us = 12000000;
+    // ClearKey (wnk/media/clearkey.hpp): keys for encrypted renditions. Key IDs the manifest names
+    // without a key here are asked from `license_url`, else from the manifest's ClearKey licence URL,
+    // unless fetch_licenses is off. Encrypted renditions without their keys are left out.
+    ContentKeys keys;
+    std::string license_url;
+    net::Headers license_headers;  // sent with licence requests only (an Authorization header)
+    bool fetch_licenses = true;
 };
 
 // Network throughput from completed downloads: two exponentially weighted averages over transfer

@@ -239,6 +239,14 @@ if (TARGET wnk_media_ffmpeg)
         add_test(NAME integration.adaptive_source
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
                         "$<TARGET_FILE:test_adaptive_source>")
+        # ClearKey: licence exchange with the server's /clearkey route, CENC MP4 and DASH decrypted
+        # byte for byte against the clear file.
+        add_executable(test_clearkey integration/test_clearkey.cpp)
+        target_include_directories(test_clearkey PRIVATE unit)
+        target_link_libraries(test_clearkey PRIVATE wnk_media_ffmpeg)
+        add_test(NAME integration.clearkey
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                        "$<TARGET_FILE:test_clearkey>")
     endif ()
 endif ()
 

@@ -23,6 +23,7 @@
 // stream is seekable when the server honours byte ranges.
 #pragma once
 
+#include "wnk/media/clearkey.hpp"
 #include "wnk/media/media.hpp"
 #include "wnk/net/byte_reader.hpp"
 #include "wnk/net/http_stream.hpp"
@@ -35,6 +36,9 @@ struct FfmpegSourceOptions {
     std::shared_ptr<net::HttpTransport> http;  // for http(s) URIs; without it they fail to open
     net::HttpStreamOptions http_stream;
     bool ac3_encode = true;  // offer AudioPath::Ac3 (TrackInfo::ac3_encodable)
+    // ClearKey content keys for Common Encryption in MP4 (wnk/media/clearkey.hpp): the demuxer
+    // decrypts each sample with them. Encrypted samples without a matching key fail the read.
+    ContentKeys decryption_keys;
 };
 
 class FfmpegSource : public MediaSource {

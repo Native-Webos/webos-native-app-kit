@@ -68,6 +68,12 @@ struct Rendition {
     std::string audio_group;   // HLS variant: the GROUP-ID of its audio renditions
     bool is_default = false;
     bool encrypted = false;
+    // Common Encryption details from DASH ContentProtection (empty when not given): the scheme
+    // ("cenc", "cbcs", ...), the default key IDs (32 lowercase hex digits) and a ClearKey licence
+    // server URL (clearkey:Laurl or dashif:Laurl).
+    std::string protection_scheme;
+    std::vector<std::string> key_ids;
+    std::string license_url;
     // Media time minus presentation time (DASH: presentationTimeOffset less the Period start);
     // kNoTime when only the media can tell (HLS, where all renditions share one timeline).
     int64_t time_origin_us = kNoTime;

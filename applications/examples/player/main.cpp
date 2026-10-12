@@ -20,6 +20,8 @@
 //                                          the kit's HTTP client (byte ranges make them seekable); .mpd
 //                                          and .m3u8 URIs play as DASH/HLS (AdaptiveSource)
 //   {"lang": "de"}                         preferred audio language for DASH/HLS
+//   {"keys": "kid:key,kid:key"}            ClearKey content keys (32 hex digits each) for CENC MP4/DASH
+//   {"licenseUrl": "https://..."}          ClearKey licence server (else the one the manifest names)
 //   {"seeks": "15:+10,17:+10"}             scripted relative seeks (seconds after the player opens:
 //                                          seconds to seek), for reproducing seek bugs without a remote
 //   {"audio": "5:2,9:1"}                   scripted audio track changes (seconds after the player opens:
@@ -31,7 +33,7 @@
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"ac3": false}                         never re-encode audio to AC-3 (audio Starfish cannot take
 //                                          then sends the file to NDL, as before)
-//   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..11)
+//   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..14)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
 #include "wnk/media/auto_backend.hpp"
@@ -70,7 +72,10 @@ struct Clip {
 
 // Public test streams (network), listed under the bundled clips.
 struct Stream {
+    Stream(std::string t, std::string d, std::string u, std::string k = {})
+        : title(std::move(t)), detail(std::move(d)), url(std::move(u)), keys(std::move(k)) {}
     std::string title, detail, url;
+    std::string keys;  // ClearKey "kid:key" pairs for a protected stream (public test keys only)
 };
 
 struct Settings {
@@ -85,6 +90,8 @@ struct Settings {
     std::vector<std::pair<double, double>> audio_switches;  // scripted: (seconds after opening, audio track)
     DeviceMediaCaps device;
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
+    ContentKeys keys;         // ClearKey content keys ({"keys": ...})
+    std::string license_url;  // ClearKey licence server ({"licenseUrl": ...}); else the manifest's
 };
 
 std::string clock_text(int64_t us) {
@@ -129,9 +136,15 @@ std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &u
         if (s.device.hevc == false) o.video_codecs = {CodecId::H264};
         if (s.device.uhd_panel != true) o.max_height = 1080;
         o.dolby_vision = s.device.dolby_vision == true;
+        o.keys = s.keys;
+        o.license_url = s.license_url;
         return std::make_unique<AdaptiveSource>(o);
     }
-    return std::make_unique<FfmpegSource>(FfmpegSourceOptions{s.http, {}, s.ac3});
+    FfmpegSourceOptions o;
+    o.http = s.http;
+    o.ac3_encode = s.ac3;
+    o.decryption_keys = s.keys;
+    return std::make_unique<FfmpegSource>(std::move(o));
 }
 
 // ---- player screen ---------------------------------------------------------------------------------
@@ -458,7 +471,7 @@ class HomeScreen : public Screen {
         list.add<Label>("Streams (DASH / HLS over the network)", TextRole::Small).set_muted(true).set_padding({0, 12, 0, 0});
         for (size_t i = 0; i < streams.size(); ++i) {
             const Stream st = streams[i];
-            auto &b = list.add<Button>(st.title + "   —   " + st.detail, [this, st](Ui &ui) { play(ui, st.url, st.title); });
+            auto &b = list.add<Button>(st.title + "   —   " + st.detail, [this, st](Ui &ui) { play(ui, st.url, st.title, st.keys); });
             b.set_align(Align::Start, Align::Start);
             b.name = "stream" + std::to_string(i);
         }
@@ -469,9 +482,12 @@ class HomeScreen : public Screen {
         col.add<Label>(info, TextRole::Small).set_muted(true).set_padding({0, 30, 0, 0});
     }
 
-    void play(Ui &ui, const std::string &uri, const std::string &title) {
-        WNK_LOGI(kCat, "play %s", uri.c_str());
-        nav_.push(ui, std::make_unique<PlayerScreen>(ctx_, settings_, uri, title));
+    void play(Ui &ui, const std::string &uri, const std::string &title, const std::string &keys = {}) {
+        WNK_LOGI(kCat, "play %s%s", uri.c_str(), keys.empty() ? "" : " (ClearKey keys given)");
+        Settings s = settings_;
+        std::string err;
+        if (!keys.empty() && !parse_content_keys(keys, &s.keys, &err)) WNK_LOGW(kCat, "%s", err.c_str());
+        nav_.push(ui, std::make_unique<PlayerScreen>(ctx_, s, uri, title));
     }
 
  private:
@@ -500,6 +516,11 @@ class Player : public wnk::app::Delegate {
             }
             if (params.contains("ac3") && params["ac3"].is_boolean()) s.ac3 = params["ac3"];
             if (params.contains("lang") && params["lang"].is_string()) s.language = params["lang"];
+            if (params.contains("keys") && params["keys"].is_string()) {
+                std::string err;
+                if (!parse_content_keys(params["keys"].get<std::string>(), &s.keys, &err)) WNK_LOGW(kCat, "%s", err.c_str());
+            }
+            if (params.contains("licenseUrl") && params["licenseUrl"].is_string()) s.license_url = params["licenseUrl"];
             // "at:value,at:value" with `at` in seconds after the player opens.
             auto timed = [&](const char *key, std::vector<std::pair<double, double>> *out) {
                 if (!params.contains(key) || !params[key].is_string()) return;
@@ -545,6 +566,15 @@ class Player : public wnk::app::Delegate {
              "https://livesim2.dashif.org/livesim2/timesubswvtt_en/testpic_2s/Manifest.mpd"},
             {"Unified Streaming (live)", "HLS · live · MPEG-TS · H.264 + AAC renditions",
              "https://demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8"},
+            // ClearKey (Common Encryption with keys the app has): Shaka's published test key, and
+            // livesim2's licence server named in the manifest.
+            {"ClearKey: Shaka angel-one", "DASH · CENC 'cenc' · key given (kid:key)",
+             "https://storage.googleapis.com/shaka-demo-assets/angel-one-clearkey/dash.mpd",
+             "feedf00deedeadbeeff0baadf00dd00d:00112233445566778899aabbccddeeff"},
+            {"ClearKey: livesim2 cenc (live)", "DASH · dynamic · CENC 'cenc' · key from the licence server",
+             "https://livesim2.dashif.org/livesim2/eccp_cenc/testpic_2s/Manifest.mpd"},
+            {"ClearKey: livesim2 cbcs (live)", "DASH · dynamic · CENC 'cbcs' · key from the licence server",
+             "https://livesim2.dashif.org/livesim2/eccp_cbcs/testpic_2s/Manifest.mpd"},
         };
         Ui &ui = ctx.ui();
         nav_ = &ui.root().add<Navigator>();
@@ -556,7 +586,7 @@ class Player : public wnk::app::Delegate {
             home_->play(ui, "file://" + s.clips_dir + "/" + clips[autoplay].file, clips[autoplay].title);
         } else if (autoplay >= n_clips && autoplay < n_clips + static_cast<int>(streams.size())) {
             const Stream &st = streams[static_cast<size_t>(autoplay - n_clips)];
-            home_->play(ui, st.url, st.title);
+            home_->play(ui, st.url, st.title, st.keys);
         }
     }
 

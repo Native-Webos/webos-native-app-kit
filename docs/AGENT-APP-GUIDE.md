@@ -597,7 +597,12 @@ Source choice:
 | `http(s)` file (MP4, MKV, MPEG-TS) | `FfmpegSource` with `options.http = ctx.http()` |
 | `.mpd` / `.m3u8`, VOD or live | `AdaptiveSource` |
 
-`AdaptiveSource` refuses a fully encrypted presentation. DRM is out of scope. TTML (`stpp`) is
+Encrypted content plays when the app has the keys (ClearKey, `wnk/media/clearkey.hpp`): MPEG Common
+Encryption ('cenc', 'cbcs', 'cens', 'cbc1') in MP4 and DASH. Give keys as
+`AdaptiveSourceOptions::keys` / `FfmpegSourceOptions::decryption_keys` (`parse_content_keys("kid:key,...")`
+also reads a JWK set). Key IDs the manifest names without a key are asked from
+`AdaptiveSourceOptions::license_url`, else from the manifest's ClearKey licence URL. Keys are
+secrets: never log them. Without keys `AdaptiveSource` refuses an encrypted presentation. TTML (`stpp`) is
 listed and not decoded. WebM renditions are left out. Audio bitrate switching is not implemented;
 video bitrate switching is (`adaptive_bitrate`, default on).
 
@@ -702,7 +707,7 @@ Say these are missing. Do not emulate them with a fake.
 | Gap | Consequence |
 |---|---|
 | No text field, IME, or on-screen keyboard | You cannot ask the user to type. Pick from lists, or take the string from launch params / a paired client. |
-| No DRM / Widevine / PlayReady | `AdaptiveSource` refuses encrypted presentations. |
+| No Widevine / PlayReady | Encrypted content plays only with ClearKey (the app has the keys). |
 | No scale or rotation | Focus "zoom" is the ring, not a scaled card. |
 | No complex-script shaping | Arabic, Hebrew, and Indic runs will be wrong. |
 | No audio-only UI component | Sound is the media backend's video plane plus audio, or nothing. |

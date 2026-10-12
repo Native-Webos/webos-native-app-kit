@@ -39,6 +39,8 @@ namespace wnk::app {
 bool Delegate::on_action(Context &, const input::ActionEvent &) { return false; }
 void Delegate::on_lifecycle(Context &, const Lifecycle::Transition &) {}
 void Delegate::on_relaunch(Context &, const std::string &) {}
+bool Delegate::on_gamepad(Context &, const input::GamepadEvent &) { return false; }
+bool Delegate::on_key(Context &, const input::KeyEvent &) { return false; }
 void Delegate::on_frame(Context &, float) {}
 void Delegate::on_stop(Context &) {}
 
@@ -117,7 +119,9 @@ class Watchdog {
 // bg / fg (the SDL app background/foreground event pairs SDL-webOS sends), text@STRING (typed text as
 // SDL_TEXTINPUT, what LG's keyboard sends; no commas), kbclose (the viewer closes the keyboard),
 // relaunch (<prefix>_RELAUNCH, a lifecycle message as the application manager sends it, arrives as
-// SDL_webOSTakeRelaunchMessage would return it). <prefix>_SHOT saves the
+// SDL_webOSTakeRelaunchMessage would return it), pad (attach an SDL virtual game controller), pad+NAME /
+// pad-NAME (press / release a button by SDL name: a, b, dpright, start...), padx=V / pady=V (left stick,
+// -1..1), pad~ (unplug it). <prefix>_SHOT saves the
 // last drawn frame as BMP. The app quits when the script ends.
 class Script {
  public:
@@ -126,6 +130,12 @@ class Script {
         if (const char *shot = SDL_getenv((prefix + "_SHOT").c_str())) shot_ = shot;
         if (const char *m = SDL_getenv((prefix + "_RELAUNCH").c_str())) relaunch_message_ = m;
     }
+    ~Script() {
+        if (pad_ != nullptr) SDL_JoystickClose(pad_);
+        if (pad_index_ >= 0) SDL_JoystickDetachVirtual(pad_index_);
+    }
+    Script(const Script &) = delete;
+    Script &operator=(const Script &) = delete;
     // The relaunch message a "relaunch" step released, once.
     std::string take_relaunch() { return std::exchange(relaunch_due_, std::string()); }
     bool active() const { return !steps_.empty() || !shot_.empty(); }
@@ -153,7 +163,7 @@ class Script {
 
  private:
     struct Step {
-        enum Kind { Key, Move, Click, Wheel, Background, Foreground, Text, KeyboardClosed, Relaunch } kind = Key;
+        enum Kind { Key, Move, Click, Wheel, Background, Foreground, Text, KeyboardClosed, Relaunch, Pad } kind = Key;
         SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
         float x = 0, y = 0;
         std::string text;
@@ -177,6 +187,9 @@ class Script {
                 st.kind = Step::KeyboardClosed;
             } else if (name == "relaunch") {
                 st.kind = Step::Relaunch;
+            } else if (name.rfind("pad", 0) == 0) {
+                st.kind = Step::Pad;
+                st.text = name.substr(3);
             } else if (name == "bg") {
                 st.kind = Step::Background;
             } else if (name == "fg") {
@@ -200,7 +213,36 @@ class Script {
         ev.type = type;
         SDL_PushEvent(&ev);
     }
-    static void run(const Step &st, render::Gles2Renderer &r, SDL_Window *window) {
+    // SDL's virtual joystick, typed as a game controller so SDL maps its buttons and axes one to one.
+    void pad(const std::string &cmd) {
+        if (cmd.empty()) {
+            SDL_VirtualJoystickDesc desc{};
+            desc.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+            desc.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+            desc.naxes = SDL_CONTROLLER_AXIS_MAX;
+            desc.nbuttons = SDL_CONTROLLER_BUTTON_MAX;
+            desc.name = "wnk virtual pad";
+            pad_index_ = SDL_JoystickAttachVirtualEx(&desc);
+            pad_ = pad_index_ >= 0 ? SDL_JoystickOpen(pad_index_) : nullptr;
+            if (pad_ == nullptr) WNK_LOGW("script", "virtual pad: %s", SDL_GetError());
+            return;
+        }
+        if (pad_ == nullptr) return;
+        if (cmd == "~") {
+            SDL_JoystickClose(pad_);
+            pad_ = nullptr;
+            SDL_JoystickDetachVirtual(pad_index_);
+            pad_index_ = -1;
+        } else if (cmd[0] == '+' || cmd[0] == '-') {
+            const SDL_GameControllerButton b = SDL_GameControllerGetButtonFromString(cmd.c_str() + 1);
+            if (b != SDL_CONTROLLER_BUTTON_INVALID) SDL_JoystickSetVirtualButton(pad_, b, cmd[0] == '+' ? 1 : 0);
+        } else if (cmd.size() > 2 && cmd[1] == '=') {
+            const auto v = static_cast<Sint16>(std::clamp(std::atof(cmd.c_str() + 2), -1.0, 1.0) * 32767);
+            SDL_JoystickSetVirtualAxis(pad_, cmd[0] == 'x' ? SDL_CONTROLLER_AXIS_LEFTX : SDL_CONTROLLER_AXIS_LEFTY, v);
+        }
+    }
+
+    void run(const Step &st, render::Gles2Renderer &r, SDL_Window *window) {
         // Logical units → drawable pixels → window units: the reverse of the input path.
         const Point px = r.mapping().to_pixels({st.x, st.y});
         int ww = 0, wh = 0, dw = 0, dh = 0;
@@ -253,6 +295,7 @@ class Script {
                 SDL_PushEvent(&ev);
                 break;
             case Step::Relaunch: break;  // tick() hands the message to the shell
+            case Step::Pad: pad(st.text); break;
             case Step::KeyboardClosed:
                 // What SDL-webOS does when the panel closes: text events off (SDL_IsTextInputActive false).
                 SDL_EventState(SDL_TEXTINPUT, SDL_DISABLE);
@@ -272,6 +315,8 @@ class Script {
     size_t next_ = 0;
     std::string shot_;
     std::string relaunch_message_, relaunch_due_;
+    SDL_Joystick *pad_ = nullptr;
+    int pad_index_ = -1;
 };
 
 class Shell final : public Context {
@@ -382,6 +427,17 @@ class Shell final : public Context {
         // screensaver request from the TV. The wake locks decide instead.
         SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
         if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) return fail("SDL video init");
+        if (config_.gamepads) {
+            if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+                WNK_LOGW("gamepad", "no game controller support: %s", SDL_GetError());
+            } else {
+                const std::string db = launch_.app_dir + "/" + config_.gamepad_mappings;
+                if (!config_.gamepad_mappings.empty() && access(db.c_str(), R_OK) == 0) {
+                    const int n = SDL_GameControllerAddMappingsFromFile(db.c_str());
+                    WNK_LOGI("gamepad", "%d mappings from %s", n, db.c_str());
+                }
+            }
+        }
         wake_locks_ = std::make_unique<WakeLocks>(config_.allow_screensaver, [](bool block, const std::string &why) {
             if (block) {
                 SDL_DisableScreenSaver();
@@ -594,6 +650,10 @@ class Shell final : public Context {
 
             work += dispatcher_->drain(32, std::chrono::milliseconds(4));
             sync_text_input();
+            for (const auto &a : pad_nav_.tick(SDL_GetTicks())) {
+                handle_action(a);
+                ++work;
+            }
             if (char *m = take_relaunch_ != nullptr ? take_relaunch_() : nullptr) {
                 on_relaunch_message(m);
                 SDL_free(m);
@@ -689,6 +749,13 @@ class Shell final : public Context {
             case SDL_MOUSEWHEEL:
                 if (auto p = input::pointer_event_from_sdl(ev, window_)) on_pointer(*p);
                 break;
+            case SDL_CONTROLLERDEVICEADDED:
+            case SDL_CONTROLLERDEVICEREMOVED:
+            case SDL_CONTROLLERBUTTONDOWN:
+            case SDL_CONTROLLERBUTTONUP:
+            case SDL_CONTROLLERAXISMOTION:
+                on_pad(ev);
+                break;
             case SDL_TEXTINPUT:
                 if (lifecycle_.renders()) ui_->handle_text(ev.text.text);
                 break;
@@ -746,6 +813,7 @@ class Shell final : public Context {
 
     void background() {
         release_keys();
+        for (const auto &a : pad_nav_.release_all(SDL_GetTicks())) handle_action(a);
         if (ui_ && ui_->text_input_view() != nullptr) ui_->text_input_closed();  // the keyboard goes with the app
         lifecycle_.dispatch(Event::Background, SDL_GetTicks());
     }
@@ -757,6 +825,7 @@ class Shell final : public Context {
     void on_key(const SDL_Event &ev) {
         auto key = input::key_event_from_sdl(ev);
         if (!key) return;
+        if (lifecycle_.renders() && delegate_->on_key(*this, *key)) return;
         if (key->down) {
             const auto *b = mapper_.keymap().find(key->scancode, key->keycode);
             WNK_LOGD("key", "down sc=%d kc=0x%x repeat=%d action=%s pointer=%d", key->scancode, key->keycode,
@@ -875,6 +944,21 @@ class Shell final : public Context {
         auto it = path_faces_.find(path);
         if (it == path_faces_.end()) it = path_faces_.emplace(path, render::FontFace::from_file(path)).first;
         return it->second && it->second->covers(cp);
+    }
+
+    void on_pad(const SDL_Event &ev) {
+        auto e = gamepads_.on_sdl(ev);
+        if (!e) return;
+        if (e->type == input::GamepadEvent::Type::Added) {
+            WNK_LOGI("gamepad", "pad %d connected: %s (%zu connected)", e->id, e->name.c_str(), gamepads_.connected());
+            note_capability("input.gamepad", diagnostics::Support::Supported, e->name);
+        } else if (e->type == input::GamepadEvent::Type::Removed) {
+            WNK_LOGI("gamepad", "pad %d disconnected (%zu connected)", e->id, gamepads_.connected());
+        } else if (!lifecycle_.renders()) {
+            return;  // backgrounded: like keys, pad input is ignored
+        }
+        if (delegate_->on_gamepad(*this, *e)) return;
+        for (const auto &a : pad_nav_.on_event(*e)) handle_action(a);
     }
 
     // {"event":"relaunch","parameters":{...},...} (registerApp, interface 2) or {"message":"relaunch",...}
@@ -1056,6 +1140,7 @@ class Shell final : public Context {
             window_ = nullptr;
         });
         if (wake_locks_) wake_locks_->detach();  // locks still held elsewhere must not call SDL after this
+        gamepads_.close_all();
         if (sdl_) run_step("SDL_Quit", [] { SDL_Quit(); });
         pool_.reset();
         dispatcher_.reset();
@@ -1100,6 +1185,8 @@ class Shell final : public Context {
     std::unique_ptr<ui::ServiceImageSource> image_source_;
     std::unique_ptr<ui::Ui> ui_;
     std::unique_ptr<WakeLocks> wake_locks_;
+    input::SdlGamepads gamepads_;
+    input::GamepadNavigator pad_nav_;
     std::unique_ptr<audio::Mixer> mixer_;
     std::unique_ptr<audio::SdlOutput> audio_out_;
     std::unique_ptr<Delegate> delegate_;

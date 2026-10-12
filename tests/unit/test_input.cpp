@@ -2,6 +2,7 @@
 #define WNK_TEST_MAIN
 #include "wnk_test.hpp"
 
+#include "wnk/input/gamepad.hpp"
 #include "wnk/input/input.hpp"
 
 #include <set>
@@ -168,4 +169,84 @@ TEST("edit keys: editing scancodes and printable keys are recognised") {
     CHECK(!wnk::input::key_types_text(key(41, 27)));
     CHECK(!wnk::input::key_types_text(key(76, 0x7F)));
     CHECK(!wnk::input::key_types_text(key(482, 0x400001E2)));  // webOS Back
+}
+
+namespace {
+GamepadEvent pad_button(int pad, PadButton b, bool down, uint32_t t) {
+    GamepadEvent e;
+    e.type = GamepadEvent::Type::Button;
+    e.id = pad;
+    e.button = b;
+    e.down = down;
+    e.time_ms = t;
+    return e;
+}
+GamepadEvent pad_axis(int pad, PadAxis a, float v, uint32_t t) {
+    GamepadEvent e;
+    e.type = GamepadEvent::Type::Axis;
+    e.id = pad;
+    e.axis = a;
+    e.value = v;
+    e.time_ms = t;
+    return e;
+}
+}  // namespace
+
+TEST("gamepad: buttons map to UI actions; held directions repeat, others do not") {
+    GamepadNavigator nav;
+    auto out = nav.on_event(pad_button(0, PadButton::A, true, 100));
+    REQUIRE(out.size() == 1u);
+    CHECK(out[0].action == Action::Confirm && out[0].phase == Phase::Press);
+    CHECK(nav.tick(2000).empty());  // OK held does not repeat
+    out = nav.on_event(pad_button(0, PadButton::A, false, 2100));
+    REQUIRE(out.size() == 1u);
+    CHECK(out[0].phase == Phase::Release && out[0].held_ms == 2000);
+    CHECK(nav.on_event(pad_button(0, PadButton::X, true, 0)).empty());  // no UI meaning
+    CHECK(nav.on_event(pad_button(0, PadButton::B, true, 0))[0].action == Action::Back);
+    CHECK(nav.on_event(pad_button(0, PadButton::Start, true, 0))[0].action == Action::PlayPause);
+    nav.release_all(0);
+    nav.on_event(pad_button(1, PadButton::DpadRight, true, 1000));
+    CHECK(nav.tick(1399).empty());
+    out = nav.tick(1400);
+    REQUIRE(out.size() == 1u);
+    CHECK(out[0].action == Action::Right && out[0].phase == Phase::Repeat);
+    CHECK(nav.tick(1489).empty());
+    CHECK_EQ(nav.tick(1490).size(), size_t{1});
+    out = nav.on_event(pad_button(1, PadButton::DpadRight, false, 1500));
+    CHECK(out.size() == 1u && out[0].phase == Phase::Release);
+    CHECK(nav.tick(5000).empty());
+}
+
+TEST("gamepad: the left stick presses its dominant direction with hysteresis") {
+    GamepadNavigator nav;
+    CHECK(nav.on_event(pad_axis(0, PadAxis::LeftX, 0.5f, 0)).empty());  // under the press threshold
+    auto out = nav.on_event(pad_axis(0, PadAxis::LeftX, 0.8f, 10));
+    REQUIRE(out.size() == 1u);
+    CHECK(out[0].action == Action::Right && out[0].phase == Phase::Press);
+    CHECK(nav.on_event(pad_axis(0, PadAxis::LeftX, 0.4f, 20)).empty());  // still held above release
+    out = nav.on_event(pad_axis(0, PadAxis::LeftY, -0.9f, 30));          // now mostly up
+    REQUIRE(out.size() == 2u);
+    CHECK(out[0].action == Action::Right && out[0].phase == Phase::Release);
+    CHECK(out[1].action == Action::Up && out[1].phase == Phase::Press);
+    CHECK(nav.on_event(pad_axis(0, PadAxis::RightX, 1.0f, 40)).empty());  // right stick: games only
+    out = nav.on_event(pad_axis(0, PadAxis::LeftY, 0.0f, 50));
+    out = nav.on_event(pad_axis(0, PadAxis::LeftX, 0.0f, 60));
+    CHECK(nav.tick(10000).empty());
+}
+
+TEST("gamepad: unplugging a pad releases what it held, other pads keep theirs") {
+    GamepadNavigator nav;
+    nav.on_event(pad_button(0, PadButton::DpadDown, true, 0));
+    nav.on_event(pad_button(1, PadButton::DpadUp, true, 0));
+    GamepadEvent gone;
+    gone.type = GamepadEvent::Type::Removed;
+    gone.id = 0;
+    gone.time_ms = 100;
+    auto out = nav.on_event(gone);
+    REQUIRE(out.size() == 1u);
+    CHECK(out[0].action == Action::Down && out[0].phase == Phase::Release);
+    out = nav.tick(1000);
+    REQUIRE(out.size() == 1u);
+    CHECK(out[0].action == Action::Up);
+    CHECK(std::string(pad_button_name(PadButton::DpadRight)) == "dpright");
 }

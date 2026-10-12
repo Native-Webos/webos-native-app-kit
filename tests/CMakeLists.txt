@@ -140,6 +140,10 @@ if (TARGET wnk-tvui)
             PASS_REGULAR_EXPRESSION "focus widgets.sound.*sound: chord.*closed; peak level 0\\.4[0-9]"
             FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
             TIMEOUT 30)
+    # A game controller (SDL's virtual pad): the D-pad and A/B navigate, a held stick repeats, X goes to
+    # the app's on_gamepad, and unplugging is reported.
+    wnk_tvui_e2e(gamepad_navigates "pad,Z,pad+dpright,pad-dpright,pad+a,pad-a,Z,pad+b,pad-b,Z,pad+x,pad-x,padx=1,Z,Z,Z,Z,Z,Z,padx=0,pad~,Z"
+            "pad 0 connected: wnk virtual pad.*focus rail0.item1.*open details for item 1.*back to home focus=rail0.item1.*gamepad 0: X pressed \\(handled by the app\\).*focus rail0.item2.*focus rail0.item3.*focus rail0.item4.*pad 0 disconnected")
     # A still screen is drawn but not presented: under 100 presents (about 7; 13 under ASan) in ~7 s of
     # waiting, not 400.
     string(REPEAT "Z," 60 WNK_TVUI_IDLE)

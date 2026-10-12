@@ -29,6 +29,7 @@
 #include "wnk/diagnostics/metrics.hpp"
 #include "wnk/i18n/i18n.hpp"
 #include "wnk/image/image.hpp"
+#include "wnk/input/gamepad.hpp"
 #include "wnk/input/input.hpp"
 #include "wnk/net/http.hpp"
 #include "wnk/platform/process.hpp"
@@ -55,6 +56,11 @@ struct AppConfig {
     bool audio = false;       // open the audio output for the app's own sounds (Context::audio)
     bool double_back_exit = true;  // unhandled Back at the root: "Press Back again to exit"
     int cursor_sleep_ms = 5000;
+    // Game controllers: navigate the UI (D-pad/stick, A = OK, B = Back) and reach Delegate::on_gamepad.
+    // Extra SDL mappings for unusual pads are read from this file in the app directory, if present
+    // (the gamecontrollerdb.txt format).
+    bool gamepads = true;
+    std::string gamepad_mappings = "gamecontrollerdb.txt";
     // Let the TV's screensaver start while the app is idle in the foreground (wake_lock.hpp). Hold a
     // Context::keep_screen_on() lock while video plays. false blocks it for the whole run.
     bool allow_screensaver = true;
@@ -136,6 +142,12 @@ class Delegate {
     // second `ares-launch` with parameters). `params_json` is the new parameters object ("{}" when
     // there were none); Context::launch() already holds it. The window has been brought to the front.
     virtual void on_relaunch(Context &ctx, const std::string &params_json);
+    // Every gamepad event (pad added or removed, buttons, sticks, triggers) before the shell turns it
+    // into UI actions. Return true to keep it from the UI: a game reads the pad here.
+    virtual bool on_gamepad(Context &ctx, const input::GamepadEvent &e);
+    // Every raw key event (USB/Bluetooth keyboard, remote) before text input and the keymap. Return true
+    // to consume it: a game that wants WASD or key-up timing reads keys here.
+    virtual bool on_key(Context &ctx, const input::KeyEvent &e);
     // Once per drawn frame, after the Ui has been updated.
     virtual void on_frame(Context &ctx, float dt);
     // Shutdown has begun: save state. Workers and the dispatcher still run; the UI still exists.

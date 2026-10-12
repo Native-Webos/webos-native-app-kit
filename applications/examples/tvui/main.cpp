@@ -422,6 +422,17 @@ class TvUi : public wnk::app::Delegate {
         ui.focus_within(&home_->first_rail());
     }
 
+    // Raw pad input before the UI sees it: X has no UI meaning, so this app takes it (a game would
+    // take everything here). Everything else navigates as usual.
+    bool on_gamepad(wnk::app::Context &, const wnk::input::GamepadEvent &e) override {
+        if (e.type != wnk::input::GamepadEvent::Type::Button || e.button != wnk::input::PadButton::X) return false;
+        if (e.down) {
+            WNK_LOGI(kCat, "gamepad %d: X pressed (handled by the app)", e.id);
+            sounds_.play(sounds_.chord);
+        }
+        return true;
+    }
+
     void on_frame(wnk::app::Context &ctx, float) override {
         View *f = ctx.ui().focused();
         if (f != last_focus_ && last_focus_ != nullptr && sounds_.on) sounds_.play(sounds_.tick);

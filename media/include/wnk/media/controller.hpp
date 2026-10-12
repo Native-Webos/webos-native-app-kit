@@ -63,6 +63,7 @@ struct PlaybackSnapshot {
     int64_t duration_us = kNoTime;
     MediaInfo info;  // after Opening
     StreamFormat format;
+    int video_track = -1, audio_track = -1;  // stream indexes in `info` being played, -1 for none
     std::string error;
     uint64_t video_packets = 0, audio_packets = 0;  // fed since open
     uint64_t full_retries = 0;  // feed() returned Full
@@ -121,6 +122,11 @@ class PlaybackController {
     bool stop();
 
     void set_video_area(const Rect &pixels);
+
+    // Plays another audio track (a stream index from MediaInfo) from the current position. The decoder
+    // is reloaded, so there is a short gap; while paused it is reloaded on play. A track that cannot be
+    // played is logged and the current one kept. Ignored before Ready.
+    void set_audio_track(int track);
 
     // Subtitle track to show (a stream index from MediaInfo, -1 for none).
     void set_subtitle_track(int track);

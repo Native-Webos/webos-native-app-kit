@@ -8,8 +8,9 @@
 // The bundled clips (tools/make-test-clips.sh) flash white and beep during the first 80 ms of every
 // second, so on the TV picture/sound sync and the NDL PTS unit can be judged by eye and ear.
 //
-// Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Down cycles the subtitle tracks
-// (a track the file marks as default starts on), Stop or Back leaves. Any key
+// Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Up opens the audio and subtitle
+// track menu, Down cycles the subtitle tracks (a track the file marks as default starts on), Stop or
+// Back leaves. Changing the audio track reloads the decoder at the position (a short gap). Any key
 // shows the controls; they hide after 4 s of playback. Pause and seek keep the decoder loaded, so the
 // picture holds; backgrounding the app pauses playback and releases the decoder, and playback resumes
 // on return if it was playing.
@@ -21,6 +22,8 @@
 //   {"lang": "de"}                         preferred audio language for DASH/HLS
 //   {"seeks": "15:+10,17:+10"}             scripted relative seeks (seconds after the player opens:
 //                                          seconds to seek), for reproducing seek bugs without a remote
+//   {"audio": "5:2,9:1"}                   scripted audio track changes (seconds after the player opens:
+//                                          stream index), for checking the switch without a remote
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"backend": "ndl"}                     force NDL (default: Starfish when the codecs suit it, else NDL)
 //   {"backend": "starfish"}                force LG's Starfish pipeline
@@ -79,6 +82,7 @@ struct Settings {
     bool ac3 = true;  // re-encode audio Starfish cannot take to AC-3
     std::string language;  // preferred audio language for DASH/HLS
     std::vector<std::pair<double, double>> seeks;  // scripted: (seconds after opening, relative seek)
+    std::vector<std::pair<double, double>> audio_switches;  // scripted: (seconds after opening, audio track)
     DeviceMediaCaps device;
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
 };
@@ -135,7 +139,7 @@ std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &u
 class PlayerScreen : public Screen {
  public:
     PlayerScreen(wnk::app::Context &ctx, const Settings &s, std::string uri, std::string title)
-        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks) {
+        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks), audio_switches_(s.audio_switches) {
         name = "player";
         // Under the controls: subtitles over the whole picture.
         subs_view_ = &add<SubtitleView>();
@@ -154,8 +158,9 @@ class PlayerScreen : public Screen {
         auto &bottom = bar_->add<Row>(24);
         time_ = &bottom.add<Label>("--:-- / --:--");
         time_->set_width(Dim::fill());
+        audio_label_ = &bottom.add<Label>("", TextRole::Small);
         subs_label_ = &bottom.add<Label>("", TextRole::Small);
-        bottom.add<Label>("OK pause  ·  Left/Right 10 s  ·  Down subtitles  ·  Back leaves", TextRole::Small).set_muted(true);
+        bottom.add<Label>("OK pause  ·  Left/Right 10 s  ·  Up tracks  ·  Back leaves", TextRole::Small).set_muted(true);
         detail_ = &bar_->add<Label>("", TextRole::Small);
         detail_->set_muted(true);
         spinner_ = &add<Spinner>(96);
@@ -249,7 +254,9 @@ class PlayerScreen : public Screen {
             case Action::Down:
                 if (e.phase == Phase::Press) next_subtitles();
                 return true;
-            case Action::Up: return true;  // nothing to move to; keep focus here
+            case Action::Up:
+                if (e.phase == Phase::Press) open_tracks(ui);
+                return true;
             default: return false;
         }
     }
@@ -262,6 +269,12 @@ class PlayerScreen : public Screen {
             controller_->seek_relative(static_cast<int64_t>(seeks_[next_seek_].second * 1e6));
             ++next_seek_;
         }
+        while (next_audio_ < audio_switches_.size() && ui.now_ms() - opened_ms_ >= audio_switches_[next_audio_].first * 1000) {
+            const int track = static_cast<int>(audio_switches_[next_audio_].second);
+            WNK_LOGI(kCat, "scripted audio track %d", track);
+            controller_->set_audio_track(track);
+            ++next_audio_;
+        }
         const PlaybackSnapshot s = controller_->snapshot();
         const bool busy = s.state == PlayState::Opening || s.state == PlayState::Seeking;
         spinner_->set_visible(busy);
@@ -272,6 +285,16 @@ class PlayerScreen : public Screen {
                         (s.position_estimated ? "" : " ·"));
         if (s.duration_us > 0 && s.position_us != kNoTime) progress_->set_value(static_cast<float>(s.position_us) / s.duration_us);
         if (s.state == PlayState::Error) detail_->set_text(s.error);
+        if (s.audio_track != audio_track_) {
+            audio_track_ = s.audio_track;
+            const TrackInfo *t = s.info.track(audio_track_);
+            const std::string label = t != nullptr ? "Audio: " + track_name(*t) : std::string();
+            audio_label_->set_text(label);
+            if (t != nullptr) {
+                WNK_LOGI(kCat, "audio: track %d, %s", audio_track_, label.c_str());
+                describe(s);
+            }
+        }
         // Controls hide during playback; paused, ended or failed keeps them up.
         const bool keep = s.state != PlayState::Playing;
         const bool visible = keep || ui.now_ms() - last_input_ms_ < 4000;
@@ -299,6 +322,58 @@ class PlayerScreen : public Screen {
  private:
     void show_controls() { last_input_ms_ = ctx_.ui().now_ms(); }
 
+    static std::string track_name(const TrackInfo &t) {
+        std::string name = !t.title.empty() ? t.title : !t.language.empty() ? t.language : "track " + std::to_string(t.index);
+        name += " (" + t.codec_label;
+        if (t.type == TrackType::Audio && t.channels > 0) name += ", " + std::to_string(t.channels) + " ch";
+        return name + ")";
+    }
+
+    // The track menu: every audio track, then Off and every subtitle track this build can draw. The
+    // current choices are marked and the playing audio track has focus.
+    void open_tracks(Ui &ui) {
+        if (tracks_.empty()) return;  // not open yet
+        auto d = std::make_unique<Dialog>("Audio and subtitles");
+        Dialog *dialog = d.get();
+        Button *current = nullptr;
+        auto &body = d->body();
+        body.add<Label>("Audio", TextRole::Small).set_muted(true);
+        auto &audio = body.add<Grid>(2, 16);  // the dialog is 920 wide; DASH/HLS can list six languages
+        const PlaybackSnapshot s = controller_->snapshot();
+        for (const TrackInfo &t : tracks_) {
+            if (t.type != TrackType::Audio) continue;
+            const bool on = t.index == s.audio_track;
+            auto &b = audio.add<Button>(track_name(t) + (on ? "  ·  playing" : ""), [this, dialog, index = t.index](Ui &u) {
+                WNK_LOGI(kCat, "tracks: audio %d chosen", index);
+                controller_->set_audio_track(index);
+                dialog->dismiss(u);
+            });
+            b.name = "tracks.audio." + std::to_string(t.index);
+            b.set_width(Dim::fill());
+            if (on) current = &b;
+        }
+        body.add<Label>("Subtitles", TextRole::Small).set_muted(true);
+        auto &subs = body.add<Grid>(2, 16);
+        auto add_sub = [&](int index, const std::string &text) {
+            const bool on = index == controller_->subtitle_track();
+            auto &b = subs.add<Button>(text + (on ? "  ·  on" : ""), [this, dialog, index](Ui &u) {
+                select_subtitles(index);
+                dialog->dismiss(u);
+            });
+            b.name = "tracks.subs." + std::to_string(index);
+            b.set_width(Dim::fill());
+        };
+        add_sub(-1, "Off");
+        for (const TrackInfo &t : tracks_) {
+            if (t.type == TrackType::Subtitle && t.subtitle != SubtitleKind::None) add_sub(t.index, track_name(t));
+        }
+        d->add_button("Close").name = "tracks.close";
+        ui.show_dialog(std::move(d));
+        if (current != nullptr) ui.focus(current);
+        View *f = ui.focused();
+        WNK_LOGI(kCat, "tracks menu open, focus=%s", f != nullptr ? f->name.c_str() : "<none>");
+    }
+
     // Off → each subtitle track this build can draw → off.
     void next_subtitles() {
         std::vector<int> order{-1};
@@ -313,8 +388,7 @@ class PlayerScreen : public Screen {
         std::string label = "Subtitles off";
         for (const TrackInfo &t : tracks_) {
             if (t.index != track) continue;
-            label = "Subtitles: " + (!t.title.empty() ? t.title : !t.language.empty() ? t.language : "track " + std::to_string(track));
-            label += " (" + t.codec_label + ")";
+            label = "Subtitles: " + track_name(t);
         }
         subs_label_->set_text(label);
         WNK_LOGI(kCat, "subtitles: track %d, %s", track, label.c_str());
@@ -325,12 +399,9 @@ class PlayerScreen : public Screen {
             d += "  ·  " + std::string(codec_name(s.format.video->codec)) + " " + std::to_string(s.format.video->width) + "x" +
                  std::to_string(s.format.video->height);
         }
-        for (const auto &t : s.info.tracks) {
-            if (t.type == TrackType::Audio && s.format.audio) {
-                d += "  ·  " + t.codec_label + " " + std::to_string(t.channels) + " ch";
-                if (s.format.audio->codec == CodecId::PcmS16) d += " decoded to PCM stereo";
-                break;
-            }
+        if (const TrackInfo *t = s.info.track(s.audio_track); t != nullptr && s.format.audio) {
+            d += "  ·  " + t->codec_label + " " + std::to_string(t->channels) + " ch";
+            if (s.format.audio->codec == CodecId::PcmS16) d += " decoded to PCM stereo";
         }
         d += "  ·  " + std::string(controller_->backend_name());
         detail_->set_text(d);
@@ -340,6 +411,8 @@ class PlayerScreen : public Screen {
     std::string uri_;
     SubtitleView *subs_view_ = nullptr;
     Label *subs_label_ = nullptr;
+    Label *audio_label_ = nullptr;
+    int audio_track_ = -1;  // as last shown
     std::vector<TrackInfo> tracks_;
     std::string shown_;
     bool resume_on_return_ = false;  // playing when the app went to the background
@@ -355,6 +428,8 @@ class PlayerScreen : public Screen {
     double opened_ms_ = -1;
     std::vector<std::pair<double, double>> seeks_;
     size_t next_seek_ = 0;
+    std::vector<std::pair<double, double>> audio_switches_;
+    size_t next_audio_ = 0;
 };
 
 // ---- clip list -------------------------------------------------------------------------------------
@@ -425,17 +500,21 @@ class Player : public wnk::app::Delegate {
             }
             if (params.contains("ac3") && params["ac3"].is_boolean()) s.ac3 = params["ac3"];
             if (params.contains("lang") && params["lang"].is_string()) s.language = params["lang"];
-            if (params.contains("seeks") && params["seeks"].is_string()) {
-                const std::string list = params["seeks"];
+            // "at:value,at:value" with `at` in seconds after the player opens.
+            auto timed = [&](const char *key, std::vector<std::pair<double, double>> *out) {
+                if (!params.contains(key) || !params[key].is_string()) return;
+                const std::string list = params[key];
                 size_t i = 0;
                 while (i < list.size()) {
-                    double at = 0, by = 0;
-                    if (std::sscanf(list.c_str() + i, "%lf:%lf", &at, &by) == 2) s.seeks.emplace_back(at, by);
+                    double at = 0, value = 0;
+                    if (std::sscanf(list.c_str() + i, "%lf:%lf", &at, &value) == 2) out->emplace_back(at, value);
                     const size_t comma = list.find(',', i);
                     if (comma == std::string::npos) break;
                     i = comma + 1;
                 }
-            }
+            };
+            timed("seeks", &s.seeks);
+            timed("audio", &s.audio_switches);
             if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
             if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
         }
@@ -449,7 +528,8 @@ class Player : public wnk::app::Delegate {
             {"H.264 + AAC", "MP4 · 1080p25 · AAC as is (Starfish) or decoded to PCM (NDL)", "h264-aac.mp4"},
             {"HEVC + AC-3 5.1", "MKV · 1080p25 · AC-3 as is (Starfish) or downmixed to PCM stereo (NDL)", "hevc-ac3-5.1.mkv"},
             {"H.264 + MP3", "MPEG-TS · 1080p25 · MP3 re-encoded to AC-3 (Starfish) or decoded to PCM (NDL)", "h264-mp3.ts"},
-            {"Subtitles", "MKV · H.264 + AAC · SubRip English (default) and French · Down switches", "h264-aac-subs.mkv"},
+            {"Audio and subtitle tracks", "MKV · H.264 · AAC English (1 kHz) and French (500 Hz) · SubRip English and French · Up",
+             "h264-aac-subs.mkv"},
             {"H.264 + FLAC 7.1", "MKV · 1080p25 · 96 kHz 7.1 FLAC re-encoded to AC-3 5.1 48 kHz (Starfish)", "h264-flac-7.1.mkv"},
             {"H.264 + Opus", "MKV · 1080p25 · Opus re-encoded to AC-3 (Starfish) or as is (NDL)", "h264-opus.mkv"},
         };

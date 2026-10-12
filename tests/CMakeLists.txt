@@ -242,7 +242,7 @@ if (TARGET wnk_media_ffmpeg)
 endif ()
 
 # End-to-end runs of Example D on the host: bundled FFmpeg demuxing real clips into the controller,
-# with the pacing backend (no picture on the host). Steps are 0.1 s apart; Up is a no-op used to wait.
+# with the pacing backend (no picture on the host). Steps are 0.1 s apart; Z is unmapped and used to wait.
 if (TARGET wnk-player)
     function(wnk_player_e2e name params keys pass)
         add_test(NAME e2e.player.${name} COMMAND wnk-player "${params}")
@@ -255,20 +255,24 @@ if (TARGET wnk-player)
     wnk_player_e2e(pause_seek_resume "{\"autoplay\":0}" "Space,Right,Space"
             "Playing -> Paused.*Paused -> Seeking.*Seeking -> Paused.*Paused -> Playing")
     # Backgrounding releases the decoder; playback resumes on return only if it was playing.
-    wnk_player_e2e(background_resumes_playing "{\"autoplay\":0}" "Up,bg,Up,fg,Up,Up"
+    wnk_player_e2e(background_resumes_playing "{\"autoplay\":0}" "Z,bg,Z,fg,Z,Z"
             "Playing -> Paused.*back in the foreground: resuming.*Paused -> Playing")
-    wnk_player_e2e(background_keeps_viewer_pause "{\"autoplay\":0}" "Space,bg,Up,fg,Up,Up"
+    wnk_player_e2e(background_keeps_viewer_pause "{\"autoplay\":0}" "Space,bg,Z,fg,Z,Z"
             "Playing -> Paused.*Resuming -> Running")
     set_tests_properties(e2e.player.background_keeps_viewer_pause PROPERTIES
             FAIL_REGULAR_EXPRESSION "back in the foreground: resuming|Paused -> Playing|${WNK_SANITIZER_FAIL}")
     # Subtitles: the default English track shows; Down switches to French, then off.
-    wnk_player_e2e(subtitles_default_and_switch "{\"autoplay\":3}" "Up,Up,Up,Up,Up,Down,Up,Up,Up,Up,Up,Up,Down,Up"
-            "subtitles: track 2, Subtitles: English \\(subrip\\).*subtitle shown: Second [0-9].*subtitles: track 3, Subtitles: Fran.*subtitle shown: Sous-titre fran.+ais num.+ro [0-9] / deuxi.+me ligne.*subtitles: track -1, Subtitles off")
-    wnk_player_e2e(back_stops_playback "{\"autoplay\":0}" "Up,Up,Escape" "stopping at .*-> Stopped")
+    wnk_player_e2e(subtitles_default_and_switch "{\"autoplay\":3}" "Z,Z,Z,Z,Z,Down,Z,Z,Z,Z,Z,Z,Down,Z"
+            "subtitles: track 3, Subtitles: English \\(subrip\\).*subtitle shown: Second [0-9].*subtitles: track 4, Subtitles: Fran.*subtitle shown: Sous-titre fran.+ais num.+ro [0-9] / deuxi.+me ligne.*subtitles: track -1, Subtitles off")
+    # The track menu (Up) opens on the playing English audio track; Right, OK plays the French one from
+    # the position, with the decoder reloaded.
+    wnk_player_e2e(tracks_menu_switches_audio "{\"autoplay\":3}" "Z,Z,Z,Z,Up,Right,Return,Z,Z,Z,Z,Z,Z"
+            "audio: track 1, Audio: English.*tracks menu open, focus=tracks.audio.1.*tracks: audio 2 chosen.*Playing -> Seeking.*audio track 2 \\(.*\\) at [0-9.]+ s.*(Seeking -> Playing.*audio: track 2, Audio: Fran|audio: track 2, Audio: Fran.*Seeking -> Playing)")
+    wnk_player_e2e(back_stops_playback "{\"autoplay\":0}" "Z,Z,Escape" "stopping at .*-> Stopped")
     wnk_player_e2e(plays_to_the_end "{\"autoplay\":1}"
-            "Right,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up,Up"
+            "Right,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z"
             "Playing -> Ended")
-    wnk_player_e2e(missing_file_reports_error "{\"uri\":\"file:///nonexistent/clip.mkv\"}" "Up"
+    wnk_player_e2e(missing_file_reports_error "{\"uri\":\"file:///nonexistent/clip.mkv\"}" "Z"
             "open failed: No such file")
     set_tests_properties(e2e.player.missing_file_reports_error PROPERTIES FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}")
 endif ()

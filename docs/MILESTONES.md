@@ -348,8 +348,21 @@ has its own unit tests.
 | On the TV: firmware libcurl 7.61 / OpenSSL 1.1.1t fetches page 0 (~370 KB) in 2.1 s; the saved copy is written to DB8 and on the next launch shown 333 ms after start | `[DEVICE]` records.json |
 
 The app raises `worker_threads` to 4: posters and API requests share the pool, and with 2 workers a
-0.36 s details request answered 0.98 s after OK (host). Open: the same checks with a remote on the TV
-(details, Back during a load, favourites, paging, Magic Remote), and polish of Examples A, B and D.
+0.36 s details request answered 0.98 s after OK (host).
+
+Example D 0.14 adds the audio half of "audio/subtitle track UI": `PlaybackController::set_audio_track`
+switches the audio track during playback (decoder reloaded, restart at the keyframe at or before the
+position; paused stays paused), and Up opens a track menu listing audio and subtitle tracks. The
+"Audio and subtitle tracks" test clip now has two AAC tracks (1 kHz English, 500 Hz French).
+
+| Evidence | Tag |
+|---|---|
+| 3 controller tests (switch while playing continues from the position, while paused stays paused, a refused track keeps the current one) | `[TEST]` `unit.media` |
+| Host run: menu opens on the playing track, Right + OK plays the French track | `[TEST]` `e2e.player.tracks_menu_switches_audio` |
+| On the TV: scripted switches through Starfish and NDL on the clip and on Shaka DASH (Spanish to French) | `[DEVICE]` records.json |
+
+Open: the Example C checks with a remote on the TV (details, Back during a load, favourites, paging,
+Magic Remote), judging the switched audio by ear, and polish of Examples A and B.
 
 ## Device dependency
 

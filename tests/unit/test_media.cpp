@@ -36,6 +36,9 @@ class ScriptedSource : public MediaSource {
     std::atomic<int64_t> last_seek{kNoTime};
     bool select_ok = true;
     bool subtitles = false;  // a text track (index 2) with a 0.5 s cue "cue N" at every second
+    bool second_audio = false;  // another audio track (index 3, German); select refuses it if bad_audio
+    bool bad_audio = false;
+    std::atomic<int> selected_audio{-2};  // at the last successful select
     int64_t audio_early_us = 0;  // audio stored this far ahead of the video it plays with
     std::atomic<int> video_read{0};  // since open or the last seek
 
@@ -80,6 +83,14 @@ class ScriptedSource : public MediaSource {
             t.subtitle = SubtitleKind::Text;
             info_.tracks.push_back(t);
         }
+        if (second_audio) {
+            TrackInfo a;
+            a.index = 3;
+            a.type = TrackType::Audio;
+            a.codec = CodecId::Aac;
+            a.language = "de";
+            info_.tracks.push_back(a);
+        }
         vpts_ = 0;
         apts_ = 0;
         sub_next_ = 0;
@@ -88,10 +99,11 @@ class ScriptedSource : public MediaSource {
     }
     const MediaInfo &info() const override { return info_; }
     bool select(int v, int a, const BackendCaps &caps, StreamFormat *out, std::string *error) override {
-        if (!select_ok) {
+        if (!select_ok || (bad_audio && a == 3)) {
             *error = "codec not supported";
             return false;
         }
+        selected_audio = a;
         if (v >= 0) out->video = VideoFormat{CodecId::H264, 1280, 720, 25};
         if (a >= 0) {
             // As a real source would: decode to PCM when the backend does not take AAC.
@@ -358,6 +370,72 @@ TEST("controller: pause without backend pause releases the decoder; resume reloa
     CHECK_EQ(r.source->seeks.load(), 1);
     CHECK_EQ(r.source->last_seek.load(), paused_at);
     CHECK(r.log->first_was_key.load());  // resumed from a keyframe
+    r.pc->stop();
+}
+
+TEST("controller: another audio track reloads the decoder and carries on from the position") {
+    auto src = std::make_unique<ScriptedSource>(20000000);
+    src->second_audio = true;
+    Rig r(std::move(src));
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    CHECK_EQ(r.pc->snapshot().audio_track, 1);
+    CHECK_EQ(r.pc->snapshot().video_track, 0);
+    const int64_t before = r.pc->snapshot().position_us;
+    r.pc->set_audio_track(3);
+    REQUIRE(r.wait([&] { return r.pc->snapshot().audio_track == 3 && r.pc->state() == PlayState::Playing; }));
+    CHECK_EQ(r.source->selected_audio.load(), 3);
+    CHECK_EQ(r.log->unloads.load(), 1);
+    CHECK_EQ(r.log->loads.load(), 2);
+    CHECK_EQ(r.source->seeks.load(), 1);
+    CHECK(r.source->last_seek.load() >= before);  // from where it was, not from the start
+    CHECK(r.saw(PlayState::Playing, PlayState::Seeking));
+    const int fed = r.log->video.load();
+    REQUIRE(r.wait([&] { return r.log->video.load() > fed + 10; }));
+    CHECK(r.log->first_was_key.load());
+    // The same track again, a subtitle or a missing track: nothing is reloaded.
+    r.pc->set_audio_track(3);
+    r.pc->set_audio_track(0);
+    r.pc->set_audio_track(9);
+    std::this_thread::sleep_for(50ms);
+    CHECK_EQ(r.log->loads.load(), 2);
+    r.pc->stop();
+}
+
+TEST("controller: an audio change while paused stays paused; play loads the new track at the position") {
+    auto src = std::make_unique<ScriptedSource>(20000000);
+    src->second_audio = true;
+    Rig r(std::move(src), /*can_pause=*/true);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.pc->pause();
+    REQUIRE(r.wait_state(PlayState::Paused));
+    const int64_t paused_at = r.pc->snapshot().position_us;
+    r.pc->set_audio_track(3);
+    REQUIRE(r.wait([&] { return r.pc->snapshot().audio_track == 3; }));
+    CHECK_EQ(r.pc->state(), PlayState::Paused);
+    CHECK_EQ(r.log->unloads.load(), 1);
+    CHECK_EQ(r.log->loads.load(), 1);
+    CHECK_EQ(r.pc->snapshot().position_us, paused_at);
+    r.pc->play();
+    REQUIRE(r.wait_state(PlayState::Playing));
+    REQUIRE(r.wait([&] { return r.log->loads.load() == 2; }));
+    CHECK_EQ(r.source->last_seek.load(), paused_at);
+    r.pc->stop();
+}
+
+TEST("controller: an audio track the source refuses keeps the current one playing") {
+    auto src = std::make_unique<ScriptedSource>(20000000);
+    src->second_audio = true;
+    src->bad_audio = true;
+    Rig r(std::move(src));
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.pc->set_audio_track(3);
+    REQUIRE(r.wait([&] { return r.log->loads.load() == 2 && r.pc->state() == PlayState::Playing; }));
+    CHECK_EQ(r.pc->snapshot().audio_track, 1);
+    CHECK_EQ(r.source->selected_audio.load(), 1);
+    CHECK(r.pc->snapshot().error.empty());
     r.pc->stop();
 }
 

@@ -51,6 +51,7 @@ struct PlaybackController::Core {
     bool stop();
 
     void set_video_area(const Rect &pixels);
+    void set_audio_track(int track);
 
     // Subtitle track to show (a stream index from MediaInfo, -1 for none).
     void set_subtitle_track(int track) { subtitle_track_.store(track); }
@@ -62,11 +63,11 @@ struct PlaybackController::Core {
     PlayState state() const;
     const char *backend_name() const { return backend_->name(); }  // may change at open (AutoBackend)
 
-    enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop };
+    enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop, Audio };
     struct Command {
         Cmd cmd;
         std::string uri;
-        int64_t pts_us = 0;
+        int64_t pts_us = 0;  // Audio: the track
         bool release = false;  // Pause: unload the decoder even if the backend can pause
     };
     void post(Command c);
@@ -78,6 +79,7 @@ struct PlaybackController::Core {
     void do_seek(int64_t pts_us);
     void do_pause(bool release);
     void do_resume();
+    void do_audio(int track);
     bool load_backend();
     void feed_one();
     bool read_one();          // false: nothing read (interrupted, finished, failed)
@@ -173,6 +175,7 @@ void PlaybackController::seek(int64_t pts_us) { core_->seek(pts_us); }
 void PlaybackController::seek_relative(int64_t delta_us) { core_->seek_relative(delta_us); }
 bool PlaybackController::stop() { return core_->stop(); }
 void PlaybackController::set_video_area(const Rect &pixels) { core_->set_video_area(pixels); }
+void PlaybackController::set_audio_track(int track) { core_->set_audio_track(track); }
 void PlaybackController::set_subtitle_track(int track) { core_->subtitle_track_.store(track); }
 int PlaybackController::subtitle_track() const { return core_->subtitle_track_.load(); }
 std::vector<std::shared_ptr<const SubtitleCue>> PlaybackController::subtitles_now() const { return core_->subtitles_now(); }
@@ -187,7 +190,7 @@ const char *PlaybackController::backend_name() const { return core_->backend_->n
 
 void PlaybackController::Core::post(Command c) {
     // A blocked open/read would delay these indefinitely.
-    if (c.cmd == Cmd::Stop || c.cmd == Cmd::Seek || c.cmd == Cmd::Open) source_->interrupt();
+    if (c.cmd == Cmd::Stop || c.cmd == Cmd::Seek || c.cmd == Cmd::Open || c.cmd == Cmd::Audio) source_->interrupt();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (c.cmd == Cmd::Seek) {
@@ -205,6 +208,7 @@ void PlaybackController::Core::open(const std::string &uri) { post({Cmd::Open, u
 void PlaybackController::Core::play() { post({Cmd::Play, {}, 0}); }
 void PlaybackController::Core::pause() { post({Cmd::Pause, {}, 0}); }
 void PlaybackController::Core::pause_and_release() { post({Cmd::Pause, {}, 0, true}); }
+void PlaybackController::Core::set_audio_track(int track) { post({Cmd::Audio, {}, track}); }
 
 void PlaybackController::Core::toggle_pause() {
     const PlayState s = state();
@@ -442,6 +446,7 @@ bool PlaybackController::Core::apply(const Command &c) {
             }
             set_state(PlayState::Stopped);
             return false;
+        case Cmd::Audio: do_audio(static_cast<int>(c.pts_us)); break;
     }
     return true;
 }
@@ -488,6 +493,8 @@ void PlaybackController::Core::do_open(const std::string &uri) {
         snap_.info = info;
         snap_.format = format;
         snap_.duration_us = info.duration_us;
+        snap_.video_track = v != nullptr ? v->index : -1;
+        snap_.audio_track = a != nullptr ? a->index : -1;
         clock_base_us_ = 0;
     }
     WNK_LOGI(kCat, "opened %s: %s, %.1f s, video %s %dx%d, audio %s %d Hz x%d", uri.c_str(), info.container.c_str(),
@@ -636,6 +643,86 @@ void PlaybackController::Core::do_resume() {
         feeding_ = true;
     }
     set_state(PlayState::Playing);
+}
+
+// Another audio track: the decoder is reloaded (the codec may differ, and AutoBackend may pick the other
+// backend for it) and the source restarts at the position, as a resume after a release does. Paused
+// stays paused with the decoder unloaded; play reloads it.
+void PlaybackController::Core::do_audio(int track) {
+    const PlayState before = state();
+    if (before != PlayState::Ready && before != PlayState::Playing && before != PlayState::Paused &&
+        before != PlayState::Seeking) {
+        WNK_LOGI(kCat, "audio track %d ignored in %s", track, play_state_name(before));
+        return;
+    }
+    const MediaInfo &info = source_->info();
+    const TrackInfo *a = info.track(track);
+    int video = -1, old = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        video = snap_.video_track;
+        old = snap_.audio_track;
+    }
+    if (a == nullptr || a->type != TrackType::Audio || track == old) return;
+    const TrackInfo *v = info.track(video);
+    int64_t at;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        at = paused_at_us_ != kNoTime ? paused_at_us_ : clock_running_ ? raw_position() : clock_base_us_;
+        if (at == kNoTime || at < 0) at = 0;
+        clock_running_ = false;
+    }
+    // Selecting can fetch (DASH/HLS: the new rendition's init segment), so say so before it starts.
+    if (before != PlayState::Paused) set_state(PlayState::Seeking);
+    feeding_ = false;
+    clear_lanes();
+    if (loaded_) {
+        backend_->unload();
+        loaded_ = false;
+    }
+    source_->reset_interrupt();
+    StreamFormat format;
+    std::string err;
+    backend_->prepare(info, v, a);
+    if (!source_->select(video, track, backend_->caps(), &format, &err)) {
+        WNK_LOGW(kCat, "audio track %d not playable (%s); keeping track %d", track, err.c_str(), old);
+        a = info.track(old);
+        backend_->prepare(info, v, a);
+        if (!source_->select(video, old, backend_->caps(), &format, &err)) {
+            fail("tracks not playable: " + err);
+            return;
+        }
+        track = old;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_.format = format;
+        snap_.audio_track = track;
+    }
+    WNK_LOGI(kCat, "audio track %d (%s) at %.2f s", track, format.audio ? codec_name(format.audio->codec) : "-", at / 1e6);
+    if (before == PlayState::Paused) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        paused_at_us_ = at;
+        return;  // do_resume loads the decoder and seeks to `at`
+    }
+    source_done_ = false;
+    eos_seen_ = false;
+    priming_ = true;
+    if (!source_->seek(at, &err)) {
+        fail("seek after audio change failed: " + err);
+        return;
+    }
+    if (!load_backend()) return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        clock_base_us_ = at;
+        paused_at_us_ = kNoTime;
+        last_primary_pts_ = kNoTime;
+        last_any_pts_ = kNoTime;
+        splice_delay_us_ = 0;
+    }
+    feeding_ = before != PlayState::Ready;
+    set_state(before == PlayState::Ready ? PlayState::Ready : PlayState::Playing);
 }
 
 void PlaybackController::Core::clear_lanes() {

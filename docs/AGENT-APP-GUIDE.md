@@ -28,7 +28,7 @@ Reference apps already in the tree:
 |---|---|---|
 | Example B, TV UI | `applications/examples/tvui/` | **Default template.** Shell + widget tree + navigation. |
 | Example C, shows | `applications/examples/shows/` | REST/JSON on the pool, cancellation on Back, error + Try again, paging, saved copy and favourites in DB8. |
-| Example D, player | `applications/examples/player/` | Video, DASH/HLS, subtitles, background pause. |
+| Example D, player | `applications/examples/player/` | Video, DASH/HLS, audio and subtitle track menu, background pause. |
 | Example A, hello | `applications/examples/hello/` | Diagnostics only. It keeps its own SDL loop on purpose. **Do not copy that loop.** |
 
 Put a product app in `applications/<name>/`, not under `examples/`, and add
@@ -293,6 +293,7 @@ stubbing a lookalike.
 | File or HTTP video, pause, seek | `FfmpegSource` + `PlaybackController` + `AutoBackend` (Starfish preferred, NDL fallback). Example D. |
 | DASH (`.mpd`) or HLS (`.m3u8`), including live | `AdaptiveSource` when `AdaptiveSource::handles(uri)`. |
 | Subtitles in the picture | `SubtitleView` (`wnk_media_ui`) fed by `controller->subtitles_now()`. |
+| Audio language / track menu | `snapshot().info.tracks` lists them; `set_audio_track(index)` while playing or paused; `snapshot().audio_track` is the one playing. Example D's `open_tracks`. |
 | Video visible behind the UI | `ui.set_clear_color(wnk::render::kTransparent)` while the player screen is showing. Restore with `std::nullopt` on hide. |
 | Another app covering this one | `on_lifecycle`: `pause_and_release()` on `Suspended`, resume when `Resuming` returns to `Running`. |
 | Device model, webOS release, GLES limits | `ctx.device()`, `ctx.capabilities()`. |
@@ -527,7 +528,14 @@ Wire-up that matches Example D:
 
 Transport controls use actions, not key codes: `Confirm` toggles pause, `Left`/`Right` seek by a
 fixed step (`seek_relative`), `Rewind`/`FastForward` if you want the transport keys,
-`Down` cycles subtitle tracks (`set_subtitle_track`).
+`Up` opens the track menu (a `Dialog` with a `Grid` of buttons per kind: audio, then Off and the
+subtitle tracks), `Down` cycles subtitle tracks (`set_subtitle_track`).
+
+`set_audio_track` reloads the decoder (the codec may differ, and `AutoBackend` may choose the other
+backend for it) and restarts at the keyframe at or before the position, like a seek: on DASH/HLS
+that can be up to one segment earlier. The state goes `Seeking` → `Playing`; a paused player stays
+paused and loads the new track on play. A track the source refuses is logged and the current one
+keeps playing.
 
 `AutoBackend` keeps Starfish when it can take the video codec and the audio (as-is, or AC-3
 re-encode). NDL is the fallback (AV1, VP9, and audio the source cannot decode). On the measured

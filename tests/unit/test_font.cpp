@@ -5,7 +5,11 @@
 #include "wnk/render/font.hpp"
 #include "wnk/render/renderer.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <string>
+
+#include <unistd.h>
 
 using namespace wnk;
 using namespace wnk::render;
@@ -112,4 +116,67 @@ TEST("canvas mapping letterboxes and round-trips") {
     CHECK_EQ(p.y, 200.0f);
     CanvasMapping z = CanvasMapping::fit({1920, 1080}, 0, 0);
     CHECK_EQ(z.scale, 1.0f);  // degenerate drawable keeps a usable default
+}
+
+namespace {
+// A CJK face the host may have (Debian/Ubuntu packages); tests that need one skip without it.
+std::string host_cjk_font() {
+    for (const char *p : {"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                          "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                          "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"}) {
+        if (FontFace::from_file(p)) return p;
+    }
+    return {};
+}
+
+struct TempDir {
+    std::string path;
+    TempDir() {
+        char tmpl[] = "/tmp/wnk-fonts-XXXXXX";
+        path = mkdtemp(tmpl);
+    }
+    ~TempDir() { std::system(("rm -rf '" + path + "'").c_str()); }
+};
+}  // namespace
+
+TEST("font files are memory-mapped and directories are rejected") {
+    std::string err;
+    auto face = FontFace::from_file(kFontDir + "/AtkinsonHyperlegible-Regular.ttf", &err);
+    REQUIRE(face != nullptr);
+    CHECK(face->covers(U'A'));
+    CHECK(!face->covers(U'中'));
+    CHECK(FontFace::from_file(kFontDir, &err) == nullptr);
+    CHECK(err.find("regular file") != std::string::npos);
+}
+
+TEST("font finder: picks a face covering the missing characters, regular and tagged faces first") {
+    const std::string cjk = host_cjk_font();
+    if (cjk.empty()) {
+        std::printf("  SKIP (no CJK font on this host)\n");
+        return;
+    }
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    std::system(("mkdir -p '" + dir.path + "/a/b'").c_str());
+    // The same CJK face under three names: the finder ranks by name, then checks coverage.
+    for (const char *name : {"/a/Zed-Bold.ttf", "/a/b/Zed-Regular.ttf", "/a/b/Zed-JP-Regular.ttf"}) {
+        CHECK(symlink(cjk.c_str(), (dir.path + name).c_str()) == 0);
+    }
+    CHECK(symlink((kFontDir + "/AtkinsonHyperlegible-Regular.ttf").c_str(), (dir.path + "/Atkinson.ttf").c_str()) == 0);
+    CHECK(symlink("/nonexistent", (dir.path + "/broken.ttf").c_str()) == 0);
+    std::FILE *junk = std::fopen((dir.path + "/junk.otf").c_str(), "w");
+    std::fputs("not a font", junk);
+    std::fclose(junk);
+    FontFinder finder({dir.path, "/nonexistent-dir"});
+    CHECK_EQ(finder.files().size(), size_t{5});  // the broken link is skipped; junk is listed, then refused
+    auto found = finder.find({U'中', U'あ'});
+    REQUIRE(found.size() == 1u);
+    CHECK(found[0] != dir.path + "/a/Zed-Bold.ttf");  // one face covers both; a regular one before bold
+    found = finder.find({U'中'}, {"Zed-Regular"});
+    REQUIRE(found.size() == 1u);
+    CHECK_EQ(found[0], dir.path + "/a/b/Zed-Regular.ttf");
+    found = finder.find({U'中'}, {"JP"});
+    REQUIRE(found.size() == 1u);
+    CHECK_EQ(found[0], dir.path + "/a/b/Zed-JP-Regular.ttf");
+    CHECK(finder.find({}).empty());
 }

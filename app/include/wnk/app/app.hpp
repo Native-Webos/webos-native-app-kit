@@ -26,6 +26,7 @@
 #include "wnk/async/async.hpp"
 #include "wnk/diagnostics/capabilities.hpp"
 #include "wnk/diagnostics/metrics.hpp"
+#include "wnk/i18n/i18n.hpp"
 #include "wnk/image/image.hpp"
 #include "wnk/input/input.hpp"
 #include "wnk/net/http.hpp"
@@ -37,6 +38,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace wnk::app {
 
@@ -65,6 +67,18 @@ struct AppConfig {
     ui::Theme theme;          // fonts are filled in by the shell
     std::string font_regular = "fonts/AtkinsonHyperlegible-Regular.ttf";  // relative to the app dir
     std::string font_bold = "fonts/AtkinsonHyperlegible-Bold.ttf";
+    // Fonts for characters the two above lack, tried in order per character (relative to the app
+    // directory, or absolute). Bundle one for scripts the app must always show (OFL faces only, and
+    // record them in THIRD-PARTY-NOTICES.md).
+    std::vector<std::string> fallback_fonts;
+    // When a character is in no font above, look for a face that has it under these directories (on
+    // a worker, the first time it is drawn; the text shows on the next frame once found).
+    bool system_font_fallback = true;
+    std::vector<std::string> system_font_dirs = {"/usr/share/fonts"};
+    // Translations: <translations_dir>/<tag>.json under the app directory (i18n.hpp). The locale is the
+    // TV's UI language (settingsservice localeInfo), LANG on the host, or {"wnkLocale":"fr-FR"} in the
+    // launch parameters.
+    std::string translations_dir = "i18n";
     // Scripted input for host tests: <prefix>_KEYS and <prefix>_SHOT (see Script in app.cpp);
     // <prefix>_METRICS=1 shows the metrics overlay from the start.
     std::string script_env_prefix = "WNK";
@@ -85,6 +99,10 @@ class Context {
     virtual std::shared_ptr<net::HttpTransport> http() = 0;  // nullptr unless AppConfig::http and available
     virtual storage::KeyValueStore *store() = 0;             // nullptr unless AppConfig::storage and opened
     virtual const platform::LaunchInfo &launch() = 0;
+    // The UI language's catalog: ctx.i18n().tr("Search by name"), trn("{n} show", "{n} shows", n).
+    virtual const i18n::Catalog &i18n() const = 0;
+    // The locale for numbers (the TV's formatting setting, which may differ from the UI language).
+    virtual const i18n::Locale &formats_locale() const = 0;
     virtual const std::string &runtime_dir() = 0;            // empty if unavailable
     virtual State state() const = 0;
     virtual const diagnostics::FrameMetrics &frame_metrics() const = 0;

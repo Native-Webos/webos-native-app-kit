@@ -6,6 +6,7 @@
 #include "wnk/image/textures.hpp"
 #include "wnk/input/sdl_input.hpp"
 #include "wnk/log.hpp"
+#include "wnk/platform/luna.hpp"
 #include "wnk/render/gles2_renderer.hpp"
 #include "wnk/ui/image_source.hpp"
 
@@ -21,6 +22,8 @@
 #include <fstream>
 #include <sstream>
 #include <mutex>
+#include <map>
+#include <set>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -285,6 +288,8 @@ class Shell final : public Context {
     std::shared_ptr<net::HttpTransport> http() override { return http_; }
     storage::KeyValueStore *store() override { return store_.get(); }
     const platform::LaunchInfo &launch() override { return launch_; }
+    const i18n::Catalog &i18n() const override { return catalog_; }
+    const i18n::Locale &formats_locale() const override { return formats_; }
     const std::string &runtime_dir() override { return runtime_; }
     State state() const override { return lifecycle_.state(); }
     const diagnostics::FrameMetrics &frame_metrics() const override { return metrics_; }
@@ -416,7 +421,18 @@ class Shell final : public Context {
         theme.regular = renderer_->load_font_file(launch_.app_dir + "/" + config_.font_regular, &err);
         theme.bold = renderer_->load_font_file(launch_.app_dir + "/" + config_.font_bold, &err);
         if (theme.regular == render::kNoFont || theme.bold == render::kNoFont) return fail(("fonts: " + err).c_str());
+        for (const auto &f : config_.fallback_fonts) {
+            const std::string path = !f.empty() && f[0] == '/' ? f : launch_.app_dir + "/" + f;
+            const render::FontId id = renderer_->load_font_file(path, &err);
+            if (id == render::kNoFont) {
+                WNK_LOGW("fonts", "fallback font not loaded: %s", err.c_str());
+                continue;
+            }
+            renderer_->add_fallback_font(id);
+            WNK_LOGI("fonts", "fallback font %s", path.c_str());
+        }
 
+        load_locale();
         dispatcher_ = std::make_unique<async::MainDispatcher>();
         // A result posted from a worker wakes an idle loop at once (one pending wake event at a time).
         wake_event_ = SDL_RegisterEvents(1);
@@ -598,6 +614,7 @@ class Shell final : public Context {
             const Uint64 t_finish = SDL_GetPerformanceCounter();
             renderer_->end_frame();
             if (textures_) textures_->end_frame();
+            find_missing_glyphs();
             const float finish_ms = static_cast<float>(ms_since(t_finish));
             if (script_done) {
                 script.save(*renderer_, dw, dh);  // before the swap, while the frame is still readable
@@ -742,6 +759,106 @@ class Shell final : public Context {
         if (auto a = mapper_.map(*key)) handle_action(*a);
     }
 
+    // The UI language and its catalog. Launch parameters win (testing a language without changing the
+    // TV's), then the TV's settings, then the host's environment.
+    void load_locale() {
+        std::string source;
+        i18n::Locale ui = i18n::Locale::parse("en"), formats = ui;
+        const auto params = nlohmann::json::parse(launch_.params_json.empty() ? "{}" : launch_.params_json, nullptr, false);
+        if (params.is_object() && params.contains("wnkLocale") && params["wnkLocale"].is_string()) {
+            ui = formats = i18n::Locale::parse(params["wnkLocale"].get<std::string>());
+            source = "launch parameters";
+        } else if constexpr (platform::kIsWebOS) {
+            const auto reply = platform::luna_call_sync("luna://com.webos.settingsservice/getSystemSettings",
+                                                        R"({"keys":["localeInfo"]})", 600);
+            if (reply.status == platform::LunaStatus::Ok && i18n::parse_locale_info(reply.payload, &ui, &formats)) {
+                source = "settingsservice";
+                caps_.set("i18n.system_locale", diagnostics::Support::Supported, ui.tag());
+            } else {
+                source = std::string("default (settingsservice: ") +
+                         (reply.status == platform::LunaStatus::Ok ? "no localeInfo" : platform::luna_status_name(reply.status)) + ")";
+                caps_.set("i18n.system_locale", diagnostics::Support::Unsupported, source);
+            }
+        } else {
+            for (const char *var : {"LC_ALL", "LC_MESSAGES", "LANG"}) {
+                const char *v = SDL_getenv(var);
+                if (v != nullptr && v[0] != '\0') {
+                    ui = formats = i18n::Locale::parse(v);
+                    source = var;
+                    break;
+                }
+            }
+            if (source.empty()) source = "default";
+        }
+        catalog_ = i18n::Catalog(ui);
+        formats_ = formats;
+        std::string err;
+        const int files = catalog_.load_dir(launch_.app_dir + "/" + config_.translations_dir, &err);
+        if (!err.empty()) WNK_LOGW("i18n", "%s", err.c_str());
+        font_preferences_ = i18n::font_preferences(ui);
+        WNK_LOGI("i18n", "locale %s (formats %s) from %s; %d catalog file(s), %zu entries", ui.tag().c_str(),
+                 formats.tag().c_str(), source.c_str(), files, catalog_.size());
+    }
+
+    // Characters no loaded font has: search the system font directories on a worker, then add what
+    // was found to the renderer's fallback chain and lay the UI out again. One search at a time;
+    // characters reported meanwhile wait for the next.
+    void find_missing_glyphs() {
+        for (char32_t cp : renderer_->take_missing_codepoints()) glyphs_wanted_.push_back(cp);
+        if (glyphs_wanted_.empty() || font_search_running_) return;
+        std::vector<char32_t> wanted = std::exchange(glyphs_wanted_, {});
+        if (!config_.system_font_fallback) {
+            for (char32_t cp : wanted) WNK_LOGW("fonts", "no font has U+%04X", static_cast<unsigned>(cp));
+            return;
+        }
+        font_search_running_ = true;
+        auto finder = font_finder_;
+        const auto dirs = config_.system_font_dirs;
+        const auto preferred = font_preferences_;
+        const Uint64 t0 = SDL_GetPerformanceCounter();
+        struct Found {
+            std::shared_ptr<render::FontFinder> finder;
+            std::vector<std::string> paths;
+        };
+        async::run_then_post<Found>(
+            *pool_, *dispatcher_, life_.weak(), {},
+            [finder, dirs, preferred, wanted](const async::CancellationToken &) {
+                auto f = finder ? finder : std::make_shared<render::FontFinder>(dirs);
+                return Found{f, f->find(wanted, preferred)};
+            },
+            [this, wanted, t0](Found found) {
+                font_search_running_ = false;
+                const bool first = !font_finder_;
+                font_finder_ = found.finder;
+                if (first) WNK_LOGI("fonts", "%zu font files under the system font directories", font_finder_->files().size());
+                std::string err;
+                for (const auto &path : found.paths) {
+                    if (!loaded_fallbacks_.insert(path).second) continue;
+                    const render::FontId id = renderer_->load_font_file(path, &err);
+                    if (id == render::kNoFont) {
+                        WNK_LOGW("fonts", "%s", err.c_str());
+                        continue;
+                    }
+                    renderer_->add_fallback_font(id);
+                    WNK_LOGI("fonts", "system fallback font %s (search %.0f ms)", path.c_str(), ms_since(t0));
+                    caps_.set("text.system_fallback_fonts", diagnostics::Support::Supported, path);
+                }
+                // Anything still missing stays .notdef; the renderer reports each character once.
+                for (char32_t cp : wanted) {
+                    bool covered = false;
+                    for (const auto &path : found.paths) covered = covered || covered_by(path, cp);
+                    if (!covered) WNK_LOGW("fonts", "no font has U+%04X", static_cast<unsigned>(cp));
+                }
+                if (!found.paths.empty()) ui_->invalidate_layout();
+            });
+    }
+
+    bool covered_by(const std::string &path, char32_t cp) {
+        auto it = path_faces_.find(path);
+        if (it == path_faces_.end()) it = path_faces_.emplace(path, render::FontFace::from_file(path)).first;
+        return it->second && it->second->covers(cp);
+    }
+
     // {"event":"relaunch","parameters":{...},...} (registerApp, interface 2) or {"message":"relaunch",...}
     // (registerNativeApp, interface 1). The parameters replace the launch parameters.
     void on_relaunch_message(const char *message) {
@@ -822,7 +939,7 @@ class Shell final : public Context {
             }
             last_back_ = now;
             WNK_LOGI(kCat, "Back at root: asking for a second Back");
-            ui_->toast("Press Back again to exit", kDoubleBackMs);
+            ui_->toast(catalog_.tr("Press Back again to exit"), kDoubleBackMs);
         }
     }
 
@@ -937,6 +1054,16 @@ class Shell final : public Context {
     bool text_input_on_ = false;  // SDL text input started for a view
     Uint32 wake_event_ = static_cast<Uint32>(-1);
     char *(*take_relaunch_)() = nullptr;
+    // System font fallback.
+    std::shared_ptr<render::FontFinder> font_finder_;  // lists the font directories once
+    std::vector<char32_t> glyphs_wanted_;
+    bool font_search_running_ = false;
+    std::vector<std::string> font_preferences_;          // file-name tags for the UI language
+    std::set<std::string> loaded_fallbacks_;
+    std::map<std::string, std::unique_ptr<render::FontFace>> path_faces_;
+    i18n::Catalog catalog_;
+    i18n::Locale formats_;
+    async::Lifetime life_;  // results posted to the shell
     std::atomic<bool> wake_pending_{false};
     SDL_Window *window_ = nullptr;
     SDL_GLContext gl_ = nullptr;

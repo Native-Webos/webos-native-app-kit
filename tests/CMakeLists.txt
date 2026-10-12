@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket auth)
+foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket auth i18n)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -27,6 +27,7 @@ target_link_libraries(test_starfish PRIVATE wnk_media_starfish)
 target_link_libraries(test_secret PRIVATE wnk_storage)
 target_link_libraries(test_websocket PRIVATE wnk_net)
 target_link_libraries(test_auth PRIVATE wnk_auth)
+target_link_libraries(test_i18n PRIVATE wnk_i18n)
 target_include_directories(test_secret SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 
@@ -111,9 +112,10 @@ if (TARGET wnk-tvui)
             "focus grid.item40")
     wnk_tvui_e2e(dialog_focus_restore "Left,Down,Down,Right,Return,Right,Escape" "dialog closed focus=widgets.dialog")
     wnk_tvui_e2e(double_back_exits "Escape,Escape" "Back twice at root: quitting")
-    # A still screen is drawn but not presented: about 7 presents in ~7 s of waiting, not 400.
+    # A still screen is drawn but not presented: under 100 presents (about 7; 13 under ASan) in ~7 s of
+    # waiting, not 400.
     string(REPEAT "Z," 60 WNK_TVUI_IDLE)
-    wnk_tvui_e2e(still_screen_is_not_presented "${WNK_TVUI_IDLE}Z" "main loop ended after [0-9] frames presented, [0-9][0-9][0-9] drawn")
+    wnk_tvui_e2e(still_screen_is_not_presented "${WNK_TVUI_IDLE}Z" "main loop ended after [0-9][0-9]? frames presented, [0-9][0-9][0-9] drawn")
 endif ()
 if (TARGET wnk-tvui)
     # Pointer: clicking the second card of the first rail, and the wheel over the browse grid (4 columns,
@@ -211,8 +213,27 @@ if (TARGET wnk-shows AND Python3_FOUND)
             "text input on for browse.search.*keyboard closed by the system: editing ends.*text input on for browse.search.*text input off")
     set_tests_properties(e2e.shows.search_keyboard_closed PROPERTIES
             FAIL_REGULAR_EXPRESSION "Back at root|${WNK_SANITIZER_FAIL}")
+    # Locale: from LANG on the host, with the app's catalog for it.
+    wnk_shows_e2e(locale_from_environment "" "${WNK_SHOWS_WAIT}"
+            "locale de-DE \\(formats de-DE\\) from LANG; 1 catalog file\\(s\\), [0-9]+ entries")
+    set_tests_properties(e2e.shows.locale_from_environment PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_DATA_HOME=${WNK_SHOWS_DATA}/locale_from_environment;WNK_SHOWS_KEYS=${WNK_SHOWS_WAIT};LC_ALL=;LC_MESSAGES=;LANG=de_DE.UTF-8")
+    # Japanese from the launch parameters: the bundled font has no kana or kanji, so the shell finds a
+    # system face for them (needs a CJK font on the host).
+    if (EXISTS "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc" OR
+        EXISTS "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf")
+        add_test(NAME e2e.shows.japanese_uses_system_font
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                        "$<TARGET_FILE:wnk-shows>" "{\"api\":\"@HTTP@/catalogue\",\"wnkLocale\":\"ja-JP\"}")
+        set_tests_properties(e2e.shows.japanese_uses_system_font PROPERTIES
+                ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_DATA_HOME=${WNK_SHOWS_DATA}/japanese;WNK_SHOWS_KEYS=${WNK_SHOWS_WAIT}"
+                PASS_REGULAR_EXPRESSION "locale ja-JP \\(formats ja-JP\\) from launch parameters; 1 catalog file.*system fallback font /usr/share/fonts/"
+                FAIL_REGULAR_EXPRESSION "no font has U\\+|${WNK_SANITIZER_FAIL}"
+                FIXTURES_REQUIRED shows_state
+                TIMEOUT 60)
+    endif ()
     foreach (t details_back_restores_focus retry_after_server_error unreadable_reply back_cancels_details grid_pages_to_the_end
-            search_filters_grid search_keyboard_closed)
+            search_filters_grid search_keyboard_closed locale_from_environment)
         set_tests_properties(e2e.shows.${t} PROPERTIES FIXTURES_REQUIRED shows_state)
     endforeach ()
     set_tests_properties(e2e.shows.back_cancels_details PROPERTIES

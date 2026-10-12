@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstddef>
+#include <utility>
 
 namespace wnk::render {
 namespace {
@@ -387,26 +388,46 @@ const Gles2Renderer::GlyphEntry *Gles2Renderer::glyph(FontId font, int glyph_ind
     return &glyphs_.emplace(key, e).first->second;
 }
 
+Gles2Renderer::Resolved Gles2Renderer::resolve(FontId font, const FontFace &face, char32_t cp) const {
+    const int g = face.glyph_index(cp);
+    if (g != 0 || cp < 0x20 || cp == 0xFFFD) return {font, &face, g};
+    // Joiners and selectors are invisible: not worth a fallback search.
+    const bool invisible = (cp >= 0x200B && cp <= 0x200F) || (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0x2060 || cp == 0xFEFF;
+    if (!invisible) {
+        for (FontId fb : fallbacks_) {
+            if (fb == font) continue;
+            auto it = fonts_.find(fb);
+            if (it == fonts_.end()) continue;
+            if (const int h = it->second->glyph_index(cp); h != 0) return {fb, it->second.get(), h};
+        }
+        if (reported_.insert(cp).second) missing_.push_back(cp);
+    }
+    return {font, &face, 0};
+}
+
+std::vector<char32_t> Gles2Renderer::take_missing_codepoints() { return std::exchange(missing_, {}); }
+
 float Gles2Renderer::draw_text(const TextStyle &style, Point baseline, std::string_view utf8) {
     auto f = fonts_.find(style.font);
     if (f == fonts_.end() || style.size <= 0) return 0;
     const FontFace &face = *f->second;
     const int px_size = std::max(1, static_cast<int>(std::lround(style.size * mapping_.scale)));
+    const auto px = static_cast<float>(px_size);
     const Point origin = mapping_.to_pixels({baseline.x + translate_.x, baseline.y + translate_.y});
     const float base_y = std::round(origin.y);
     float pen = origin.x;
-    int prev = 0;
+    Resolved prev{kNoFont, nullptr, 0};
     for (char32_t cp : decode_utf8(utf8)) {
-        const int g = face.glyph_index(cp);
-        if (prev != 0) pen += face.kerning(prev, g, static_cast<float>(px_size));
-        const GlyphEntry *e = glyph(style.font, g, px_size);
+        const Resolved r = resolve(style.font, face, cp);
+        if (prev.glyph != 0 && prev.font == r.font) pen += r.face->kerning(prev.glyph, r.glyph, px);
+        const GlyphEntry *e = glyph(r.font, r.glyph, px_size);
         if (e != nullptr && e->width > 0) {
             const Rect dst{std::round(pen) + e->x_offset, base_y + e->y_offset, static_cast<float>(e->width),
                            static_cast<float>(e->height)};
             quad(dst, e->u0, e->v0, e->u1, e->v1, style.color, 0, 0, kGlyph, atlas_);
         }
-        pen += face.advance(g, static_cast<float>(px_size));
-        prev = g;
+        pen += r.face->advance(r.glyph, px);
+        prev = r;
     }
     return (pen - origin.x) / mapping_.scale;
 }
@@ -414,8 +435,17 @@ float Gles2Renderer::draw_text(const TextStyle &style, Point baseline, std::stri
 float Gles2Renderer::measure_text(const TextStyle &style, std::string_view utf8) const {
     auto f = fonts_.find(style.font);
     if (f == fonts_.end() || style.size <= 0) return 0;
-    const int px_size = std::max(1, static_cast<int>(std::lround(style.size * mapping_.scale)));
-    return f->second->measure(utf8, static_cast<float>(px_size)) / mapping_.scale;
+    const auto px = static_cast<float>(std::max(1, static_cast<int>(std::lround(style.size * mapping_.scale))));
+    const FontFace &face = *f->second;
+    float width = 0;
+    Resolved prev{kNoFont, nullptr, 0};
+    for (char32_t cp : decode_utf8(utf8)) {
+        const Resolved r = resolve(style.font, face, cp);
+        if (prev.glyph != 0 && prev.font == r.font) width += r.face->kerning(prev.glyph, r.glyph, px);
+        width += r.face->advance(r.glyph, px);
+        prev = r;
+    }
+    return width / mapping_.scale;
 }
 
 float Gles2Renderer::line_height(const TextStyle &style) const {

@@ -32,6 +32,8 @@ class FontFace {
  public:
     // Takes ownership of the font file bytes. Returns nullptr if they are not a usable TrueType font.
     static std::unique_ptr<FontFace> from_bytes(std::vector<uint8_t> data, std::string *error = nullptr);
+    // Maps the file read-only (TrueType, OpenType with CFF outlines, or the first face of a .ttc):
+    // only the pages of glyphs actually used are read, which matters for 20 MB CJK faces.
     static std::unique_ptr<FontFace> from_file(const std::string &path, std::string *error = nullptr);
     ~FontFace();
     FontFace(const FontFace &) = delete;
@@ -39,6 +41,7 @@ class FontFace {
 
     FontMetrics metrics(float pixel_size) const;
     int glyph_index(char32_t codepoint) const;  // 0 = .notdef (missing glyph)
+    bool covers(char32_t codepoint) const;
     float advance(int glyph, float pixel_size) const;
     float kerning(int left_glyph, int right_glyph, float pixel_size) const;
     GlyphBitmap rasterize(int glyph, float pixel_size) const;
@@ -50,6 +53,23 @@ class FontFace {
     FontFace() = default;
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+// Finds font files that cover code points the app's fonts lack (the TV's own fonts, for example).
+// The directories are listed once, at construction; find() opens candidates read-only and checks
+// their character maps. Safe to use from a worker thread.
+class FontFinder {
+ public:
+    explicit FontFinder(std::vector<std::string> dirs);
+    // Files that together cover as many of `codepoints` as possible, best first. Candidates whose
+    // file name contains a `preferred` tag come first (e.g. "JP" for Japanese forms of Han
+    // characters); regular upright faces come before bold, light, italic, mono, serif or symbol ones.
+    std::vector<std::string> find(const std::vector<char32_t> &codepoints, const std::vector<std::string> &preferred = {}) const;
+    const std::vector<std::string> &files() const { return files_; }
+    static int score(const std::string &path, const std::vector<std::string> &preferred);
+
+ private:
+    std::vector<std::string> files_;
 };
 
 // Shelf packer for a square-ish atlas. Rows are allocated top to bottom; each row is as tall as the

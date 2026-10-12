@@ -13,6 +13,7 @@
 #include "wnk/render/renderer.hpp"
 
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -55,6 +56,15 @@ class Gles2Renderer final : public Renderer {
     RenderStats stats() const override;
     GpuInfo gpu_info() const override;
 
+    // Fonts tried, in order, for a character the style's font does not have (per character: Latin
+    // stays in the app's font, a Han character beside it comes from the first fallback that has it).
+    // Kerning applies only between neighbours from the same font. The layout of text already
+    // measured does not change by itself: invalidate the Ui after changing the chain.
+    void set_fallback_fonts(std::vector<FontId> fonts) { fallbacks_ = std::move(fonts); }
+    void add_fallback_font(FontId font) { fallbacks_.push_back(font); }
+    const std::vector<FontId> &fallback_fonts() const { return fallbacks_; }
+    // Characters measured or drawn since the last call that no font had (each reported once).
+    std::vector<char32_t> take_missing_codepoints();
     // A hash of everything the last frame drew (valid after end_frame): drawable size, clears, scissor
     // rectangles, every batch's texture and vertices, and the texture and glyph uploads since the
     // previous frame. Equal fingerprints mean the frames look the same, so the shell need not present.
@@ -110,6 +120,12 @@ class Gles2Renderer final : public Renderer {
     Rect to_pixels(const Rect &logical) const;
     const GlyphEntry *glyph(FontId font, int glyph_index, int pixel_size);
     void reset_atlas();
+    struct Resolved {
+        FontId font;
+        const FontFace *face;
+        int glyph;
+    };
+    Resolved resolve(FontId font, const FontFace &face, char32_t cp) const;
 
     CanvasMapping mapping_;
     Size logical_{1920, 1080};
@@ -134,6 +150,9 @@ class Gles2Renderer final : public Renderer {
     RenderStats last_stats_;
     uint32_t atlas_resets_ = 0;
     uint64_t fingerprint_ = 0, last_fingerprint_ = 0;
+    std::vector<FontId> fallbacks_;
+    mutable std::vector<char32_t> missing_;    // not yet taken
+    mutable std::set<char32_t> reported_;     // ever reported
     uint64_t uploads_ = 0;  // texture creations, deletions and glyph uploads, ever
     bool highp_ = false;
 };

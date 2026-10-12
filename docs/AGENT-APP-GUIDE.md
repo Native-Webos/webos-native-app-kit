@@ -76,6 +76,7 @@ These are enforced by the architecture, the packaging checks, and the way the TV
 |---|---|
 | `app/` | `wnk::app::run`, `Delegate`, `Context`, lifecycle. Link `wnk_app`. |
 | `ui/` | View tree, layout, widgets, navigation, dialogs. Headers under `ui/include/wnk/ui/`. |
+| `i18n/` | Locale, catalogs with plural forms, number formatting. Reach it through `ctx.i18n()`. |
 | `input/` | `Action`, keymaps. App code includes `wnk/input/input.hpp` only. |
 | `focus/` | Used by `Ui`. Apps do not include it. |
 | `render/` | `Renderer` interface. Apps draw through widgets, or `ctx.renderer()` for a custom `View::draw`. |
@@ -388,6 +389,30 @@ different palette. `Ui::draw` clears to `theme().background` unless `set_clear_c
 
 Animation helpers: `Smoothed` (critically damped spring) and `Tween` in `wnk/ui/anim.hpp`. Advance
 them from `View::update`. The focus ring is already animated by `Ui`.
+
+### Text in other languages
+
+Write UI strings in English through the catalog: `ctx.i18n().tr("Search by name")`,
+`tr("Hello {name}", {{"name", n}})`, and for counts `trn("{n} show", "{n} shows", count)` (`{n}` is
+formatted for the locale). The English text is the key, so English needs no file. Translations go
+in `<app>/i18n/<tag>.json` (`fr.json`, `zh-Hant.json`, `pt-BR.json`); stage the directory with
+`EXTRA_DIRS` and next to the host binary, as Example C does:
+
+```json
+{ "Search by name": "Rechercher par nom",
+  "{n} show": { "one": "{n} série", "other": "{n} séries" } }
+```
+
+Plural keys are CLDR categories (`zero one two few many other`). The locale is the TV's UI language
+(`com.webos.settingsservice` `localeInfo`), `LANG` on the host, or `{"wnkLocale":"ja-JP"}` in the
+launch parameters to try a language without changing the TV's. `ctx.formats_locale()` and
+`i18n::format_number` format numbers. The shell's own text ("Press Back again to exit") goes through
+the same catalog.
+
+Fonts: the bundled Atkinson Hyperlegible covers Latin. Any character it lacks comes, per character,
+from `AppConfig::fallback_fonts` (files you bundle), else from a face the shell finds under
+`/usr/share/fonts` the first time the character is drawn, preferring the locale's forms of Han
+characters (JP, KR, SC, TC). The search runs on a worker; the text appears on the next frame.
 
 ## Data loading, HTTP, storage
 
@@ -720,7 +745,8 @@ Say these are missing. Do not emulate them with a fake.
 | No text selection, clipboard, or multi-line text area | `TextField` is one line with a cursor. LG's keyboard opening for it is host-tested, not yet seen on a TV. |
 | No Widevine / PlayReady | Encrypted content plays only with ClearKey (the app has the keys). |
 | No scale or rotation | Focus "zoom" is the ring, not a scaled card. |
-| No complex-script shaping | Arabic, Hebrew, and Indic runs will be wrong. |
+| No complex-script shaping, no right-to-left layout | Arabic, Hebrew, and Indic runs will be wrong. CJK, Cyrillic and Greek are drawn (with a fallback face for CJK). |
+| No date or time formatting | `i18n` formats numbers only. The TV's system fonts for CJK are not yet seen from a Developer Mode app: bundle a fallback face if the app must show CJK. |
 | No audio-only UI component | Sound is the media backend's video plane plus audio, or nothing. |
 | No second window, no overlay window | One SDL window, one GLES context. |
 | No durable filesystem on Developer Mode webOS | Persist with DB8. |

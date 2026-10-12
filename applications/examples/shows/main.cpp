@@ -490,7 +490,7 @@ class DetailsScreen : public Screen {
 
 class HomeScreen : public Screen {
  public:
-    HomeScreen(Service &service, Navigator &nav) : Screen("home"), service_(service), nav_(nav) {
+    HomeScreen(Service &service, Navigator &nav, const wnk::i18n::Catalog &t) : Screen("home"), service_(service), nav_(nav), t_(t) {
         name = "home";
         auto &row = add<Row>(0);
 
@@ -499,12 +499,12 @@ class HomeScreen : public Screen {
         sidebar.set_padding({40, 80, 40, 40});
         sidebar.set_focus_scope(false, true);
         sidebar.set_background(wnk::render::Color::hex(0x0A0F18FF));
-        sidebar.add<Label>("Shows", TextRole::Title).set_padding({8, 0, 0, 40});
+        sidebar.add<Label>(t_.tr("Shows"), TextRole::Title).set_padding({8, 0, 0, 40});
 
         auto &content = row.add<Column>(12);
         content.set_width(Dim::fill());
         content.set_padding({60, 50, 0, 0});
-        status_ = &content.add<Label>("Loading…", TextRole::Small);
+        status_ = &content.add<Label>(t_.tr("Loading…"), TextRole::Small);
         status_->set_muted(true);
         stack_ = &content.add<View>();
         stack_->set_height(Dim::fill());
@@ -513,7 +513,7 @@ class HomeScreen : public Screen {
         View *sections[] = {&build_home(), &build_browse(), &build_favourites(), &build_about()};
         for (int i = 0; i < 4; ++i) {
             sections_.push_back(sections[i]);
-            auto &item = sidebar.add<NavItem>(names[i], [this, i](Ui &) { show_section(i); });
+            auto &item = sidebar.add<NavItem>(t_.tr(names[i]), [this, i](Ui &) { show_section(i); });
             item.name = std::string("nav.") + names[i];
             nav_items_.push_back(&item);
         }
@@ -660,14 +660,12 @@ class HomeScreen : public Screen {
     void set_grid_items() {
         browse_ = shows::search_by_name(all_, query_);
         grid_->set_items(browse_.size(), [this](Ui &, size_t i) { return make_card(browse_[i], "grid.item" + std::to_string(i)); });
-        char text[96];
         if (browse_.size() != all_.size()) {
-            std::snprintf(text, sizeof text, "%zu of %zu shows match", browse_.size(), all_.size());
+            browse_info_->set_text(t_.tr("Matches: {n} of {total}", {{"n", number(browse_.size())}, {"total", number(all_.size())}}));
         } else {
-            std::snprintf(text, sizeof text, "%zu shows%s", all_.size(),
-                          from_saved_ ? " in the saved copy" : end_ ? ", the whole catalogue" : "");
+            browse_info_->set_text(t_.trn("{n} show", "{n} shows", static_cast<int64_t>(all_.size())) +
+                                   (from_saved_ ? t_.tr(" in the saved copy") : end_ ? t_.tr(", the whole catalogue") : ""));
         }
-        browse_info_->set_text(text);
     }
 
     void load_more() {
@@ -725,16 +723,27 @@ class HomeScreen : public Screen {
     void update_status() {
         std::string s;
         if (all_.empty()) {
-            s = refreshing_ ? "Loading…" : "No catalogue";
+            s = refreshing_ ? t_.tr("Loading…") : t_.tr("No catalogue");
         } else {
-            const std::string age = shows::age_text(now_s() - shown_at_);
-            s = (from_saved_ ? "Saved copy from " : "Updated ") + (age.empty() ? std::string("earlier") : age) + " · " +
-                std::to_string(all_.size()) + " shows";
-            if (refreshing_) s += " · refreshing…";
-            else if (offline_) s += " · offline";
+            const std::string age = age_text(now_s() - shown_at_);
+            s = (from_saved_ ? t_.tr("Saved copy from {age}", {{"age", age}}) : t_.tr("Updated {age}", {{"age", age}})) +
+                " · " + t_.trn("{n} show", "{n} shows", static_cast<int64_t>(all_.size()));
+            if (refreshing_) s += " · " + t_.tr("refreshing…");
+            else if (offline_) s += " · " + t_.tr("offline");
         }
         status_->set_text(s);
         if (current_ == 3) update_about();
+    }
+
+    std::string number(size_t n) const { return wnk::i18n::format_number(static_cast<int64_t>(n), t_.locale()); }
+
+    // shows::age_text in the UI language.
+    std::string age_text(int64_t seconds) const {
+        if (seconds < 0) return t_.tr("earlier");
+        if (seconds < 60) return t_.tr("just now");
+        if (seconds < 3600) return t_.trn("{n} min ago", "{n} min ago", seconds / 60);
+        if (seconds < 86400) return t_.trn("{n} h ago", "{n} h ago", seconds / 3600);
+        return t_.trn("{n} day ago", "{n} days ago", seconds / 86400);
     }
 
     void refresh_favourites() {
@@ -775,7 +784,7 @@ class HomeScreen : public Screen {
 
         rails_box_ = &col.add<Column>(20);
         rails_box_->set_visible(false);
-        const char *titles[] = {"Top rated", "Most popular", "Recently updated"};
+        const std::string titles[] = {t_.tr("Top rated"), t_.tr("Most popular"), t_.tr("Recently updated")};
         for (int r = 0; r < 3; ++r) {
             rails_box_->add<Label>(titles[r]).set_bold(true).set_padding({16, 0, 0, 0});
             auto &rail = rails_box_->add<CollectionView>(Axis::Horizontal, 1, kRailCell, 28);
@@ -790,11 +799,11 @@ class HomeScreen : public Screen {
         auto &col = stack_->add<Column>(16);
         col.name = "section.browse";
         auto &head = col.add<Row>(24);
-        head.add<Label>("All shows", TextRole::Title);
+        head.add<Label>(t_.tr("All shows"), TextRole::Title);
         browse_info_ = &head.add<Label>("", TextRole::Small);
         browse_info_->set_muted(true).set_align(Align::Start, Align::End);
         // Search filters the shows loaded so far as the viewer types; OK on LG's keyboard goes to the results.
-        search_ = &col.add<TextField>("Search by name");
+        search_ = &col.add<TextField>(t_.tr("Search by name"));
         search_->name = "browse.search";
         search_->set_width(Dim::fixed(720)).set_align(Align::Start, Align::Start);
         search_->set_max_length(60);
@@ -819,7 +828,7 @@ class HomeScreen : public Screen {
     View &build_favourites() {
         auto &col = stack_->add<Column>(16);
         col.name = "section.favourites";
-        col.add<Label>("Favourites", TextRole::Title);
+        col.add<Label>(t_.tr("Favourites"), TextRole::Title);
         fav_empty_ = &col.add<Label>("Shows you add from their details page appear here. They are kept on this TV.");
         fav_empty_->set_max_lines(2).set_muted(true);
         fav_grid_ = &col.add<CollectionView>(Axis::Vertical, kGridColumns, kGridCell, 28);
@@ -890,6 +899,7 @@ class HomeScreen : public Screen {
     std::vector<CollectionView *> rails_;
     CollectionView *grid_ = nullptr, *fav_grid_ = nullptr;
     TextField *search_ = nullptr;
+    const wnk::i18n::Catalog &t_;
     std::vector<View *> sections_;
     std::vector<NavItem *> nav_items_;
     int current_ = -1;
@@ -920,7 +930,7 @@ class ShowsApp : public wnk::app::Delegate {
                 WNK_LOGI(kCat, "back to %s focus=%s", s.title().c_str(), f != nullptr ? f->name.c_str() : "<pending>");
             depth_ = nav_->depth();
         };
-        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(*service_, *nav_)));
+        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(*service_, *nav_, ctx.i18n())));
         home_->start(ui);
     }
 

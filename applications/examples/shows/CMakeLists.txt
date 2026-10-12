@@ -12,6 +12,7 @@ target_include_directories(wnk-shows SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third
 set(WNK_FONT_DIR "${PROJECT_SOURCE_DIR}/assets/fonts")
 add_custom_command(TARGET wnk-shows POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${WNK_FONT_DIR}" "$<TARGET_FILE_DIR:wnk-shows>/fonts"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/i18n" "$<TARGET_FILE_DIR:wnk-shows>/i18n"
         VERBATIM)
 
 # database.operation: saved copy and favourites in DB8 (AppConfig::storage).
@@ -19,11 +20,11 @@ wnk_add_webos_package(
         TARGET wnk-shows
         APPID org.wnk.examples.shows
         TITLE "WNK Shows"
-        VERSION 0.2.0
+        VERSION 0.3.0
         VENDOR "webos-native-app-kit"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"
         ICON_COLOR "#8a3ffc"
         EXPECTED_NEEDED "${CMAKE_CURRENT_SOURCE_DIR}/expected-needed.txt"
         REQUIRED_PERMISSIONS database.operation
-        EXTRA_DIRS "${WNK_FONT_DIR}")
+        EXTRA_DIRS "${WNK_FONT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/i18n")

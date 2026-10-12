@@ -287,3 +287,47 @@ TEST("frame fingerprint: equal for identical frames, different for any visible c
     CHECK(draw(kWhite, 2, "Hello", clip, t2) != with_red);
     r.destroy_texture(t2);
 }
+
+TEST("fallback fonts: a character the font lacks comes from the chain, else it is reported once") {
+    SKIP_WITHOUT_GL();
+    std::string cjk;
+    for (const char *p : {"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                          "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"}) {
+        if (wnk::render::FontFace::from_file(p)) {
+            cjk = p;
+            break;
+        }
+    }
+    if (cjk.empty()) {
+        std::printf("  SKIP (no CJK font on this host)\n");
+        return;
+    }
+    auto &r = *env().r;
+    const FontId latin = r.load_font_file(kFontDir + "/AtkinsonHyperlegible-Regular.ttf");
+    const TextStyle s{latin, 20, kWhite};
+    r.set_fallback_fonts({});
+    r.take_missing_codepoints();
+    const float without = r.measure_text(s, "a\xE4\xB8\xAD");  // a中
+    auto missing = r.take_missing_codepoints();
+    REQUIRE(missing.size() == 1u);
+    CHECK_EQ(static_cast<unsigned>(missing[0]), 0x4E2Du);
+    r.measure_text(s, "\xE4\xB8\xAD");
+    CHECK(r.take_missing_codepoints().empty());  // reported once only
+    const FontId han = r.load_font_file(cjk);
+    REQUIRE(han != kNoFont);
+    r.set_fallback_fonts({han});
+    const float with = r.measure_text(s, "a\xE4\xB8\xAD");
+    CHECK(with > without);  // a full-width ideograph, wider than .notdef
+    frame();
+    r.clear(kTransparent);
+    r.draw_text(s, {4, 40}, "a\xE4\xB8\xAD");
+    r.end_frame();
+    CHECK(r.take_missing_codepoints().empty());
+    // The ideograph's pixels are drawn to the right of the "a".
+    int lit = 0;
+    for (int x = 4 + static_cast<int>(with * 0.5f); x < 4 + static_cast<int>(with); ++x) {
+        for (int y = 22; y < 42; ++y) lit += pixel(x, y).a > 128 ? 1 : 0;
+    }
+    CHECK(lit > 10);
+    r.set_fallback_fonts({});
+}

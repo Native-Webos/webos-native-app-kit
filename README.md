@@ -45,6 +45,7 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 | `image/` | Image service: fetch, PNG/JPEG decode, downscale, memory and disk caches, coalescing; textures via the renderer |
 | `storage/` | Key/value store with revisions: DB8 on the TV, atomic files on the host; secret store (keymanager3 AES-GCM where available) |
 | `render/` | Renderer interface, fonts/UTF-8/atlas packing (CPU), GLES2 backend in `render/gles2` |
+| `i18n/` | Locale (TV settings, `LANG`), string catalogs with CLDR plural forms, placeholders, number formatting |
 | `ui/` | Widget toolkit: view tree, Row/Column/Grid layouts, Label, ImageView, Button, Card, TextField, virtualised lists/grids, ScrollView, dialogs, toasts, navigation stack, focus ring, animation helpers |
 | `app/` | App shell (`wnk::app::run` + `Delegate`): SDL/GL setup, main loop, input routing, lifecycle state machine (Running ⇄ Suspended), timed shutdown under a watchdog, metrics overlay |
 | `diagnostics/` | Frame timing (per loop phase), process memory, crash record (async-signal-safe; `tools/symbolize-crash.py` resolves it offline), capabilities (Supported/Unsupported/Unknown) and device info without identifiers |

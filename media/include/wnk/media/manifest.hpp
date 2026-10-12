@@ -29,6 +29,7 @@
 #include "wnk/media/media.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -42,6 +43,14 @@ struct ByteRange {
     bool whole() const { return offset == 0 && length < 0; }
 };
 
+// HLS EXT-X-KEY in effect for a segment (METHOD other than NONE).
+struct HlsKey {
+    std::string method;      // "AES-128", "SAMPLE-AES", "SAMPLE-AES-CTR"
+    std::string uri;         // resolved key URI ("skd://..." for FairPlay)
+    std::string iv;          // 32 lowercase hex digits, or "" (then the media sequence number is the IV)
+    std::string key_format;  // KEYFORMAT, "identity" when absent
+};
+
 struct MediaSegment {
     std::string url;
     ByteRange range;
@@ -49,6 +58,7 @@ struct MediaSegment {
     int64_t duration_us = 0;
     bool discontinuity = false;  // HLS: timestamps may restart here
     int64_t number = -1;         // HLS media sequence number, DASH $Number$ (or position in the list)
+    std::shared_ptr<const HlsKey> key;  // HLS: how this segment is encrypted; null when clear
 };
 
 struct Rendition {

@@ -808,6 +808,9 @@ bool FfmpegSource::open_input(const std::string &name, const std::string &uri, s
         // Read by the MP4 demuxer (and ignored by the others); the keys never reach a log.
         av_dict_set(&opts, "decryption_keys", ffmpeg_decryption_keys(m.options.decryption_keys).c_str(), 0);
     }
+    if (!m.options.decryption_default_key.empty()) {
+        av_dict_set(&opts, "decryption_key", m.options.decryption_default_key.c_str(), 0);
+    }
     int rc = avformat_open_input(&m.fmt, name.c_str(), nullptr, &opts);
     av_dict_free(&opts);
     if (rc < 0) {

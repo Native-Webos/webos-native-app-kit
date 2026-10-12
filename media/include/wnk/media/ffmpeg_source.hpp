@@ -39,6 +39,9 @@ struct FfmpegSourceOptions {
     // ClearKey content keys for Common Encryption in MP4 (wnk/media/clearkey.hpp): the demuxer
     // decrypts each sample with them. Encrypted samples without a matching key fail the read.
     ContentKeys decryption_keys;
+    // One key for every key ID (32 hex digits): HLS SAMPLE-AES / SAMPLE-AES-CTR in fMP4, whose key
+    // comes from EXT-X-KEY's URI rather than by key ID.
+    std::string decryption_default_key;
 };
 
 class FfmpegSource : public MediaSource {

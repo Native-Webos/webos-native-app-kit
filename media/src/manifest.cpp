@@ -988,6 +988,7 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
     ByteRange pending_range;
     bool has_range = false;
     std::map<std::string, int64_t> next_offset;  // per URI, for EXT-X-BYTERANGE without @offset
+    std::shared_ptr<const HlsKey> key;            // EXT-X-KEY in effect
     for (const std::string &l : lines) {
         if (l.rfind("#EXTINF:", 0) == 0) {
             pending_duration = to_double(l.substr(8));
@@ -1014,7 +1015,26 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
         } else if (l.rfind("#EXT-X-KEY:", 0) == 0) {
             const auto a = hls_attributes(l.substr(11));
             const std::string *m = find(a, "METHOD");
-            if (m != nullptr && *m != "NONE") r->encrypted = true;
+            key.reset();
+            if (m != nullptr && *m != "NONE") {
+                r->encrypted = true;
+                auto k = std::make_shared<HlsKey>();
+                k->method = *m;
+                if (const std::string *uri = find(a, "URI")) k->uri = resolve_url(url, *uri);
+                if (const std::string *iv = find(a, "IV")) {
+                    std::string hex = *iv;
+                    if (hex.rfind("0x", 0) == 0 || hex.rfind("0X", 0) == 0) hex = hex.substr(2);
+                    for (char &c : hex) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    if (hex.size() > 32 || hex.find_first_not_of("0123456789abcdef") != std::string::npos) {
+                        *error = "bad EXT-X-KEY IV";
+                        return false;
+                    }
+                    k->iv = std::string(32 - hex.size(), '0') + hex;
+                }
+                const std::string *kf = find(a, "KEYFORMAT");
+                k->key_format = kf != nullptr ? *kf : "identity";
+                key = std::move(k);
+            }
         } else if (l.rfind("#EXT-X-MAP:", 0) == 0) {
             const auto a = hls_attributes(l.substr(11));
             const std::string *uri = find(a, "URI");
@@ -1030,6 +1050,8 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
                     return false;
                 }
             }
+            init.key = key;  // an init section is encrypted with the key in effect at its EXT-X-MAP
+            init.number = sequence + static_cast<int64_t>(r->segments.size());
             r->init = init;
         } else if (l[0] != '#') {
             if (pending_duration < 0) {
@@ -1055,6 +1077,7 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
             s.duration_us = static_cast<int64_t>(std::llround(pending_duration * 1e6));
             s.discontinuity = pending_discontinuity;
             s.number = sequence + static_cast<int64_t>(r->segments.size());
+            s.key = key;
             t += s.duration_us;
             r->segments.push_back(std::move(s));
             pending_duration = -1;

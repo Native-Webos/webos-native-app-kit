@@ -108,6 +108,23 @@ struct SegmentReader::Impl {
         int64_t got = 0;  // bytes of this part delivered
         int failures = 0;
         double transfer_s = 0;
+        std::unique_ptr<PartFilter> filter;
+        std::string filtered, filter_error;
+        if (p.filter) {
+            filter = p.filter(&filter_error);
+            if (!filter) {
+                std::lock_guard<std::mutex> lock(m);
+                fail(NetError::Protocol, 0, p.url + ": " + filter_error);
+                return false;
+            }
+        }
+        // Bytes of the part, through the filter when there is one.
+        auto deliver = [&](const uint8_t *data, size_t n) {
+            if (!filter) return store(data, n);
+            filtered.clear();
+            if (!filter->update(data, n, &filtered, &filter_error)) return false;
+            return store(reinterpret_cast<const uint8_t *>(filtered.data()), filtered.size());
+        };
         for (;;) {
             {
                 std::lock_guard<std::mutex> lock(m);
@@ -159,7 +176,7 @@ struct SegmentReader::Impl {
                 }
                 if (want >= 0) n = static_cast<size_t>(std::min<int64_t>(want, static_cast<int64_t>(n)));
                 if (n > 0) {
-                    if (!store(data, n)) return false;
+                    if (!deliver(data, n)) return false;
                     got += static_cast<int64_t>(n);
                     failures = 0;
                     if (want >= 0) want -= static_cast<int64_t>(n);
@@ -179,8 +196,21 @@ struct SegmentReader::Impl {
             stats.download_seconds += active;
             transfer_s += active;
             if (quit) return false;
+            if (!filter_error.empty()) {
+                fail(NetError::Protocol, 0, p.url + ": " + filter_error);
+                return false;
+            }
             if (complete || (r.error == NetError::None && bad_status == 0 && want < 0)) {
                 lock.unlock();
+                if (filter) {
+                    filtered.clear();
+                    if (!filter->finish(&filtered, &filter_error) ||
+                        !store(reinterpret_cast<const uint8_t *>(filtered.data()), filtered.size())) {
+                        std::lock_guard<std::mutex> relock(m);
+                        if (!filter_error.empty()) fail(NetError::Protocol, 0, p.url + ": " + filter_error);
+                        return false;
+                    }
+                }
                 if (opt.on_part_done) opt.on_part_done(index, got, transfer_s);
                 return true;
             }

@@ -31,10 +31,25 @@
 
 namespace wnk::net {
 
+// Rewrites one part's bytes as they arrive, on the download thread (HLS AES-128 decryption). Bytes
+// come in order and exactly once, across retries; finish() runs at the part's end. update() may hold
+// bytes back until finish(). False fails the stream with the message in *error.
+class PartFilter {
+ public:
+    virtual ~PartFilter() = default;
+    virtual bool update(const uint8_t *data, size_t n, std::string *out, std::string *error) = 0;
+    virtual bool finish(std::string *out, std::string *error) = 0;
+};
+
 struct SegmentPart {
+    SegmentPart() = default;
+    SegmentPart(std::string u, int64_t off = 0, int64_t len = -1) : url(std::move(u)), offset(off), length(len) {}
     std::string url;
     int64_t offset = 0;
     int64_t length = -1;  // < 0: to the end of the resource
+    // Called on the download thread when the part starts (it may block, e.g. to fetch a key); a null
+    // result fails the stream with *error. Unset: the bytes are stored as they come.
+    std::function<std::unique_ptr<PartFilter>(std::string *error)> filter;
 };
 
 struct SegmentReaderOptions {

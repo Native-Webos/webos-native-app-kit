@@ -27,6 +27,8 @@ namespace {
 const std::string kKid = "0123456789abcdef0123456789abcdef";  // known to http_server.py's /clearkey
 const std::string kKey = "00112233445566778899aabbccddeeff";
 const std::string kWrongKey = "000102030405060708090a0b0c0d0e0f";
+// ffmpeg's -hls_enc_key takes 16 characters as the key bytes: a.key holds "0011223344556677".
+const std::string kHlsKeyHex = "30303131323233333434353536363737";
 
 std::string env(const char *name) {
     const char *v = std::getenv(name);
@@ -74,6 +76,49 @@ bool make_media() {
             denied.replace(at, 10, "/clearkey/deny<");
         }
         std::ofstream(d + "/denied.mpd") << denied;
+        // HLS from the same packets: clear, and AES-128 with the key at a.key (written by ffmpeg).
+        const std::string hls =
+            "cd '" + d + "' && ffmpeg -hide_banner -loglevel error -y -i clear.mp4 -c copy -f hls -hls_time 2 "
+            "-hls_playlist_type vod -hls_segment_filename 'c_%03d.ts' c.m3u8 && "
+            "ffmpeg -hide_banner -loglevel error -y -i clear.mp4 -c copy -f hls -hls_time 2 -hls_playlist_type vod "
+            "-hls_enc 1 -hls_enc_key " + kKey + " -hls_enc_key_url a.key -hls_segment_filename 'a_%03d.ts' a.m3u8";
+        if (std::system(hls.c_str()) != 0) return false;
+        std::ifstream ain(d + "/a.m3u8");
+        std::stringstream as;
+        as << ain.rdbuf();
+        const std::string a = as.str();
+        auto variant = [&](const std::string &name, const std::string &from, const std::string &to) {
+            std::string v = a;
+            v.replace(v.find(from), from.size(), to);
+            std::ofstream(d + "/" + name) << v;
+        };
+        variant("sa.m3u8", "METHOD=AES-128", "METHOD=SAMPLE-AES");
+        variant("fp.m3u8", "METHOD=AES-128,URI=\"a.key\"", "METHOD=SAMPLE-AES,URI=\"skd://key\",KEYFORMAT=\"com.apple.streamingkeydelivery\"");
+        variant("nokey.m3u8", "URI=\"a.key\"", "URI=\"missing.key\"");
+        // Without an IV attribute each segment's IV is its media sequence number (here from 7):
+        // encrypt the clear segments that way with the openssl CLI.
+        std::ifstream cin(d + "/c.m3u8");
+        std::stringstream cs;
+        cs << cin.rdbuf();
+        std::string seq, line;
+        int n = 0;
+        while (std::getline(cs, line)) {
+            if (line.rfind("#EXT-X-MEDIA-SEQUENCE", 0) == 0) {
+                seq += "#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-KEY:METHOD=AES-128,URI=\"a.key\"\n";
+                continue;
+            }
+            if (!line.empty() && line[0] != '#') {
+                char iv[40], name[32];
+                std::snprintf(iv, sizeof iv, "%032x", 7 + n);
+                std::snprintf(name, sizeof name, "s_%03d.ts", n++);
+                const std::string enc = "cd '" + d + "' && openssl enc -aes-128-cbc -K " + kHlsKeyHex + " -iv " + iv + " -in '" +
+                                        line + "' -out " + name;
+                if (std::system(enc.c_str()) != 0) return false;
+                line = name;
+            }
+            seq += line + "\n";
+        }
+        std::ofstream(d + "/seq.m3u8") << seq;
         return true;
     }();
     return ok;
@@ -269,4 +314,90 @@ TEST("dash: given keys are used without asking; a refusing licence server leaves
     AdaptiveSource s2(o);
     CHECK(!s2.open(env("WNK_TEST_HTTP_BASE") + "/files/e.mpd", &err));
     CHECK(err.find("no key for key ID " + kKid) != std::string::npos);
+}
+
+// HLS ------------------------------------------------------------------------------------------------
+
+namespace {
+Read read_hls(const std::string &name, std::string *open_error = nullptr) {
+    AdaptiveSourceOptions o;
+    o.http = transport();
+    o.video_codecs = {CodecId::H264};
+    AdaptiveSource s(o);
+    std::string err;
+    Read fail;
+    if (!s.open(env("WNK_TEST_HTTP_BASE") + "/files/" + name, &err)) {
+        if (open_error != nullptr) *open_error = err;
+        fail.error = "open: " + err;
+        return fail;
+    }
+    StreamFormat f;
+    if (!s.select(0, 1, passthrough(), &f, &err)) {
+        if (open_error != nullptr) *open_error = err;
+        fail.error = "select: " + err;
+        return fail;
+    }
+    return read_all(s);
+}
+}  // namespace
+
+TEST("hls: AES-128 segments decrypt to exactly the clear presentation's packets") {
+    NEEDS_MEDIA();
+    const Read clear = read_hls("c.m3u8");
+    REQUIRE(clear.error.empty());
+    REQUIRE(clear.video.size() == 150u);
+    const Read got = read_hls("a.m3u8");
+    CHECK(got.error.empty());
+    REQUIRE(got.video.size() == clear.video.size());
+    CHECK(got.video == clear.video);
+    CHECK(got.audio == clear.audio);
+}
+
+TEST("hls: without an IV attribute the media sequence number is the IV") {
+    NEEDS_MEDIA();
+    const Read clear = read_hls("c.m3u8");
+    const Read got = read_hls("seq.m3u8");
+    CHECK(got.error.empty());
+    REQUIRE(got.video.size() == clear.video.size());
+    CHECK(got.video == clear.video);
+}
+
+TEST("hls playlist: EXT-X-KEY per segment, IV normalised, NONE ends it, EXT-X-MAP takes the key in effect") {
+    const std::string pl = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:5\n"
+                           "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k1\",IV=0X1A,KEYFORMAT=\"identity\"\n"
+                           "#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\na.m4s\n"
+                           "#EXT-X-KEY:METHOD=AES-128,URI=\"https://keys.example/k2\"\n#EXTINF:2,\nb.m4s\n"
+                           "#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\nc.m4s\n#EXT-X-ENDLIST\n";
+    Rendition r;
+    bool live = true;
+    std::string err;
+    REQUIRE(parse_hls_media(pl, "https://cdn.example/v/index.m3u8", &r, &live, &err));
+    REQUIRE(r.segments.size() == 3u);
+    CHECK(r.encrypted);
+    REQUIRE(r.init && r.init->key);
+    CHECK_EQ(r.init->key->method, std::string("SAMPLE-AES"));
+    REQUIRE(r.segments[0].key);
+    CHECK_EQ(r.segments[0].key->uri, std::string("https://cdn.example/v/k1"));
+    CHECK_EQ(r.segments[0].key->iv, std::string("0000000000000000000000000000001a"));
+    REQUIRE(r.segments[1].key);
+    CHECK_EQ(r.segments[1].key->method, std::string("AES-128"));
+    CHECK(r.segments[1].key->iv.empty());
+    CHECK_EQ(r.segments[1].key->key_format, std::string("identity"));
+    CHECK_EQ(r.segments[1].number, int64_t{6});
+    CHECK(!r.segments[2].key);
+    const std::string bad = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\",IV=0xZZ\n#EXTINF:2,\na.ts\n";
+    CHECK(!parse_hls_media(bad, "https://cdn.example/x.m3u8", &r, &live, &err));
+}
+
+TEST("hls: SAMPLE-AES in MPEG-TS, FairPlay keys and an unreachable key URI fail with the reason") {
+    NEEDS_MEDIA();
+    std::string err;
+    read_hls("sa.m3u8", &err);
+    CHECK(err.find("SAMPLE-AES in MPEG-TS is not supported") != std::string::npos);
+    err.clear();
+    read_hls("fp.m3u8", &err);
+    CHECK(err.find("encrypted") != std::string::npos);  // FairPlay is never chosen
+    const Read missing = read_hls("nokey.m3u8", &err);
+    CHECK(missing.video.empty());
+    CHECK(!missing.error.empty());
 }

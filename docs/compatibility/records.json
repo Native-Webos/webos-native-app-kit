@@ -755,6 +755,15 @@
       "method": "Example D 0.15.0 (launch {\"autoplay\":12..14}): Shaka angel-one-clearkey DASH (cenc, key given as kid:key), DASH-IF livesim2 eccp_cenc and eccp_cbcs (live, key from the manifest's ClearKey licence server), 30 s each",
       "evidence": "licence fetched in 0.3 s; Starfish first frame 0.2 s after Playing; sink 125-151 frames displayed per 5 s, 0 dropped; decoder position advancing; live joined at the edge (0:57)",
       "limitations": "the picture was not looked at (no one at the TV); low-bitrate streams only (640x480/640x360), so the CPU cost of decryption at 4K is not measured"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "media.hls_aes128",
+      "result": "supported",
+      "method": "Example D 0.16.0: JW Player oceans_aes (AES-128 MPEG-TS VOD), Mux dai-discontinuity-deltatre (a new key URI and IV for every 10 s segment), and a live AES-128 HLS stream written by ffmpeg -re on the dev machine (2 s segments, sliding 6-segment window), 30 s each",
+      "evidence": "Starfish first frame 0.2 s after Playing; sink 120-126 frames displayed per 5 s, 0 dropped; decoder position advancing across segment and key boundaries; the live stream followed the playlist",
+      "limitations": "the picture was not looked at (no one at the TV); SAMPLE-AES in fMP4 has no public test stream here and is untested on the TV"
     }
   ]
 }

@@ -397,13 +397,22 @@ the read with a clear message. The DASH parser reads ContentProtection (scheme, 
 ClearKey licence URL in `clearkey:Laurl` / `dashif:Laurl`). `AdaptiveSource` asks a W3C ClearKey
 licence server for missing keys and plays encrypted renditions it has keys for. `clearkey.hpp` parses
 `kid:key` lists and JWK sets. Example D 0.15 takes `{"keys": ..., "licenseUrl": ...}` and lists three
-protected test streams. Not covered yet: HLS `EXT-X-KEY` (AES-128, SAMPLE-AES), key rotation in live
-streams, Widevine/PlayReady.
+protected test streams.
+
+HLS `EXT-X-KEY` (Example D 0.16): the playlist parser keeps the key in effect per segment (method,
+URI, IV, KEYFORMAT; NONE ends it; EXT-X-MAP takes the key at its position). `SegmentReader` parts can
+carry a filter that rewrites their bytes on the download thread; AES-128 segments get an AES-128-CBC
+filter (libavutil AES, streamed, PKCS#7 padding removed, IV from the tag or the media sequence number)
+whose key is fetched once per URI. SAMPLE-AES / SAMPLE-AES-CTR in fMP4 use the CENC path with the URI's
+key as FFmpeg's default key. Refused with a reason: SAMPLE-AES in MPEG-TS, non-identity key formats
+(FairPlay). Not covered: DASH key rotation, Widevine/PlayReady.
 
 | Evidence | Tag |
 |---|---|
 | Key and licence parsing, licence exchange with the test server (ok, 403, no matching key), DASH ContentProtection; a CENC MP4 read with the key equals the clear file packet for packet, a wrong key differs, no key fails | `[TEST]` `integration.clearkey` |
 | On the TV: Shaka angel-one-clearkey (cenc, key given), livesim2 eccp_cenc and eccp_cbcs (live, key from the licence server) through Starfish, 0 dropped frames | `[DEVICE]` records.json |
+| HLS: AES-128 TS decrypted equals the clear presentation packet for packet, also with the sequence-number IV (segments encrypted by the openssl CLI); EXT-X-KEY parsing; SAMPLE-AES TS, FairPlay and a missing key URI refused | `[TEST]` `integration.clearkey` |
+| On the TV: JW Player oceans (AES-128 VOD), Mux deltatre (a new key per segment), a live AES-128 HLS stream from the LAN, through Starfish, 0 dropped frames | `[DEVICE]` records.json |
 
 ffmpeg's own fragmented CENC output does not demux (its sample-encryption boxes are inconsistent),
 so the DASH test checks the manifest and licence path, and fragmented decryption is checked with the

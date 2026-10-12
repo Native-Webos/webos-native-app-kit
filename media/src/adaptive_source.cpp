@@ -6,6 +6,11 @@
 #include "wnk/media/ffmpeg_source.hpp"
 #include "wnk/media/webvtt.hpp"
 
+extern "C" {
+#include <libavutil/aes.h>
+#include <libavutil/mem.h>
+}
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -13,6 +18,7 @@
 #include <condition_variable>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -77,6 +83,127 @@ size_t segment_at(const std::vector<MediaSegment> &segs, int64_t t) {
     return it == segs.begin() ? 0 : static_cast<size_t>(it - segs.begin()) - 1;
 }
 
+
+// ---- HLS EXT-X-KEY ------------------------------------------------------------------------------
+
+// HLS keys by URI, fetched once each (a playlist can rotate keys per segment). Shared with the
+// download threads that ask for them, so it outlives any reader.
+struct HlsKeyCache {
+    std::shared_ptr<net::HttpTransport> http;
+    net::Headers headers;
+    std::mutex m;
+    std::map<std::string, std::string> keys;  // URI → 16 key bytes
+
+    bool get(const std::string &uri, std::string *key, std::string *error) {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            const auto it = keys.find(uri);
+            if (it != keys.end()) {
+                *key = it->second;
+                return true;
+            }
+        }
+        if (uri.rfind("skd://", 0) == 0) {
+            *error = "FairPlay keys (skd://) are not supported";
+            return false;
+        }
+        if (!http || uri.empty()) {
+            *error = "no way to fetch the key";
+            return false;
+        }
+        net::HttpRequest req;
+        req.url = uri;
+        req.headers = headers;
+        req.timeout_ms = 10000;
+        req.max_response_bytes = 4096;
+        net::HttpResponse r;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            r = http->perform(req, {});
+            if (r.error == net::NetError::None && r.status < 500) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(300 << attempt));
+        }
+        if (r.error != net::NetError::None || r.status < 200 || r.status >= 300) {
+            *error = "key request failed: " + (r.error != net::NetError::None ? std::string(net::error_name(r.error))
+                                                                             : "HTTP " + std::to_string(r.status));
+            return false;
+        }
+        std::string bytes = r.body;
+        if (bytes.size() != 16) {
+            // Some servers answer the key as 32 hex digits.
+            std::string hex = bytes;
+            while (!hex.empty() && std::isspace(static_cast<unsigned char>(hex.back()))) hex.pop_back();
+            const std::string norm = normalize_key_id(hex);
+            if (norm.size() != 32 || hex.size() != 32) {
+                *error = "the key is " + std::to_string(bytes.size()) + " bytes, not 16";
+                return false;
+            }
+            bytes.clear();
+            for (size_t i = 0; i < 32; i += 2) bytes.push_back(static_cast<char>(std::stoi(norm.substr(i, 2), nullptr, 16)));
+        }
+        std::lock_guard<std::mutex> lock(m);
+        keys[uri] = bytes;
+        *key = bytes;
+        return true;
+    }
+};
+
+// The IV of a segment: EXT-X-KEY's IV, else its media sequence number as a 128-bit big-endian value.
+void hls_iv(const HlsKey &k, int64_t number, uint8_t iv[16]) {
+    std::memset(iv, 0, 16);
+    if (k.iv.size() == 32) {
+        for (int i = 0; i < 16; ++i) iv[i] = static_cast<uint8_t>(std::stoi(k.iv.substr(static_cast<size_t>(i) * 2, 2), nullptr, 16));
+        return;
+    }
+    const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(0, number));
+    for (int i = 0; i < 8; ++i) iv[15 - i] = static_cast<uint8_t>(n >> (8 * i));
+}
+
+// AES-128-CBC over a whole segment with PKCS#7 padding (HLS METHOD=AES-128), streamed: the last
+// block is held back until the end so the padding can be removed.
+class Aes128CbcFilter final : public net::PartFilter {
+ public:
+    Aes128CbcFilter(const std::string &key, const uint8_t iv[16]) : aes_(av_aes_alloc()) {
+        av_aes_init(aes_, reinterpret_cast<const uint8_t *>(key.data()), 128, 1);
+        std::memcpy(iv_, iv, 16);
+    }
+    ~Aes128CbcFilter() override { av_free(aes_); }
+
+    bool update(const uint8_t *data, size_t n, std::string *out, std::string *) override {
+        pending_.append(reinterpret_cast<const char *>(data), n);
+        size_t blocks = pending_.size() / 16;
+        if (blocks > 0 && pending_.size() % 16 == 0) --blocks;  // may be the padded last block
+        decrypt(blocks, out);
+        return true;
+    }
+    bool finish(std::string *out, std::string *error) override {
+        if (pending_.empty()) return true;
+        if (pending_.size() != 16) {
+            *error = "AES-128 segment is not a whole number of blocks";
+            return false;
+        }
+        const size_t before = out->size();
+        decrypt(1, out);
+        const uint8_t pad = static_cast<uint8_t>(out->back());
+        bool padded = pad >= 1 && pad <= 16 && out->size() - before >= pad;
+        for (size_t i = 0; padded && i < pad; ++i) padded = static_cast<uint8_t>((*out)[out->size() - 1 - i]) == pad;
+        if (padded) out->resize(out->size() - pad);  // without valid padding the block is kept whole
+        return true;
+    }
+
+ private:
+    void decrypt(size_t blocks, std::string *out) {
+        if (blocks == 0) return;
+        const size_t at = out->size();
+        out->resize(at + blocks * 16);
+        av_aes_crypt(aes_, reinterpret_cast<uint8_t *>(&(*out)[at]), reinterpret_cast<const uint8_t *>(pending_.data()),
+                     static_cast<int>(blocks), iv_, 1);
+        pending_.erase(0, blocks * 16);
+    }
+    AVAES *aes_;
+    uint8_t iv_[16];
+    std::string pending_;
+};
+
 }  // namespace
 
 void ThroughputEstimator::add(int64_t bytes, double seconds) {
@@ -132,6 +259,10 @@ int choose_rung(const std::vector<int64_t> &bw, int current, int64_t estimate, i
 
 bool decryptable(const Rendition &r, const ContentKeys &keys) {
     if (!r.encrypted) return true;
+    // HLS EXT-X-KEY: the key comes from its URI (identity keys only; not FairPlay).
+    for (const MediaSegment &seg : r.segments) {
+        if (seg.key) return seg.key->key_format == "identity";
+    }
     if (keys.empty()) return false;
     // Without default KIDs in the manifest the keys are tried; the demuxer reports a missing one.
     return std::all_of(r.key_ids.begin(), r.key_ids.end(), [&](const std::string &k) { return keys.count(k) != 0; });
@@ -355,14 +486,58 @@ struct AdaptiveSource::Impl {
         return true;
     }
 
+    std::shared_ptr<HlsKeyCache> hls_keys = std::make_shared<HlsKeyCache>();
+
+    // A segment as a reader part; HLS AES-128 segments are decrypted as they arrive (the key is
+    // fetched by the download thread, once per URI).
+    net::SegmentPart part_of(const MediaSegment &s) const {
+        net::SegmentPart p(s.url, s.range.offset, s.range.length);
+        if (s.key && s.key->method == "AES-128") {
+            p.filter = [cache = hls_keys, key = s.key, number = s.number](std::string *error) -> std::unique_ptr<net::PartFilter> {
+                std::string bytes;
+                if (!cache->get(key->uri, &bytes, error)) return nullptr;
+                uint8_t iv[16];
+                hls_iv(*key, number, iv);
+                return std::make_unique<Aes128CbcFilter>(bytes, iv);
+            };
+        }
+        return p;
+    }
+
     std::vector<net::SegmentPart> parts_from(const Rendition &r, size_t first) const {
         std::vector<net::SegmentPart> parts;
-        if (r.init) parts.push_back({r.init->url, r.init->range.offset, r.init->range.length});
-        for (size_t i = first; i < r.segments.size(); ++i) {
-            const MediaSegment &s = r.segments[i];
-            parts.push_back({s.url, s.range.offset, s.range.length});
-        }
+        if (r.init) parts.push_back(part_of(*r.init));
+        for (size_t i = first; i < r.segments.size(); ++i) parts.push_back(part_of(r.segments[i]));
         return parts;
+    }
+
+    // SAMPLE-AES and SAMPLE-AES-CTR: Common Encryption inside fMP4 ('cbcs' / 'cenc'), decrypted by the
+    // demuxer with the key from the URI. SAMPLE-AES in MPEG-TS (Apple's own sample format) is not.
+    bool sample_key(const Rendition &r, size_t first, std::string *hex, std::string *error) {
+        std::shared_ptr<const HlsKey> key;
+        {
+            std::lock_guard<std::mutex> plock(pres_mutex);
+            if (first < r.segments.size()) key = r.segments[first].key;
+            else if (!r.segments.empty()) key = r.segments.back().key;
+        }
+        if (!key || key->method == "AES-128") return true;
+        if (key->key_format != "identity") {
+            *error = "HLS key format " + key->key_format + " is not supported (only identity keys)";
+            return false;
+        }
+        if (!r.init) {
+            *error = "HLS " + key->method + " in MPEG-TS is not supported (only in fMP4)";
+            return false;
+        }
+        std::string bytes;
+        if (!hls_keys->get(key->uri, &bytes, error)) return false;
+        static const char *kDigits = "0123456789abcdef";
+        hex->clear();
+        for (const unsigned char c : bytes) {
+            hex->push_back(kDigits[c >> 4]);
+            hex->push_back(kDigits[c & 15]);
+        }
+        return true;
     }
 
     // A reader over `r` from segment `first`. The caller holds pres_mutex.
@@ -384,6 +559,11 @@ struct AdaptiveSource::Impl {
                    std::unique_ptr<net::SegmentReader> prebuilt = nullptr) {
         const Rendition &r = pres.renditions[static_cast<size_t>(lane.rendition)];
         const bool hls = pres.format == Presentation::Format::Hls;
+        std::string sample_key_hex;
+        if (hls && !sample_key(r, first, &sample_key_hex, error)) {
+            *error = "rendition " + r.id + ": " + *error;
+            return false;
+        }
         for (int pass = 0; pass < 2; ++pass) {
             std::unique_ptr<net::SegmentReader> reader;
             FfmpegSource *s = nullptr;
@@ -406,6 +586,7 @@ struct AdaptiveSource::Impl {
                 FfmpegSourceOptions so;
                 so.ac3_encode = opt.ac3_encode;
                 so.decryption_keys = opt.keys;  // also for encryption the manifest does not declare
+                so.decryption_default_key = sample_key_hex;
                 auto src = std::make_unique<FfmpegSource>(std::move(so));
                 src->set_time_origin(hls ? hls_origin_us : r.time_origin_us);
                 s = src.get();
@@ -492,7 +673,7 @@ struct AdaptiveSource::Impl {
             if (pres.format == Presentation::Format::Hls && !cur.segments.empty()) {
                 s.start_us = cur.segments.back().start_us + cur.segments.back().duration_us;
             }
-            added.push_back({s.url, s.range.offset, s.range.length});
+            added.push_back(part_of(s));
             cur.segments.push_back(std::move(s));
         }
         std::lock_guard<std::mutex> lock(lanes_mutex);
@@ -1248,6 +1429,9 @@ struct AdaptiveSource::Impl {
 
 AdaptiveSource::AdaptiveSource(AdaptiveSourceOptions options) : impl_(std::make_unique<Impl>()) {
     impl_->opt = std::move(options);
+    impl_->hls_keys->http = impl_->opt.http;
+    impl_->hls_keys->headers = impl_->opt.headers;
+    for (const auto &h : impl_->opt.license_headers) impl_->hls_keys->headers.push_back(h);
 }
 
 AdaptiveSource::~AdaptiveSource() {

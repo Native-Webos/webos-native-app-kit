@@ -602,7 +602,11 @@ Encryption ('cenc', 'cbcs', 'cens', 'cbc1') in MP4 and DASH. Give keys as
 `AdaptiveSourceOptions::keys` / `FfmpegSourceOptions::decryption_keys` (`parse_content_keys("kid:key,...")`
 also reads a JWK set). Key IDs the manifest names without a key are asked from
 `AdaptiveSourceOptions::license_url`, else from the manifest's ClearKey licence URL. Keys are
-secrets: never log them. Without keys `AdaptiveSource` refuses an encrypted presentation. TTML (`stpp`) is
+secrets: never log them. Without keys `AdaptiveSource` refuses an encrypted presentation.
+HLS `EXT-X-KEY` needs nothing from the app: METHOD=AES-128 segments (MPEG-TS or fMP4) are decrypted as
+they download, with the key from its URI (sent with `headers` and `license_headers`) and rotating
+keys followed per segment; SAMPLE-AES / SAMPLE-AES-CTR in fMP4 go through the CENC path with the
+URI's key. SAMPLE-AES in MPEG-TS and FairPlay (`skd://`) are refused with the reason. TTML (`stpp`) is
 listed and not decoded. WebM renditions are left out. Audio bitrate switching is not implemented;
 video bitrate switching is (`adaptive_bitrate`, default on).
 

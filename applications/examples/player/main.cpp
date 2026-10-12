@@ -33,7 +33,7 @@
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"ac3": false}                         never re-encode audio to AC-3 (audio Starfish cannot take
 //                                          then sends the file to NDL, as before)
-//   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..14)
+//   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..16)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
 #include "wnk/media/auto_backend.hpp"
@@ -575,6 +575,10 @@ class Player : public wnk::app::Delegate {
              "https://livesim2.dashif.org/livesim2/eccp_cenc/testpic_2s/Manifest.mpd"},
             {"ClearKey: livesim2 cbcs (live)", "DASH · dynamic · CENC 'cbcs' · key from the licence server",
              "https://livesim2.dashif.org/livesim2/eccp_cbcs/testpic_2s/Manifest.mpd"},
+            {"AES-128: JW Player oceans", "HLS · MPEG-TS segments encrypted AES-128 · key from the playlist's URI",
+             "https://playertest.longtailvideo.com/adaptive/oceans_aes/oceans_aes.m3u8"},
+            {"AES-128: Mux key rotation", "HLS · a new key and IV for every segment",
+             "https://test-streams.mux.dev/dai-discontinuity-deltatre/manifest.m3u8"},
         };
         Ui &ui = ctx.ui();
         nav_ = &ui.root().add<Navigator>();

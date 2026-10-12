@@ -22,6 +22,7 @@
 #pragma once
 
 #include "wnk/app/lifecycle.hpp"
+#include "wnk/audio/audio.hpp"
 #include "wnk/app/wake_lock.hpp"
 #include "wnk/async/async.hpp"
 #include "wnk/diagnostics/capabilities.hpp"
@@ -51,6 +52,7 @@ struct AppConfig {
     size_t image_memory_bytes = 48u << 20;
     size_t texture_bytes = 64u << 20;
     bool storage = false;     // open the platform key/value store (DB8 on the TV; needs database.operation)
+    bool audio = false;       // open the audio output for the app's own sounds (Context::audio)
     bool double_back_exit = true;  // unhandled Back at the root: "Press Back again to exit"
     int cursor_sleep_ms = 5000;
     // Let the TV's screensaver start while the app is idle in the foreground (wake_lock.hpp). Hold a
@@ -98,6 +100,9 @@ class Context {
     virtual image::ImageService *images() = 0;              // nullptr unless AppConfig::images
     virtual std::shared_ptr<net::HttpTransport> http() = 0;  // nullptr unless AppConfig::http and available
     virtual storage::KeyValueStore *store() = 0;             // nullptr unless AppConfig::storage and opened
+    // The mixer for the app's own sounds; nullptr unless AppConfig::audio and the device opened.
+    // Paused while the app is in the background.
+    virtual audio::Mixer *audio() = 0;
     virtual const platform::LaunchInfo &launch() = 0;
     // The UI language's catalog: ctx.i18n().tr("Search by name"), trn("{n} show", "{n} shows", n).
     virtual const i18n::Catalog &i18n() const = 0;

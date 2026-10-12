@@ -22,12 +22,15 @@
 //   WNK_TVUI_KEYS="Left,Down,Right"  key names, move@X:Y, click@X:Y, wheel@N, bg, fg (see wnk/app)
 //   WNK_TVUI_SHOT=/path/out.bmp      save the last frame, then quit
 #include "wnk/app/app.hpp"
+#include "wnk/audio/audio.hpp"
 #include "wnk/log.hpp"
 #include "wnk/ui/collection.hpp"
+#include "wnk/ui/forms.hpp"
 #include "wnk/ui/navigation.hpp"
 #include "wnk/ui/ui.hpp"
-#include "wnk/ui/forms.hpp"
 #include "wnk/ui/widgets.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <cstdio>
 #include <memory>
@@ -135,9 +138,29 @@ class NavItem : public Button {
     std::function<void(Ui &)> on_select_;
 };
 
+// Interface sounds, generated rather than bundled: a short tick when focus moves and a chord on demand.
+struct Sounds {
+    wnk::audio::Mixer *mixer = nullptr;  // nullptr without an audio device
+    bool on = false;
+    wnk::audio::Sound tick = wnk::audio::tone(1760, 0.025f, 0.12f);
+    wnk::audio::Sound chord = [] {
+        auto pcm = std::make_shared<wnk::audio::Pcm>();
+        for (float hz : {523.25f, 659.25f, 783.99f}) {
+            auto t = wnk::audio::tone(hz, 0.6f, 0.15f);
+            pcm->samples.resize(t->samples.size());
+            for (size_t i = 0; i < t->samples.size(); ++i) pcm->samples[i] += t->samples[i];
+        }
+        return wnk::audio::Sound(pcm);
+    }();
+    int played = 0;
+    void play(const wnk::audio::Sound &s) {
+        if (mixer != nullptr && mixer->play(s) != wnk::audio::kNoVoice) ++played;
+    }
+};
+
 class HomeScreen : public Screen {
  public:
-    HomeScreen(const Catalogue &cat, Navigator &nav) : Screen("home"), cat_(cat), nav_(nav) {
+    HomeScreen(const Catalogue &cat, Navigator &nav, Sounds &sounds) : Screen("home"), cat_(cat), nav_(nav), sounds_(sounds) {
         name = "home";
         auto &row = add<Row>(0);
 
@@ -248,6 +271,14 @@ class HomeScreen : public Screen {
         }).name = "widgets.dialog";
         buttons.add<Button>("Show a toast", [](Ui &ui) { ui.toast("Toasts queue and fade out on their own"); }).name =
             "widgets.toast";
+        buttons.add<Button>("Play a sound", [this](Ui &ui) {
+            if (sounds_.mixer == nullptr) {
+                ui.toast("No audio output on this device");
+                return;
+            }
+            sounds_.play(sounds_.chord);
+            WNK_LOGI(kCat, "sound: chord");
+        }).name = "widgets.sound";
         auto &disabled = buttons.add<Button>("Disabled");
         disabled.set_enabled(false);
         progress_ = &col.add<ProgressBar>();
@@ -315,6 +346,11 @@ class HomeScreen : public Screen {
             ui.focus(&field);
         });
 
+        general.add<Toggle>("Interface sounds", sounds_.on, [this](Ui &, bool on) {
+            sounds_.on = on;
+            WNK_LOGI(kCat, "setting interface sounds = %s", on ? "on" : "off");
+        }).name = "settings.sounds";
+
         auto &playback = stack.add<Column>(16);
         playback.set_width(Dim::fixed(1100)).set_align(Align::Start, Align::Start);
         playback.add<Choice>("Quality", std::vector<std::string>{"Automatic", "2160p", "1080p", "720p", "480p"}, 0,
@@ -352,6 +388,7 @@ class HomeScreen : public Screen {
 
     const Catalogue &cat_;
     Navigator &nav_;
+    Sounds &sounds_;
     std::vector<View *> settings_pages_;
     View *content_ = nullptr;
     std::vector<View *> sections_;
@@ -377,18 +414,31 @@ class TvUi : public wnk::app::Delegate {
             if (nav_->depth() < depth_) WNK_LOGI(kCat, "back to %s focus=%s", s.title().c_str(), focus);
             depth_ = nav_->depth();
         };
-        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(cat_, *nav_)));
+        sounds_.mixer = ctx.audio();
+        const auto params = nlohmann::json::parse(ctx.launch().params_json.empty() ? "{}" : ctx.launch().params_json, nullptr, false);
+        sounds_.on = params.is_object() && params.value("sounds", false);
+        if (sounds_.on) WNK_LOGI(kCat, "interface sounds on");
+        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(cat_, *nav_, sounds_)));
         ui.focus_within(&home_->first_rail());
+    }
+
+    void on_frame(wnk::app::Context &ctx, float) override {
+        View *f = ctx.ui().focused();
+        if (f != last_focus_ && last_focus_ != nullptr && sounds_.on) sounds_.play(sounds_.tick);
+        last_focus_ = f;
     }
 
     void on_stop(wnk::app::Context &ctx) override {
         const auto s = ctx.ui().stats();
         WNK_LOGI(kCat, "ui stats: views %zu, focus nodes %zu, layouts %llu, browse grid cells %s", s.views,
                  s.focus_nodes, static_cast<unsigned long long>(s.layouts), home_->describe().c_str());
+        WNK_LOGI(kCat, "sounds played: %d", sounds_.played);
     }
 
  private:
     Catalogue cat_;
+    Sounds sounds_;
+    View *last_focus_ = nullptr;
     Navigator *nav_ = nullptr;
     HomeScreen *home_ = nullptr;
     size_t depth_ = 0;
@@ -401,6 +451,7 @@ int main(int argc, char **argv) {
     config.fallback_app_id = kFallbackAppId;
     config.title = "wnk tvui";
     config.script_env_prefix = "WNK_TVUI";
+    config.audio = true;  // interface sounds (Settings) and the Widgets chord
     config.metrics_toggle = wnk::input::Action::Blue;  // the blue colour key shows frame timing on screen
     return wnk::app::run(argc, argv, config, [] { return std::make_unique<TvUi>(); });
 }

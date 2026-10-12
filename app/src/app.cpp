@@ -2,6 +2,7 @@
 #include "wnk/app/app.hpp"
 
 #include "wnk/app/overlay.hpp"
+#include "wnk/audio/sdl_output.hpp"
 #include "wnk/diagnostics/crash.hpp"
 #include "wnk/image/textures.hpp"
 #include "wnk/input/sdl_input.hpp"
@@ -287,6 +288,7 @@ class Shell final : public Context {
     image::ImageService *images() override { return images_.get(); }
     std::shared_ptr<net::HttpTransport> http() override { return http_; }
     storage::KeyValueStore *store() override { return store_.get(); }
+    audio::Mixer *audio() override { return audio_out_ ? mixer_.get() : nullptr; }
     const platform::LaunchInfo &launch() override { return launch_; }
     const i18n::Catalog &i18n() const override { return catalog_; }
     const i18n::Locale &formats_locale() const override { return formats_; }
@@ -311,6 +313,7 @@ class Shell final : public Context {
         lifecycle_.set_listener([this](const Lifecycle::Transition &t) {
             WNK_LOGI("lifecycle", "%s -> %s (%s)", state_name(t.from), state_name(t.to), event_name(t.event));
             diagnostics::set_crash_state(state_name(t.to));
+            if (audio_out_) audio_out_->pause(t.to == State::Suspended || t.to == State::Stopping || t.to == State::Terminated);
             if (t.to == State::Suspended) {
                 note_capability("lifecycle.background", diagnostics::Support::Supported,
                                 std::string("background event received (") + event_name(t.event) + ")");
@@ -453,6 +456,15 @@ class Shell final : public Context {
             store_ = storage::open_default_store(launch_.app_id, &err);
             if (!store_) WNK_LOGW("storage", "key/value store unavailable: %s", err.c_str());
         }
+        if (config_.audio) {
+            mixer_ = std::make_unique<audio::Mixer>();
+            audio_out_ = audio::SdlOutput::open(*mixer_, &err);
+            if (audio_out_) {
+                WNK_LOGI("audio", "output %s", audio_out_->describe().c_str());
+            } else {
+                WNK_LOGW("audio", "no audio output: %s", err.c_str());
+            }
+        }
         ui_ = std::make_unique<ui::Ui>(*renderer_, theme);
         if (config_.images) {
             image::ImageServiceConfig ic;
@@ -505,6 +517,12 @@ class Shell final : public Context {
             caps_.set("net.http", http_ ? Support::Supported : Support::Unsupported, http_ ? http_->describe() : "libcurl unavailable");
         } else {
             caps_.set("net.http", Support::Unknown, "not requested by the app", "not-probed");
+        }
+        if (config_.audio) {
+            caps_.set("audio.output", audio_out_ ? Support::Supported : Support::Unsupported,
+                      audio_out_ ? audio_out_->describe() : "device did not open");
+        } else {
+            caps_.set("audio.output", Support::Unknown, "not requested by the app", "not-probed");
         }
         caps_.set("images.decode", config_.images ? Support::Supported : Support::Unknown, config_.images ? "PNG, JPEG" : "not requested");
         caps_.set("input.pointer", Support::Unknown, "no pointer event yet");
@@ -1019,6 +1037,11 @@ class Shell final : public Context {
             ui_.reset();
             image_source_.reset();
         });
+        if (audio_out_) run_step("close audio", [this] {
+            const float peak = mixer_->peak();
+            audio_out_.reset();  // stops the callback before the mixer goes
+            WNK_LOGI("audio", "closed; peak level %.2f", static_cast<double>(peak));
+        });
         run_step("release images", [this] {
             textures_.reset();
             images_.reset();
@@ -1077,6 +1100,8 @@ class Shell final : public Context {
     std::unique_ptr<ui::ServiceImageSource> image_source_;
     std::unique_ptr<ui::Ui> ui_;
     std::unique_ptr<WakeLocks> wake_locks_;
+    std::unique_ptr<audio::Mixer> mixer_;
+    std::unique_ptr<audio::SdlOutput> audio_out_;
     std::unique_ptr<Delegate> delegate_;
     Uint32 last_back_ = 0;
     Uint32 last_move_log_ = 0;

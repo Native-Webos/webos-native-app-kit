@@ -60,7 +60,7 @@ Sources:
 
 | Gap | Evidence | What the kit would add |
 |---|---|---|
-| **App sound** (effects, music, synthesized audio) | RetroArch: PulseAudio and ALSA drivers; client-webos: SDL audio callback into PulseAudio, measured on TVs `[SRC]`. The kit only outputs audio through the media backends `[KIT]`. | An audio output with a small mixer (sound effects plus one stream), on SDL audio. |
+| **App sound** (effects, music, synthesized audio). **Done:** `audio/` (WAV, Ogg via stb_vorbis, mixer, SDL output), `AppConfig::audio`, Example B interface sounds; host-tested through SDL's disk driver. Not yet heard on a TV. | RetroArch: PulseAudio and ALSA drivers; client-webos: SDL audio callback into PulseAudio, measured on TVs `[SRC]`. The kit only outputs audio through the media backends `[KIT]`. | An audio output with a small mixer (sound effects plus one stream), on SDL audio. |
 | **Gamepads** | moonlight-tv, client-webos (SDL gamepad API, DualSense details), RetroArch (udev and HID, webOS 4 and later) `[SRC]`. The kit maps remote keys only `[KIT]`. | SDL GameController with hot-plug and a mapping database: gamepad buttons as UI actions, and raw gamepad events for games. |
 | **Raw keyboard and pointer** for games | client-webos maps USB keyboards and the Magic Remote pointer separately `[SRC]`. | Raw key and pointer events alongside the action layer. |
 | **Own GL drawing** | RetroArch and ScummVM render their own GLES frames `[SRC]`. The kit's renderer exposes quads and text `[KIT]`. | A view whose `draw` gets the GLES context and its viewport, for games and visualizers. |

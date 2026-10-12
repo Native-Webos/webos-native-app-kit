@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 add_executable(wnk-tvui main.cpp)
 target_link_libraries(wnk-tvui PRIVATE wnk_app)
+target_include_directories(wnk-tvui SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 
 # Fonts and the poster thumbnails shared with Example A live next to the executable and in the ipk.
 set(WNK_FONT_DIR "${PROJECT_SOURCE_DIR}/assets/fonts")

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket auth i18n)
+foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket auth i18n audio)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -28,6 +28,8 @@ target_link_libraries(test_secret PRIVATE wnk_storage)
 target_link_libraries(test_websocket PRIVATE wnk_net)
 target_link_libraries(test_auth PRIVATE wnk_auth)
 target_link_libraries(test_i18n PRIVATE wnk_i18n)
+find_package(Threads REQUIRED)
+target_link_libraries(test_audio PRIVATE wnk_audio Threads::Threads)
 target_include_directories(test_secret SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 
@@ -124,6 +126,20 @@ if (TARGET wnk-tvui)
             "focus settings.device.field.*text input on for settings.device.field.*setting device name = Den.*text input off.*focus settings.device")
     wnk_tvui_e2e(settings_text_view_scrolls "${WNK_TVUI_SETTINGS},Up,Up,Up,Right,Right,Down,Down,Down,Down,Down,Down,Up"
             "focus settings.tab2.*focus settings.terms")
+    # App audio through SDL's disk driver (a file instead of a speaker): interface ticks when focus moves,
+    # the Widgets chord at the sum of its three tones' level.
+    add_test(NAME e2e.tvui.interface_sounds COMMAND wnk-tvui "{\"sounds\":true}")
+    set_tests_properties(e2e.tvui.interface_sounds PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;SDL_AUDIODRIVER=disk;SDL_DISKAUDIOFILE=${CMAKE_CURRENT_BINARY_DIR}/e2e-ticks.raw;${WNK_LSAN};WNK_TVUI_KEYS=Right,Right,Left,Z,Z"
+            PASS_REGULAR_EXPRESSION "audio\\] \\([0-9]+\\) output disk, 48000 Hz.*interface sounds on.*sounds played: [1-9].*closed; peak level 0\\.1[0-9]"
+            FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
+            TIMEOUT 30)
+    add_test(NAME e2e.tvui.widgets_chord COMMAND wnk-tvui)
+    set_tests_properties(e2e.tvui.widgets_chord PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;SDL_AUDIODRIVER=disk;SDL_DISKAUDIOFILE=${CMAKE_CURRENT_BINARY_DIR}/e2e-chord.raw;${WNK_LSAN};WNK_TVUI_KEYS=Left,Down,Down,Right,Right,Right,Return,Z,Z,Z,Z,Z,Z,Z"
+            PASS_REGULAR_EXPRESSION "focus widgets.sound.*sound: chord.*closed; peak level 0\\.4[0-9]"
+            FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
+            TIMEOUT 30)
     # A still screen is drawn but not presented: under 100 presents (about 7; 13 under ASan) in ~7 s of
     # waiting, not 400.
     string(REPEAT "Z," 60 WNK_TVUI_IDLE)

@@ -77,6 +77,7 @@ These are enforced by the architecture, the packaging checks, and the way the TV
 | `app/` | `wnk::app::run`, `Delegate`, `Context`, lifecycle. Link `wnk_app`. |
 | `ui/` | View tree, layout, widgets, navigation, dialogs. Headers under `ui/include/wnk/ui/`. |
 | `i18n/` | Locale, catalogs with plural forms, number formatting. Reach it through `ctx.i18n()`. |
+| `audio/` | The app's own sounds: WAV/Ogg decoding, a mixer, the SDL audio device. Reach it through `ctx.audio()`. |
 | `input/` | `Action`, keymaps. App code includes `wnk/input/input.hpp` only. |
 | `focus/` | Used by `Ui`. Apps do not include it. |
 | `render/` | `Renderer` interface. Apps draw through widgets, or `ctx.renderer()` for a custom `View::draw`. |
@@ -243,6 +244,7 @@ int main(int argc, char **argv) {
 | `http` | false | Any `http://` or `https://` URL (API, images, streams). |
 | `images` | true | Posters and thumbnails. Set false for a player with no images. |
 | `storage` | false | Settings or session that must survive relaunch. Needs `database.operation`. |
+| `audio` | false | The app plays its own sounds (interface clicks, game effects, music). Not needed for video: the player has its own audio path. |
 | `double_back_exit` | true | Root Back shows "Press Back again to exit", second Back quits. |
 | `redraw_on_change` | true | Leave it. A frame is presented only when it differs from the one on screen (on the TV the compositor's work is most of a frame's cost); input and worker results wake the loop at once, anything that changes with time alone shows within `idle_probe_ms` (100 ms). Animations still run at the display rate. |
 | `allow_screensaver` | true | Leave it. The screensaver may start on idle screens (OLED burn-in); hold `ctx.keep_screen_on()` while video plays or a game runs. false blocks it for the whole run. |
@@ -294,6 +296,7 @@ stubbing a lookalike.
 | Search box, server address, user name, password | `TextField` (`set_password`, `set_max_length`, `set_on_change`, `set_on_submit`). OK or a click edits it: the shell opens LG's on-screen keyboard; Back ends editing. See Example C's Browse search. |
 | Modal confirm | `ui.show_dialog`. Focus is trapped; Back dismisses when `back_dismisses` is true; focus returns to the opener. |
 | Transient message | `ui.toast(text)`. |
+| Interface sounds, game effects, music | `AppConfig::audio = true`; `audio::load_sound(app_dir + "/sounds/x.ogg")` once, then `ctx.audio()->play(sound, {gain, pan, loop})` from any thread; `play_stream(fn)` for generated or streamed audio. Paused in the background. See Example B (Settings, Widgets). |
 | Keep the screen on during video, a slideshow or a game | Hold `ctx.keep_screen_on("video playing")` while it moves; `release()` on pause, end or error. See Example D. |
 | Busy and determinate progress | `Spinner`, `ProgressBar` (`set_value` / `set_indeterminate`). |
 | Section that changes with the D-pad but not with pointer hover | Example B `NavItem`: select on focus only when `ui.focus_source() != FocusSource::Pointer`; pointer selects on click. |
@@ -749,7 +752,7 @@ Say these are missing. Do not emulate them with a fake.
 | No scale or rotation | Focus "zoom" is the ring, not a scaled card. |
 | No complex-script shaping, no right-to-left layout | Arabic, Hebrew, and Indic runs will be wrong. CJK, Cyrillic and Greek are drawn (with a fallback face for CJK). |
 | No date or time formatting | `i18n` formats numbers only. The TV's system fonts for CJK are not yet seen from a Developer Mode app: bundle a fallback face if the app must show CJK. |
-| No audio-only UI component | Sound is the media backend's video plane plus audio, or nothing. |
+| No audio-only media player | Music files play through `audio/` (WAV, Ogg decoded whole); there is no streaming audio player with seek and metadata. |
 | No second window, no overlay window | One SDL window, one GLES context. |
 | No durable filesystem on Developer Mode webOS | Persist with DB8. |
 | `keymanager3` absent on webOS 6.5.3 | Secrets are plain envelopes there unless `protection()` says otherwise. |

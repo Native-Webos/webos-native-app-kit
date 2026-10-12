@@ -10,6 +10,8 @@
 // Pattern after mariotaku/commons-c platform/webos/luna-sync (MIT), with a timeout added.
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <string>
 
 namespace wnk::platform {
@@ -27,5 +29,29 @@ struct LunaReply {
 // for worker threads. `public_bus` selects the public (true) or private bus.
 LunaReply luna_call_sync(const std::string &uri, const std::string &payload, int timeout_ms = 3000,
                          bool public_bus = true);
+
+// A call that keeps replying (a Luna subscription, "subscribe":true in the payload). `on_reply` runs on
+// libhelpers' thread for every reply until the handle is closed or destroyed; it must not block. The
+// bus call itself is not cancelled (libhelpers has no cancel for HLunaServiceCall): closing only stops
+// the deliveries, and the small call state stays allocated for replies that may still come.
+class LunaSubscription {
+ public:
+    ~LunaSubscription() { close(); }
+    void close();
+    bool active() const;
+
+    struct State;
+
+ private:
+    friend std::unique_ptr<LunaSubscription> luna_subscribe(const std::string &, const std::string &,
+                                                            std::function<void(const std::string &)>, bool,
+                                                            std::string *);
+    std::shared_ptr<State> state_;
+};
+
+// Null with *error set when the call could not be made (not webOS, no libhelpers, refused).
+std::unique_ptr<LunaSubscription> luna_subscribe(const std::string &uri, const std::string &payload,
+                                                 std::function<void(const std::string &)> on_reply,
+                                                 bool public_bus = true, std::string *error = nullptr);
 
 }  // namespace wnk::platform

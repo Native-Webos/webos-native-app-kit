@@ -95,7 +95,74 @@ bool on_reply(LSHandle *, LSMessage *reply, void *ctx) {
     return true;
 }
 
+// A subscription's state: shared by the handle and the (leaked) call box, so a reply after close()
+// finds it alive and sees `open == false`.
+struct SubBox {
+    union {
+        HContext ctx;
+        unsigned char placeholder[128];
+    } base;
+    std::shared_ptr<LunaSubscription::State> *state;  // heap-held, so the box stays standard-layout
+};
+static_assert(std::is_standard_layout<SubBox>::value, "SubBox must be standard-layout");
+
 }  // namespace
+
+struct LunaSubscription::State {
+    std::mutex mutex;
+    bool open = true;
+    std::function<void(const std::string &)> on_reply;
+};
+
+void LunaSubscription::close() {
+    if (!state_) return;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->open = false;
+    state_->on_reply = nullptr;
+}
+
+bool LunaSubscription::active() const {
+    if (!state_) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->open;
+}
+
+namespace {
+bool on_sub_reply(LSHandle *, LSMessage *reply, void *ctx) {
+    LunaSubscription::State &st = **reinterpret_cast<SubBox *>(ctx)->state;
+    const char *text = helpers().message(reply);
+    std::lock_guard<std::mutex> lock(st.mutex);
+    if (st.open && st.on_reply) st.on_reply(text != nullptr ? text : "");
+    return true;
+}
+}  // namespace
+
+std::unique_ptr<LunaSubscription> luna_subscribe(const std::string &uri, const std::string &payload,
+                                                 std::function<void(const std::string &)> on_reply, bool public_bus,
+                                                 std::string *error) {
+    auto set_error = [&](const std::string &e) {
+        if (error != nullptr) *error = e;
+        return nullptr;
+    };
+    if (!kIsWebOS) return set_error("not a webOS build");
+    const Helpers &h = helpers();
+    if (h.call == nullptr) return set_error(h.error);
+    auto sub = std::unique_ptr<LunaSubscription>(new LunaSubscription());
+    sub->state_ = std::make_shared<LunaSubscription::State>();
+    sub->state_->on_reply = std::move(on_reply);
+    auto *box = new SubBox();  // never freed: libhelpers may call back for as long as the bus call lives
+    std::memset(&box->base, 0, sizeof box->base);
+    box->state = new std::shared_ptr<LunaSubscription::State>(sub->state_);
+    box->base.ctx.callback = on_sub_reply;
+    box->base.ctx.multiple = 1;
+    box->base.ctx.pub = public_bus ? 1 : 0;
+    if (h.call(uri.c_str(), payload.c_str(), &box->base.ctx) != 0) {
+        delete box->state;
+        delete box;
+        return set_error("HLunaServiceCall returned an error");
+    }
+    return sub;
+}
 
 LunaReply luna_call_sync(const std::string &uri, const std::string &payload, int timeout_ms, bool public_bus) {
     LunaReply r;

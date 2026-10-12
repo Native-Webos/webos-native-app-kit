@@ -33,6 +33,11 @@
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"ac3": false}                         never re-encode audio to AC-3 (audio Starfish cannot take
 //                                          then sends the file to NDL, as before)
+//   {"drmTest": {"drm": "playready", "uri": ..., "la": ..., "transport": "MPEG-DASH", "type": "media"}}
+//                                          ("drm": "none" loads the URI the same way without DRM;
+//                                          "transport": "" leaves mediaTransportType out)
+//                                          experiment: protected playback through LG's DRM service and
+//                                          the platform pipeline (docs/research/DRM-FEASIBILITY.md)
 //   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..16)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
@@ -45,6 +50,7 @@
 #include "wnk/media/pacing_backend.hpp"
 #include "wnk/media/starfish_backend.hpp"
 #include "wnk/media/subtitle_view.hpp"
+#include "wnk/platform/luna.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/ui/navigation.hpp"
 #include "wnk/ui/widgets.hpp"
@@ -52,10 +58,17 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <thread>
+#include <optional>
+#include <mutex>
+#include <functional>
+#include <atomic>
 #include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <dlfcn.h>
 
 namespace {
 
@@ -445,6 +458,213 @@ class PlayerScreen : public Screen {
     size_t next_audio_ = 0;
 };
 
+// ---- experiment: DRM through the platform pipeline -----------------------------------------------
+
+// Widevine and PlayReady never give the app a key, so they cannot go through the kit's player. This
+// screen drives LG's own path instead and logs every reply (docs/research/DRM-FEASIBILITY.md):
+//   SDL exported window → drm/load → drm/sendDrmMessage (licence initiator) →
+//   com.webos.media/load {uri, option.drm.clientId, windowId} → subscribe → play
+// Nothing here is the kit's API; it is an experiment to learn whether the path works at all.
+struct DrmTest {
+    std::string uri = "https://test.playready.microsoft.com/media/profficialsite/tearsofsteel_4k.ism/manifest.mpd";
+    std::string drm = "playready";
+    std::string license_url = "https://test.playready.microsoft.com/service/rightsmanager.asmx?cfg=(persist:false,sl:150)";
+    std::string transport = "MPEG-DASH";  // option.mediaTransportType
+    std::string media_type = "media";     // the load call's "type"
+};
+
+class DrmTestScreen : public Screen {
+ public:
+    DrmTestScreen(wnk::app::Context &ctx, DrmTest test) : Screen("DRM experiment"), ctx_(ctx), test_(std::move(test)) {
+        name = "drmtest";
+        auto &col = add<Column>(14);
+        col.set_align(Align::Stretch, Align::End);
+        col.set_padding({80, 40, 80, 60});
+        col.set_background(wnk::render::Color::hex(0x000000B0));
+        col.add<Label>("DRM experiment: " + test_.drm + " through the platform pipeline", TextRole::Title);
+        col.add<Label>(test_.uri, TextRole::Small).set_muted(true);
+        drm_ = &col.add<Label>("DRM: starting");
+        media_ = &col.add<Label>("Media: waiting");
+        event_ = &col.add<Label>("", TextRole::Small);
+        event_->set_muted(true).set_max_lines(2);
+        col.add<Label>("Back stops", TextRole::Small).set_muted(true);
+        st_ = std::make_shared<State>();
+    }
+
+    void on_show(Ui &ui) override {
+        ui.set_clear_color(wnk::render::kTransparent);
+        if (started_) return;
+        started_ = true;
+        // The video window, as the Starfish backend makes it (SDL-webOS exports it to the media stack).
+        using CreateFn = const char *(*)(int);
+        using SetFn = int (*)(const char *, void *, void *);
+        auto create = reinterpret_cast<CreateFn>(dlsym(RTLD_DEFAULT, "SDL_webOSCreateExportedWindow"));
+        auto set = reinterpret_cast<SetFn>(dlsym(RTLD_DEFAULT, "SDL_webOSSetExportedWindow"));
+        if (create != nullptr) {
+            if (const char *id = create(0)) st_->window_id = id;
+        }
+        if (set != nullptr && !st_->window_id.empty()) {
+            struct { int x, y, w, h; } src{0, 0, 1920, 1080}, dst{0, 0, 1920, 1080};
+            WNK_LOGI(kCat, "drmtest: exported window %s, set rv=%d", st_->window_id.c_str(), set(st_->window_id.c_str(), &src, &dst));
+        } else {
+            WNK_LOGW(kCat, "drmtest: no exported window (the picture will not be visible)");
+        }
+        auto st = st_;
+        auto &main = ctx_.dispatcher();
+        const DrmTest t = test_;
+        const std::string app_id = ctx_.launch().app_id;
+        auto post = [&main, st](std::function<void(State &)> fn) {
+            main.post([st, fn = std::move(fn)] {
+                if (st->screen_alive) fn(*st);
+            });
+        };
+        ctx_.pool().submit([st, t, app_id, post](const wnk::async::CancellationToken &) {
+            using wnk::platform::luna_call_sync;
+            using nlohmann::json;
+            auto log = [](const char *what, const wnk::platform::LunaReply &r) {
+                WNK_LOGI(kCat, "drmtest: %s -> %s %s %s", what, wnk::platform::luna_status_name(r.status), r.payload.c_str(), r.detail.c_str());
+                return json::parse(r.payload.empty() ? "{}" : r.payload, nullptr, false);
+            };
+            std::string client, err;
+            if (t.drm != "none") {
+            const json loaded = log("drm/load", luna_call_sync("luna://com.webos.service.drm/load",
+                                                                json{{"drmType", t.drm}, {"appId", app_id}}.dump(), 8000));
+            if (!loaded.is_object() || !loaded.value("returnValue", false) || !loaded.contains("clientId")) {
+                post([](State &s) { s.drm_text = "DRM: load refused (see the log)"; });
+                return;
+            }
+            client = loaded["clientId"].get<std::string>();
+            {
+                std::lock_guard<std::mutex> lock(st->m);
+                st->client_id = client;
+            }
+            auto rights = wnk::platform::luna_subscribe(
+                "luna://com.webos.service.drm/getRightsError", json{{"clientId", client}, {"subscribe", true}}.dump(),
+                [](const std::string &r) { WNK_LOGI(kCat, "drmtest: rights event %s", r.c_str()); }, true, &err);
+            if (!rights) WNK_LOGW(kCat, "drmtest: getRightsError subscribe failed: %s", err.c_str());
+            if (!st->keep(std::move(rights))) return;
+            if (t.drm == "playready") {
+                const std::string initiator =
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?><PlayReadyInitiator xmlns=\"http://schemas.microsoft.com/DRM/2007/03/protocols/\">"
+                    "<LicenseServerUriOverride><LA_URL>" + t.license_url + "</LA_URL></LicenseServerUriOverride></PlayReadyInitiator>";
+                const json sent = log("drm/sendDrmMessage", luna_call_sync("luna://com.webos.service.drm/sendDrmMessage",
+                    json{{"clientId", client}, {"msgType", "application/vnd.ms-playready.initiator+xml"}, {"msg", initiator},
+                         {"drmSystemId", "urn:dvb:casystemid:19219"}}.dump(), 15000));
+                const bool ok = sent.is_object() && sent.value("returnValue", false);
+                post([ok, sent](State &s) {
+                    s.drm_text = std::string("DRM: client loaded, licence initiator ") + (ok ? "accepted" : "refused: " + sent.dump());
+                });
+            } else {
+                post([](State &s) { s.drm_text = "DRM: client loaded (no licence message for this type)"; });
+            }
+            }  // drm != none
+            json option = {{"appId", app_id}};
+            if (!t.transport.empty()) option["mediaTransportType"] = t.transport;
+            if (t.drm != "none") option["drm"] = {{"type", t.drm}, {"clientId", client}};
+            if (!st->window_id.empty()) option["windowId"] = st->window_id;
+            const json load = {{"uri", t.uri}, {"type", t.media_type}, {"payload", {{"option", option}}}};
+            const json media = log("media/load", luna_call_sync("luna://com.webos.media/load", load.dump(), 15000));
+            if (!media.is_object() || !media.value("returnValue", false) || !media.contains("mediaId")) {
+                post([media](State &s) { s.media_text = "Media: load refused: " + media.dump(); });
+                return;
+            }
+            const std::string media_id = media["mediaId"];
+            {
+                std::lock_guard<std::mutex> lock(st->m);
+                st->media_id = media_id;
+            }
+            auto events = wnk::platform::luna_subscribe(
+                "luna://com.webos.media/subscribe", json{{"mediaId", media_id}}.dump(),
+                [st, post](const std::string &r) {
+                    const json e = json::parse(r, nullptr, false);
+                    const bool time = e.is_object() && e.contains("currentTime");
+                    if (time) {
+                        const int64_t ms = e["currentTime"].is_number() ? e["currentTime"].get<int64_t>() : 0;
+                        if (ms / 2000 != st->last_logged_ms.exchange(ms) / 2000) WNK_LOGI(kCat, "drmtest: currentTime %lld ms", static_cast<long long>(ms));
+                        post([ms](State &s) { s.media_text = "Media: playing, " + std::to_string(ms / 1000) + " s"; });
+                    } else {
+                        WNK_LOGI(kCat, "drmtest: media event %s", r.c_str());
+                        post([r](State &s) { s.event_text = r.substr(0, 240); });
+                    }
+                }, true, &err);
+            if (!events) WNK_LOGW(kCat, "drmtest: media subscribe failed: %s", err.c_str());
+            if (!st->keep(std::move(events))) return;
+            post([](State &s) { s.media_text = "Media: loaded, starting"; });
+            log("media/play", luna_call_sync("luna://com.webos.media/play", json{{"mediaId", media_id}}.dump(), 8000));
+        });
+    }
+
+    void on_hide(Ui &ui) override { ui.set_clear_color(std::nullopt); }
+
+    bool on_back(Ui &) override {
+        stop();
+        return false;
+    }
+
+    void stop() {
+        if (!st_ || !st_->screen_alive) return;
+        st_->screen_alive = false;
+        {
+            // Closed now, on the main thread: no event may reach the dispatcher after the app is gone.
+            std::lock_guard<std::mutex> lock(st_->m);
+            st_->stopped = true;
+            for (auto &sub : st_->subs) sub->close();
+        }
+        auto st = st_;
+        // Teardown off the main thread (Luna calls block); the state outlives the screen.
+        std::thread([st] {
+            std::string media, client;
+            {
+                std::lock_guard<std::mutex> lock(st->m);
+                media = st->media_id;
+                client = st->client_id;
+            }
+            if (!media.empty()) {
+                const auto r = wnk::platform::luna_call_sync("luna://com.webos.media/unload", "{\"mediaId\":\"" + media + "\"}", 5000);
+                WNK_LOGI(kCat, "drmtest: media/unload -> %s", r.payload.c_str());
+            }
+            if (!client.empty()) {
+                const auto r = wnk::platform::luna_call_sync("luna://com.webos.service.drm/unload", "{\"clientId\":\"" + client + "\"}", 5000);
+                WNK_LOGI(kCat, "drmtest: drm/unload -> %s", r.payload.c_str());
+            }
+            using DestroyFn = void (*)(const char *);
+            auto destroy = reinterpret_cast<DestroyFn>(dlsym(RTLD_DEFAULT, "SDL_webOSDestroyExportedWindow"));
+            if (destroy != nullptr && !st->window_id.empty()) destroy(st->window_id.c_str());
+        }).detach();
+    }
+
+ protected:
+    void update(Ui &, float) override {
+        drm_->set_text(st_->drm_text);
+        media_->set_text(st_->media_text);
+        event_->set_text(st_->event_text);
+    }
+
+ private:
+    struct State {
+        std::mutex m;
+        std::string window_id, client_id, media_id;  // ids guarded by m once the worker runs
+        std::vector<std::unique_ptr<wnk::platform::LunaSubscription>> subs;  // guarded by m
+        bool stopped = false;                                              // guarded by m
+        std::atomic<int64_t> last_logged_ms{-1};
+        // Keeps a subscription; after stop() it is closed at once. False when stopped.
+        bool keep(std::unique_ptr<wnk::platform::LunaSubscription> sub) {
+            std::lock_guard<std::mutex> lock(m);
+            if (sub && stopped) sub->close();
+            if (sub) subs.push_back(std::move(sub));
+            return !stopped;
+        }
+        // Main thread only.
+        bool screen_alive = true;
+        std::string drm_text = "DRM: starting", media_text = "Media: waiting", event_text;
+    };
+    wnk::app::Context &ctx_;
+    DrmTest test_;
+    std::shared_ptr<State> st_;
+    Label *drm_, *media_, *event_;
+    bool started_ = false;
+};
+
 // ---- clip list -------------------------------------------------------------------------------------
 
 class HomeScreen : public Screen {
@@ -453,7 +673,9 @@ class HomeScreen : public Screen {
                const std::vector<Stream> &streams)
         : Screen("home"), ctx_(ctx), nav_(nav), settings_(std::move(settings)) {
         name = "home";
-        auto &col = add<Column>(20);
+        auto &scroll = add<ScrollView>();
+        scroll.set_width(Dim::fill()).set_height(Dim::fill());
+        auto &col = scroll.add<Column>(20);
         col.set_padding({140, 70, 140, 50});
         col.add<Label>("Native playback", TextRole::Title);
         col.add<Label>("Hardware decoding through LG's Starfish or NDL, demuxed by the kit's bundled FFmpeg. Each clip flashes "
@@ -475,11 +697,21 @@ class HomeScreen : public Screen {
             b.set_align(Align::Start, Align::Start);
             b.name = "stream" + std::to_string(i);
         }
+        list.add<Label>("Experiments", TextRole::Small).set_muted(true).set_padding({0, 12, 0, 0});
+        list.add<Button>("PlayReady through the platform pipeline   —   Microsoft test stream, licence from LG's DRM service",
+                         [this](Ui &ui) { drm_test(ui, DrmTest{}); })
+            .set_align(Align::Start, Align::Start)
+            .name = "drmtest";
         std::string info = std::string("Decoder: ") + (wnk::platform::kIsWebOS ? "NDL DirectMedia v2" : "none on the host (pacing backend, no picture)");
         info += "   ·   PTS unit: ";
         info += settings_.pts_unit == PtsUnit::Milliseconds ? "ms" : "µs";
         info += "   ·   " + FfmpegSource::version();
         col.add<Label>(info, TextRole::Small).set_muted(true).set_padding({0, 30, 0, 0});
+    }
+
+    void drm_test(Ui &ui, DrmTest t) {
+        WNK_LOGI(kCat, "drm experiment: %s %s via %s", t.drm.c_str(), t.uri.c_str(), t.transport.c_str());
+        nav_.push(ui, std::make_unique<DrmTestScreen>(ctx_, std::move(t)));
     }
 
     void play(Ui &ui, const std::string &uri, const std::string &title, const std::string &keys = {}) {
@@ -506,6 +738,7 @@ class Player : public wnk::app::Delegate {
         if (!s.http) WNK_LOGW(kCat, "no HTTP streaming: %s", curl_error.c_str());
         std::string direct_uri;
         int autoplay = -1;
+        std::optional<DrmTest> drm_test;
         const auto params = nlohmann::json::parse(ctx.launch().params_json.empty() ? "{}" : ctx.launch().params_json, nullptr, false);
         if (params.is_object()) {
             if (params.contains("ptsUnit") && params["ptsUnit"] == "ms") s.pts_unit = PtsUnit::Milliseconds;
@@ -537,6 +770,15 @@ class Player : public wnk::app::Delegate {
             timed("seeks", &s.seeks);
             timed("audio", &s.audio_switches);
             if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
+            if (params.contains("drmTest") && params["drmTest"].is_object()) {
+                const auto &d = params["drmTest"];
+                drm_test = DrmTest{};
+                drm_test->uri = d.value("uri", drm_test->uri);
+                drm_test->drm = d.value("drm", drm_test->drm);
+                drm_test->license_url = d.value("la", drm_test->license_url);
+                drm_test->transport = d.value("transport", drm_test->transport);
+                drm_test->media_type = d.value("type", drm_test->media_type);
+            }
             if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
         }
         if (wnk::platform::kIsWebOS) {
@@ -584,7 +826,9 @@ class Player : public wnk::app::Delegate {
         nav_ = &ui.root().add<Navigator>();
         home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(ctx, *nav_, s, clips, streams)));
         const int n_clips = static_cast<int>(clips.size());
-        if (!direct_uri.empty()) {
+        if (drm_test) {
+            home_->drm_test(ui, *drm_test);
+        } else if (!direct_uri.empty()) {
             home_->play(ui, direct_uri, direct_uri.substr(direct_uri.find_last_of('/') + 1));
         } else if (autoplay >= 0 && autoplay < n_clips) {
             home_->play(ui, "file://" + s.clips_dir + "/" + clips[autoplay].file, clips[autoplay].title);
@@ -598,6 +842,7 @@ class Player : public wnk::app::Delegate {
         // Leaving the app: stop decoding, release NDL and tell it.
         if (t.to == wnk::app::State::Suspended) {
             if (auto *p = dynamic_cast<PlayerScreen *>(nav_->top())) p->pause_for_background();
+            if (auto *d = dynamic_cast<DrmTestScreen *>(nav_->top())) d->stop();
             if (wnk::platform::kIsWebOS) NdlBackend::set_app_foreground(false);
         } else if (t.to == wnk::app::State::Resuming && wnk::platform::kIsWebOS) {
             NdlBackend::set_app_foreground(true);
@@ -608,6 +853,7 @@ class Player : public wnk::app::Delegate {
 
     void on_stop(wnk::app::Context &) override {
         if (auto *p = dynamic_cast<PlayerScreen *>(nav_ != nullptr ? nav_->top() : nullptr)) p->stop();
+        if (auto *d = dynamic_cast<DrmTestScreen *>(nav_ != nullptr ? nav_->top() : nullptr)) d->stop();
     }
 
  private:

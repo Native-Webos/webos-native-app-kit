@@ -773,6 +773,15 @@
       "method": "Example A 0.8.0 launch {\"drmProbe\": true}: luna://com.webos.service.drm load / getRightsError / unload for widevine and playready, from the app's own bus identity (Developer Mode, not rooted)",
       "evidence": "load widevine and load playready each returned {\"returnValue\":true,\"clientId\":...}; unload returned true; getRightsError without subscribe answered 504",
       "limitations": "only the first step: licence acquisition (sendDrmMessage) and protected playback through uMediaServer are not tried yet; see docs/research/DRM-FEASIBILITY.md"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "drm.playready_platform_pipeline",
+      "result": "supported",
+      "method": "Example D 0.17.0 {\"drmTest\": ...}: SDL exported window, luna drm/load playready, drm/sendDrmMessage (PlayReady initiator, LA_URL Microsoft test server), com.webos.media/load {uri, type media, option {appId, windowId, drm {type, clientId}, mediaTransportType}}, subscribe, play",
+      "evidence": "Smooth Streaming SuperSpeedway_720 (MSIIS): DRM_RESULT 0, loadCompleted, playing, videoInfo 1280x720 H.264 23.976 fps on VDEC, no rights or pipeline errors. Clear DASH (Shaka angel-one, drm none, MPEG-DASH): playing. Tears of Steel 4K PlayReady DASH (MPEG-DASH): DRM_RESULT 0, then 'pipeline died abnormally' after 3.8 s with nothing buffered",
+      "limitations": "shown for PlayReady Smooth Streaming only: PlayReady DASH (Tears of Steel 4K) died, Widevine not tried; picture not yet confirmed by eye; the platform pipeline replaces the kit's player (no kit sources, controller or subtitles)"
     }
   ]
 }

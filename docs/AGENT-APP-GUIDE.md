@@ -747,6 +747,10 @@ tools/launch.sh <appid>
 tools/logs.sh <appid>
 ```
 
+Before submitting to LG's store, work through `docs/LG-APP-CHECKLIST.md`:
+`tools/lifecycle-check.sh <appid>` checks start, relaunch, background, foreground and close from the
+event log, and `tools/soak.sh <appid> --hours 4` reports memory growth and crashes over a long run.
+
 Record the model, webOS release, and date in `docs/compatibility/records.json` if you add a device
 result, then run `tools/check-compat.py`. That checker rejects serials and MACs.
 

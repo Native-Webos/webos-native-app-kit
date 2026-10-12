@@ -663,6 +663,7 @@ class Shell final : public Context {
             const float events_ms = static_cast<float>(ms_since(t_events));
 
             work += dispatcher_->drain(32, std::chrono::milliseconds(4));
+            heartbeat(frames, drawn);
             sync_text_input();
             for (const auto &a : pad_nav_.tick(SDL_GetTicks())) {
                 handle_action(a);
@@ -1186,6 +1187,18 @@ class Shell final : public Context {
         }
     }
 
+    // Once a minute, whatever the screen does (a still screen presents nothing and logs no perf lines):
+    // memory and frame counts for long runs (tools/soak.sh).
+    void heartbeat(uint64_t frames, uint64_t drawn) {
+        const Uint32 now = SDL_GetTicks();
+        if (now - last_heartbeat_ < 60000) return;
+        last_heartbeat_ = now;
+        const auto mem = diagnostics::process_memory();
+        WNK_LOGI("heartbeat", "uptime %u s, %s, rss %.1f MB, presented %llu, drawn %llu, views %zu", now / 1000,
+                 state_name(lifecycle_.state()), mem.rss_bytes / 1048576.0, static_cast<unsigned long long>(frames),
+                 static_cast<unsigned long long>(drawn), ui_->stats().views);
+    }
+
     void log_perf(uint64_t frames, uint64_t drawn) {
         const auto s = metrics_.summary(300);
         const auto rs = renderer_->stats();
@@ -1270,6 +1283,7 @@ class Shell final : public Context {
     bool sdl_ = false;
     bool quit_requested_ = false;
     bool text_input_on_ = false;  // SDL text input started for a view
+    Uint32 last_heartbeat_ = 0;
     Uint32 wake_event_ = static_cast<Uint32>(-1);
     char *(*take_relaunch_)() = nullptr;
     // System font fallback.

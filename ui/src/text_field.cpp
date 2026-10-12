@@ -110,6 +110,13 @@ TextField &TextField::set_on_submit(TextHandler h) {
     return *this;
 }
 
+std::string TextField::accessible_text() const {
+    if (!accessible_label.empty()) return accessible_label;
+    const std::string what = placeholder_.empty() ? "text field" : placeholder_ + ", text field";
+    if (password_) return what + ", password, " + std::to_string(code_points(text_)) + " characters";
+    return text_.empty() ? what + ", empty" : what + ", " + text_;
+}
+
 std::string TextField::display_text() const { return password_ ? bullets(code_points(text_)) : text_; }
 
 void TextField::begin_editing(Ui &ui) {

@@ -31,8 +31,11 @@ class FormRow : public View {
     FormRow &set_label(std::string label);
     FormRow &set_description(std::string text);
     const std::string &label() const { return label_; }
+    std::string accessible_text() const override;  // label, value (value_text), description
 
  protected:
+    // What the value says aloud ("on", "120 %", "1080p").
+    virtual std::string value_text_for_speech() const { return {}; }
     Size measure_content(Ui &ui, Size available) override;
     void draw(Ui &ui) override;
     // The value part, drawn right-aligned inside `area` (the content rectangle's right side).
@@ -59,6 +62,7 @@ class Toggle : public FormRow {
     void update(Ui &ui, float dt) override;
     void draw_value(Ui &ui, const Rect &area) override;
     float value_width(Ui &ui) const override;
+    std::string value_text_for_speech() const override { return on_ ? "on" : "off"; }
 
  private:
     bool on_;
@@ -86,6 +90,7 @@ class Slider : public FormRow {
     void update(Ui &ui, float dt) override;
     void draw_value(Ui &ui, const Rect &area) override;
     float value_width(Ui &ui) const override;
+    std::string value_text_for_speech() const override { return value_text(); }
 
  private:
     float snap(float v) const;
@@ -112,6 +117,9 @@ class Choice : public FormRow {
     bool on_action(Ui &ui, const input::ActionEvent &e) override;
     void draw_value(Ui &ui, const Rect &area) override;
     float value_width(Ui &ui) const override;
+    std::string value_text_for_speech() const override {
+        return selected_ >= 0 ? options_[static_cast<size_t>(selected_)] : std::string();
+    }
 
  private:
     void change(Ui &ui, int index);
@@ -131,6 +139,7 @@ class ValueRow : public FormRow {
     bool on_action(Ui &ui, const input::ActionEvent &e) override;
     void draw_value(Ui &ui, const Rect &area) override;
     float value_width(Ui &ui) const override;
+    std::string value_text_for_speech() const override { return value_; }
 
  private:
     std::string value_;
@@ -164,6 +173,7 @@ class TextView : public View {
     explicit TextView(std::string text = {}, TextRole role = TextRole::Body);
     TextView &set_text(std::string text);
     const std::string &text() const;
+    std::string accessible_text() const override;
     float max_scroll() const { return max_scroll_; }
     float scroll() const { return scroll_.target; }
     Point scroll_offset() const override { return {0, scroll_.value}; }

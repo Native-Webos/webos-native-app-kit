@@ -49,11 +49,21 @@ bool parse_connection_status(std::string_view reply_json, NetworkStatus *out);
 // The host's view (no connection manager): any non-loopback interface up with an IPv4 address.
 NetworkStatus host_network_status();
 
+// Audio Guidance (the TV reads out what is focused): a getSystemSettings {"category":"option",
+// "keys":["audioGuidance"]} reply or update. False if the reply has no such setting.
+bool parse_audio_guidance(std::string_view reply_json, bool *on);
+// com.webos.service.tts/speak (webOS OSE): `clear` interrupts what is being read.
+std::string speak_payload(const std::string &text, const std::string &language, bool clear = true);
+
 // ---- calls (blocking; use a worker) ----------------------------------------------------------------
 
 LunaReply launch_app(const std::string &app_id, const std::string &params_json = {});
 LunaReply open_url(const std::string &url);
 LunaReply system_toast(const std::string &source_id, const std::string &message);
+
+LunaReply speak(const std::string &text, const std::string &language, bool clear = true);
+// The Audio Guidance setting now and on every change (libhelpers' thread).
+std::unique_ptr<LunaSubscription> subscribe_audio_guidance(std::function<void(bool on)> on_change, std::string *error = nullptr);
 
 // Connection status updates on libhelpers' thread (post them to the main thread). Null with *error
 // off webOS or when the service refuses.

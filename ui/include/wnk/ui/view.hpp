@@ -162,6 +162,11 @@ class View {
     // The system closed the keyboard (the viewer dismissed it); text input has already ended.
     virtual void on_text_input_closed(Ui &ui);
 
+    // What a screen reader says when the view gets focus (Audio Guidance): its label and state, never
+    // a secret. Empty: nothing to say. The default reads `accessible_label` if set, else nothing.
+    virtual std::string accessible_text() const;
+    std::string accessible_label;  // overrides what a widget would say about itself
+
     // Draws this view and its subtree (background, draw(), children, draw_over()).
     void draw_tree(Ui &ui);
 

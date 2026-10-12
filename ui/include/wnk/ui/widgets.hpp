@@ -173,6 +173,7 @@ class Button : public View {
     Button &set_on_click(ClickHandler h);
     const std::string &text() const { return text_; }
     bool click(Ui &ui);  // as if OK was pressed; false when disabled or without a handler
+    std::string accessible_text() const override;
 
  protected:
     Size measure_content(Ui &ui, Size available) override;
@@ -190,6 +191,7 @@ class Card : public View {
  public:
     Card(std::string title, std::string image_url, std::string subtitle = {});
     Card &set_on_click(ClickHandler h);
+    std::string accessible_text() const override;
     ImageView &image() { return *image_; }
     Label &title() { return *title_; }
     float image_aspect = 1.5f;  // height / width of the image area
@@ -235,6 +237,7 @@ class TextField : public View {
     void end_editing(Ui &ui);
     // What draw() shows for the text (bullets in password mode).
     std::string display_text() const;
+    std::string accessible_text() const override;  // never the content of a password field
 
  protected:
     Size measure_content(Ui &ui, Size available) override;

@@ -78,7 +78,7 @@ Sources:
 
 | Gap | Evidence | What the kit would add |
 |---|---|---|
-| **Audio guidance** (spoken focus) | RetroArch builds with accessibility (TTS) on webOS `[SRC]`; LG's own apps speak the focused item when Audio Guidance is on. | Read the setting; speak focus changes through the TV's TTS service (needs a device check). |
+| **Audio guidance** (spoken focus). **Done:** `View::accessible_text` for every widget, the shell follows `audioGuidance` and speaks through `com.webos.service.tts/speak`; host-tested through logs. The setting key and TTS service come from documentation and are not yet seen on a TV; a value changed in place is spoken only on the next focus move. | RetroArch builds with accessibility (TTS) on webOS `[SRC]`; LG's own apps speak the focused item when Audio Guidance is on. | Read the setting; speak focus changes through the TV's TTS service (needs a device check). |
 | **LG App Self Checklist** | PlxNative keeps a per-row record and still owes device runs (lifecycle matrix, 4-hour soak, network failure, IR remote, HOME/LIVE keys) `[SRC]`. | A checklist template in the kit and soak and lifecycle scripts built on `tools/launch.sh`. |
 | **Vector icons** | PlxNative renders SVG (`gfx/src/svg.rs`) `[SRC]`. | SVG or an icon font for sharp icons at any size. |
 

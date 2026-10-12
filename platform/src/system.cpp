@@ -15,6 +15,8 @@ namespace {
 constexpr const char *kLaunch = "luna://com.webos.applicationManager/launch";
 constexpr const char *kToast = "luna://com.webos.notification/createToast";
 constexpr const char *kStatus = "luna://com.webos.service.connectionmanager/getStatus";
+constexpr const char *kSettings = "luna://com.webos.settingsservice/getSystemSettings";
+constexpr const char *kSpeak = "luna://com.webos.service.tts/speak";
 constexpr int kTimeoutMs = 3000;
 
 bool connected_state(const nlohmann::json &j, const char *key) {
@@ -90,6 +92,35 @@ NetworkStatus host_network_status() {
     freeifaddrs(list);
     s.internet = s.wired || s.wifi;  // the host cannot tell; a route is assumed
     return s;
+}
+
+bool parse_audio_guidance(std::string_view reply_json, bool *on) {
+    const auto j = nlohmann::json::parse(reply_json, nullptr, false);
+    if (!j.is_object() || !j.contains("settings") || !j["settings"].is_object()) return false;
+    const auto &s = j["settings"];
+    if (!s.contains("audioGuidance") || !s["audioGuidance"].is_string()) return false;
+    *on = s["audioGuidance"].get<std::string>() == "on";
+    return true;
+}
+
+std::string speak_payload(const std::string &text, const std::string &language, bool clear) {
+    nlohmann::json j = {{"text", text}, {"clear", clear}};
+    if (!language.empty()) j["language"] = language;
+    return j.dump();
+}
+
+LunaReply speak(const std::string &text, const std::string &language, bool clear) {
+    return luna_call_sync(kSpeak, speak_payload(text, language, clear), kTimeoutMs);
+}
+
+std::unique_ptr<LunaSubscription> subscribe_audio_guidance(std::function<void(bool)> on_change, std::string *error) {
+    return luna_subscribe(
+        kSettings, R"({"category":"option","keys":["audioGuidance"],"subscribe":true})",
+        [on_change = std::move(on_change)](const std::string &reply) {
+            bool on = false;
+            if (parse_audio_guidance(reply, &on)) on_change(on);
+        },
+        true, error);
 }
 
 LunaReply launch_app(const std::string &app_id, const std::string &params_json) {

@@ -10,6 +10,7 @@
 #include "wnk/platform/luna.hpp"
 #include "wnk/render/gles2_renderer.hpp"
 #include "wnk/ui/image_source.hpp"
+#include "wnk/ui/widgets.hpp"
 
 #include <SDL.h>
 #include <nlohmann/json.hpp>
@@ -545,6 +546,7 @@ class Shell final : public Context {
         take_relaunch_ = reinterpret_cast<char *(*)()>(dlsym(RTLD_DEFAULT, "SDL_webOSTakeRelaunchMessage"));
         probe_capabilities(mode, gpu);
         watch_network();
+        watch_audio_guidance();
         delegate_ = factory();
         if (!delegate_) return fail("no delegate");
         delegate_->on_start(*this);
@@ -994,6 +996,50 @@ class Shell final : public Context {
             });
     }
 
+    // Audio Guidance: follow the TV's setting, or {"wnkSpeak":true} in the launch parameters.
+    void watch_audio_guidance() {
+        const auto params = nlohmann::json::parse(launch_.params_json.empty() ? "{}" : launch_.params_json, nullptr, false);
+        if (params.is_object() && params.value("wnkSpeak", false)) {
+            set_speech(true, "launch parameters");
+            return;
+        }
+        if constexpr (!platform::kIsWebOS) return;
+        std::string err;
+        guidance_sub_ = platform::subscribe_audio_guidance(
+            [this, d = dispatcher_.get(), weak = life_.weak()](bool on) {
+                d->post([this, weak, on] {
+                    if (weak.alive()) set_speech(on, "Audio Guidance setting");
+                });
+            },
+            &err);
+        if (!guidance_sub_) caps_.set("accessibility.audio_guidance", diagnostics::Support::Unsupported, err);
+    }
+
+    void set_speech(bool on, const char *why) {
+        if (on == speech_) return;
+        speech_ = on;
+        WNK_LOGI("speech", "focus is %s (%s)", on ? "spoken" : "not spoken", why);
+        note_capability("accessibility.audio_guidance", diagnostics::Support::Supported, on ? "on" : "off");
+        if (on && ui_ && ui_->focused() != nullptr) say(ui_->focused()->accessible_text(), dynamic_cast<ui::TextField *>(ui_->focused()) == nullptr);
+    }
+
+    // The newest text wins: a request still queued when focus has moved on is dropped.
+    // `loggable` is false for what the viewer typed (a user name, a search): it is spoken, not logged.
+    void say(const std::string &text, bool loggable) {
+        if (text.empty()) return;
+        const uint64_t seq = ++speech_seq_;
+        WNK_LOGI("speech", "say \"%s\"", loggable ? text.c_str() : "(text field)");
+        auto latest = speech_latest_;
+        latest->store(seq);
+        const std::string language = catalog_.locale().tag();
+        pool_->submit([text, language, seq, latest](const async::CancellationToken &) {
+            if (latest->load() != seq) return;
+            const auto r = platform::speak(text, language, true);
+            std::string why;
+            if (r.status == platform::LunaStatus::Ok && !platform::reply_ok(r.payload, &why)) WNK_LOGW("speech", "tts: %s", why.c_str());
+        });
+    }
+
     // Network status: the connection manager's subscription on the TV, the interfaces on the host.
     void watch_network() {
         if constexpr (!platform::kIsWebOS) {
@@ -1130,6 +1176,7 @@ class Shell final : public Context {
         const ui::ViewId id = f != nullptr ? f->id() : 0;
         if (id == last_focus_) return;
         last_focus_ = id;
+        if (speech_ && f != nullptr) say(f->accessible_text(), dynamic_cast<ui::TextField *>(f) == nullptr);
         if (f == nullptr) {
             WNK_LOGI("focus", "focus <none>");
         } else if (!f->name.empty()) {
@@ -1168,6 +1215,7 @@ class Shell final : public Context {
         if (delegate_ && ui_) run_step("delegate on_stop", [this] { delegate_->on_stop(*this); });
         run_step("write capabilities", [this] { write_capabilities(); });
         if (network_sub_) network_sub_->close();
+        if (guidance_sub_) guidance_sub_->close();
         if (dispatcher_) run_step("close dispatcher", [this] {
             dispatcher_->close();
             dispatcher_->set_wake(nullptr);
@@ -1232,6 +1280,10 @@ class Shell final : public Context {
     std::set<std::string> loaded_fallbacks_;
     std::map<std::string, std::unique_ptr<render::FontFace>> path_faces_;
     platform::NetworkStatus network_;
+    std::unique_ptr<platform::LunaSubscription> guidance_sub_;
+    bool speech_ = false;
+    uint64_t speech_seq_ = 0;
+    std::shared_ptr<std::atomic<uint64_t>> speech_latest_ = std::make_shared<std::atomic<uint64_t>>(0);
     std::unique_ptr<platform::LunaSubscription> network_sub_;
     i18n::Catalog catalog_;
     i18n::Locale formats_;

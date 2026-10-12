@@ -501,6 +501,11 @@ Button &Button::set_on_click(ClickHandler h) {
     return *this;
 }
 
+std::string Button::accessible_text() const {
+    if (!accessible_label.empty()) return accessible_label;
+    return enabled() ? text_ + ", button" : text_ + ", button, unavailable";
+}
+
 bool Button::click(Ui &ui) {
     if (!enabled() || !on_click_) return false;
     press_.start(1, 0, ui.now_ms(), 200);
@@ -548,6 +553,13 @@ Card::Card(std::string title, std::string image_url, std::string subtitle) {
     subtitle_ = &add<Label>(std::move(subtitle), TextRole::Small);
     subtitle_->set_muted(true).set_font_size(20);
     subtitle_->set_visible(!subtitle_->text().empty());
+}
+
+std::string Card::accessible_text() const {
+    if (!accessible_label.empty()) return accessible_label;
+    std::string t = title_->text();
+    if (subtitle_ != nullptr && !subtitle_->text().empty()) t += ", " + subtitle_->text();
+    return t;
 }
 
 Card &Card::set_on_click(ClickHandler h) {

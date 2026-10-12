@@ -1161,3 +1161,30 @@ TEST("qr code: encodes text with finder patterns; too much text is an error, not
     env.frame();
     CHECK(env.r.fills.size() > 20);  // runs of dark modules plus the light background
 }
+
+TEST("accessibility: widgets describe themselves; password fields never say their content") {
+    Button b("Play", [](Ui &) {});
+    CHECK_EQ(b.accessible_text(), std::string("Play, button"));
+    b.set_enabled(false);
+    CHECK_EQ(b.accessible_text(), std::string("Play, button, unavailable"));
+    b.accessible_label = "Play from the start";
+    CHECK_EQ(b.accessible_text(), std::string("Play from the start"));
+    TextField name("User name");
+    name.set_text("ana");
+    CHECK_EQ(name.accessible_text(), std::string("User name, text field, ana"));
+    TextField pw("Password");
+    pw.set_password(true).set_text("hunter2");
+    CHECK_EQ(pw.accessible_text(), std::string("Password, text field, password, 7 characters"));
+    CHECK(pw.accessible_text().find("hunter2") == std::string::npos);
+    Toggle t("Subtitles", true);
+    CHECK_EQ(t.accessible_text(), std::string("Subtitles, on"));
+    Slider s("Volume", 0, 10, 1, 4);
+    CHECK_EQ(s.accessible_text(), std::string("Volume, 4"));
+    Choice c("Quality", {"Auto", "1080p"}, 1);
+    CHECK_EQ(c.accessible_text(), std::string("Quality, 1080p"));
+    ValueRow v("Server", "nas.local");
+    v.set_description("Where your library is");
+    CHECK_EQ(v.accessible_text(), std::string("Server, nas.local, Where your library is"));
+    View plain;
+    CHECK(plain.accessible_text().empty());
+}

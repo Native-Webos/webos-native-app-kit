@@ -58,6 +58,16 @@ Size FormRow::measure_content(Ui &ui, Size available) {
     return {w, h};
 }
 
+std::string FormRow::accessible_text() const {
+    if (!accessible_label.empty()) return accessible_label;
+    std::string t = label_;
+    const std::string v = value_text_for_speech();
+    if (!v.empty()) t += ", " + v;
+    if (!enabled()) t += ", unavailable";
+    if (!description_.empty()) t += ", " + description_;
+    return t;
+}
+
 void FormRow::draw_value(Ui &, const Rect &) {}
 float FormRow::value_width(Ui &) const { return 0; }
 
@@ -357,6 +367,10 @@ class Tabs::Tab : public Button {
         set_padding(Insets::xy(28, 14));
         set_on_click([this](Ui &ui) { owner_.select(ui, index_); });
     }
+    std::string accessible_text() const override {
+        return text() + ", tab " + std::to_string(index_ + 1) + " of " + std::to_string(owner_.count()) +
+               (owner_.selected() == index_ ? ", selected" : "");
+    }
     void on_focus_changed(Ui &ui, bool focused) override {
         if (!focused || ui.focus_source() == FocusSource::Pointer) return;
         // Arriving from outside the row (Up from the page below) lands on the selected tab rather
@@ -438,6 +452,8 @@ TextView &TextView::set_text(std::string text) {
 }
 
 const std::string &TextView::text() const { return label_->text(); }
+
+std::string TextView::accessible_text() const { return accessible_label.empty() ? text() : accessible_label; }
 
 Size TextView::measure_content(Ui &ui, Size available) {
     const Size s = label_->measure(ui, {available.w, std::numeric_limits<float>::infinity()});

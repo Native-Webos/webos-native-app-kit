@@ -207,5 +207,12 @@ TEST("system: launch, browser and toast payloads; replies; connection status") {
     CHECK(!platform::parse_connection_status(R"({"returnValue":false,"errorText":"x"})", &s));
     CHECK(!platform::parse_connection_status(R"({"subscribed":true})", &s));
     CHECK_EQ(platform::NetworkStatus{}.summary(), std::string("unknown"));
+    bool on = false;
+    CHECK(platform::parse_audio_guidance(R"({"returnValue":true,"settings":{"audioGuidance":"on"},"category":"option"})", &on));
+    CHECK(on);
+    CHECK(platform::parse_audio_guidance(R"({"settings":{"audioGuidance":"off"}})", &on));
+    CHECK(!on);
+    CHECK(!platform::parse_audio_guidance(R"({"settings":{}})", &on));
+    CHECK_EQ(platform::speak_payload("Play, button", "en-GB"), std::string(R"({"clear":true,"language":"en-GB","text":"Play, button"})"));
     CHECK(platform::launch_app("x").status == platform::LunaStatus::Unsupported);  // host: no bus
 }

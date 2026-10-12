@@ -221,6 +221,7 @@ void View::on_focus_changed(Ui &, bool) {}
 void View::on_descendant_focused(Ui &, View *, View *) {}
 void View::update(Ui &, float) {}
 bool View::on_wheel(Ui &, float) { return false; }
+std::string View::accessible_text() const { return accessible_label; }
 bool View::on_text(Ui &, const std::string &) { return false; }
 bool View::on_edit_key(Ui &, input::EditKey) { return false; }
 void View::on_composition(Ui &, const std::string &) {}

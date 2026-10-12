@@ -152,6 +152,13 @@ if (TARGET wnk-tvui)
             "network\\] \\([0-9]+\\) (online|offline).*focus widgets.url.*open url: unsupported: not a webOS build.*toast: unsupported: not a webOS build.*find devices: [0-9]+ service types")
     # The app's own GLES2 drawing inside the UI (Widgets): presented every frame while it is visible.
     wnk_tvui_e2e(gl_view_draws "Left,Down,Down,Z,Z" "gl view: first frame drawn by the app")
+    # Audio Guidance forced on: focus changes are spoken (logged on the host, where there is no TTS service).
+    add_test(NAME e2e.tvui.speech_follows_focus COMMAND wnk-tvui "{\"wnkSpeak\":true}")
+    set_tests_properties(e2e.tvui.speech_follows_focus PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_TVUI_KEYS=Left,Down,Down,Down,Right,Up"
+            PASS_REGULAR_EXPRESSION "focus is spoken \\(launch parameters\\).*say \"Home, button\".*say \"Settings, button\".*say \"Subtitle size, 100 %\".*say \"Show clock, off\""
+            FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
+            TIMEOUT 30)
     # A still screen is drawn but not presented: under 100 presents (about 7; 13 under ASan) in ~7 s of
     # waiting, not 400.
     string(REPEAT "Z," 60 WNK_TVUI_IDLE)

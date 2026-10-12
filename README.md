@@ -42,7 +42,7 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 | `focus/` | Focus manager: directional navigation, explicit neighbours, scopes, modal trapping, history |
 | `async/` | Cancellation tokens, worker pool, main-thread dispatcher, lifetime guards |
 | `net/` | HTTP(S) client: libcurl loaded at runtime, cancellation, limits, retries, main-thread delivery; WebSocket client (RFC 6455 over curl CONNECT_ONLY) |
-| `image/` | Image service: fetch, PNG/JPEG decode, downscale, memory and disk caches, coalescing; textures via the renderer |
+| `image/` | Image service: fetch, decode (PNG, JPEG, GIF, BMP, WebP via a static libwebp, SVG via nanosvg drawn at display size), downscale, memory and disk caches, coalescing; textures via the renderer |
 | `storage/` | Key/value store with revisions: DB8 on the TV, atomic files on the host; secret store (keymanager3 AES-GCM where available) |
 | `render/` | Renderer interface, fonts/UTF-8/atlas packing (CPU), GLES2 backend in `render/gles2` |
 | `i18n/` | Locale (TV settings, `LANG`), string catalogs with CLDR plural forms, placeholders, number formatting |

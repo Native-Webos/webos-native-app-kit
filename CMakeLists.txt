@@ -35,6 +35,9 @@ endif ()
 
 add_compile_options(-Wall -Wextra)
 
+# libwebp decoder (static, pinned release) for WebP images in image/.
+include(LibWebp)
+
 # SDL2: system SDL on the host, webosbrew SDL-webOS built from a pinned tag on webOS (ADR-003).
 if (WNK_WEBOS)
     include(SdlWebOS)

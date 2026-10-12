@@ -5,9 +5,21 @@
 #define STB_IMAGE_STATIC
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
+#define STBI_ONLY_GIF
+#define STBI_ONLY_BMP
 #define STBI_NO_STDIO
 #define STBI_MAX_DIMENSIONS 16384
 #include "stb_image.h"
+
+#define NANOSVG_IMPLEMENTATION
+#define NANOSVGRAST_IMPLEMENTATION
+#include <cstdio>
+#include <cstring>
+#include "nanosvg.h"
+#include "nanosvgrast.h"
+
+#include <webp/decode.h>
+#include <webp/demux.h>
 
 #include <algorithm>
 #include <cmath>
@@ -93,6 +105,18 @@ bool peek_dimensions(const std::string &b, int *w, int *h) {
         *h = ph > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(ph);
         return true;
     }
+    if (b.size() >= 10 && (b.compare(0, 6, "GIF87a") == 0 || b.compare(0, 6, "GIF89a") == 0)) {
+        *w = static_cast<int>(u8(6) | (u8(7) << 8));
+        *h = static_cast<int>(u8(8) | (u8(9) << 8));
+        return true;
+    }
+    if (b.size() >= 26 && b.compare(0, 2, "BM") == 0) {
+        const auto le32 = [&](size_t i) { return static_cast<int32_t>(u8(i) | (u8(i + 1) << 8) | (u8(i + 2) << 16) | (u8(i + 3) << 24)); };
+        const int32_t bw = le32(18), bh = le32(22);  // a negative height means top-down rows
+        *w = bw < 0 ? 0 : bw;
+        *h = bh == INT32_MIN ? 0x7FFFFFFF : std::abs(bh);
+        return true;
+    }
     if (b.size() >= 4 && u8(0) == 0xFF && u8(1) == 0xD8) {
         size_t i = 2;
         while (i + 4 <= b.size()) {
@@ -125,7 +149,140 @@ bool within(int w, int h, const DecodeLimits &limits) {
            static_cast<uint64_t>(w) * static_cast<uint64_t>(h) <= limits.max_pixels;
 }
 
+DecodeResult too_large(int w, int h) {
+    DecodeResult r;
+    r.error = ImageError::TooLarge;
+    r.detail = "image is " + std::to_string(w) + "x" + std::to_string(h);
+    return r;
+}
+
+DecodeResult failed(std::string why) {
+    DecodeResult r;
+    r.error = ImageError::Decode;
+    r.detail = std::move(why);
+    return r;
+}
+
+// The raster image fitted inside max_w x max_h (never enlarged).
+void finish(DecodeResult &r, std::shared_ptr<ImageRGBA> img, int max_w, int max_h) {
+    int fw = img->width, fh = img->height;
+    fit_size(img->width, img->height, max_w, max_h, &fw, &fh);
+    if (fw != img->width || fh != img->height) img = std::make_shared<ImageRGBA>(downscale(*img, fw, fh));
+    r.image = std::move(img);
+}
+
+// SVG: parsed, then rasterised at the size it will be shown (fitted to max_w x max_h, which may enlarge
+// it: a vector icon stays sharp at any size), else at its own size.
+DecodeResult decode_svg(const std::string &bytes, int max_w, int max_h, const DecodeLimits &limits) {
+    std::string text = bytes;  // nanosvg parses in place
+    NSVGimage *svg = nsvgParse(text.data(), "px", 96.0f);
+    if (svg == nullptr) return failed("SVG did not parse");
+    const float w = svg->width, h = svg->height;
+    if (!(w > 0 && h > 0) || svg->shapes == nullptr) {
+        nsvgDelete(svg);
+        return failed("SVG without a size or without shapes");
+    }
+    float scale = 1;
+    if (max_w > 0 || max_h > 0) {
+        const float sx = max_w > 0 ? static_cast<float>(max_w) / w : 1e9f;
+        const float sy = max_h > 0 ? static_cast<float>(max_h) / h : 1e9f;
+        scale = std::min(sx, sy);
+    }
+    const int ow = std::max(1, static_cast<int>(std::lround(w * scale)));
+    const int oh = std::max(1, static_cast<int>(std::lround(h * scale)));
+    if (!within(ow, oh, limits)) {
+        nsvgDelete(svg);
+        return too_large(ow, oh);
+    }
+    auto img = std::make_shared<ImageRGBA>();
+    img->width = ow;
+    img->height = oh;
+    img->pixels.assign(static_cast<size_t>(ow) * static_cast<size_t>(oh) * 4, 0);
+    NSVGrasterizer *rast = nsvgCreateRasterizer();
+    if (rast == nullptr) {
+        nsvgDelete(svg);
+        return failed("SVG rasteriser out of memory");
+    }
+    nsvgRasterize(rast, svg, 0, 0, scale, img->pixels.data(), ow, oh, ow * 4);  // straight alpha out
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(svg);
+    DecodeResult r;
+    r.image = std::move(img);
+    return r;
+}
+
+// WebP: lossy, lossless, with alpha; of an animation, the first frame placed on its canvas.
+DecodeResult decode_webp(const std::string &bytes, int max_w, int max_h, const DecodeLimits &limits) {
+    const auto *data = reinterpret_cast<const uint8_t *>(bytes.data());
+    WebPBitstreamFeatures f;
+    if (WebPGetFeatures(data, bytes.size(), &f) != VP8_STATUS_OK) return failed("not a readable WebP image");
+    if (!within(f.width, f.height, limits)) return too_large(f.width, f.height);
+    auto img = std::make_shared<ImageRGBA>();
+    if (!f.has_animation) {
+        int w = 0, h = 0;
+        uint8_t *px = WebPDecodeRGBA(data, bytes.size(), &w, &h);
+        if (px == nullptr) return failed("WebP decoding failed");
+        img->width = w;
+        img->height = h;
+        img->pixels.assign(px, px + static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+        WebPFree(px);
+    } else {
+        WebPData whole{data, bytes.size()};
+        WebPDemuxer *demux = WebPDemux(&whole);
+        if (demux == nullptr) return failed("animated WebP did not demux");
+        const int cw = static_cast<int>(WebPDemuxGetI(demux, WEBP_FF_CANVAS_WIDTH));
+        const int ch = static_cast<int>(WebPDemuxGetI(demux, WEBP_FF_CANVAS_HEIGHT));
+        WebPIterator it;
+        if (!within(cw, ch, limits) || !WebPDemuxGetFrame(demux, 1, &it)) {
+            WebPDemuxDelete(demux);
+            return within(cw, ch, limits) ? failed("animated WebP without frames") : too_large(cw, ch);
+        }
+        int w = 0, h = 0;
+        uint8_t *px = WebPDecodeRGBA(it.fragment.bytes, it.fragment.size, &w, &h);
+        img->width = cw;
+        img->height = ch;
+        img->pixels.assign(static_cast<size_t>(cw) * static_cast<size_t>(ch) * 4, 0);
+        if (px != nullptr) {
+            for (int y = 0; y < h && it.y_offset + y < ch; ++y) {
+                const int n = std::min(w, cw - it.x_offset);
+                if (n <= 0) break;
+                std::memcpy(&img->pixels[(static_cast<size_t>(it.y_offset + y) * cw + it.x_offset) * 4],
+                            px + static_cast<size_t>(y) * w * 4, static_cast<size_t>(n) * 4);
+            }
+            WebPFree(px);
+        }
+        WebPDemuxReleaseIterator(&it);
+        WebPDemuxDelete(demux);
+        if (px == nullptr) return failed("WebP frame decoding failed");
+    }
+    DecodeResult r;
+    finish(r, std::move(img), max_w, max_h);
+    return r;
+}
+
 }  // namespace
+
+const char *sniff_format(const std::string &b) {
+    static const char kPng[8] = {'\x89', 'P', 'N', 'G', '\r', '\n', '\x1a', '\n'};
+    if (b.size() >= 8 && b.compare(0, 8, kPng, 8) == 0) return "png";
+    if (b.size() >= 3 && static_cast<unsigned char>(b[0]) == 0xFF && static_cast<unsigned char>(b[1]) == 0xD8 &&
+        static_cast<unsigned char>(b[2]) == 0xFF) {
+        return "jpeg";
+    }
+    if (b.size() >= 6 && (b.compare(0, 6, "GIF87a") == 0 || b.compare(0, 6, "GIF89a") == 0)) return "gif";
+    if (b.size() >= 26 && b.compare(0, 2, "BM") == 0) return "bmp";
+    if (b.size() >= 12 && b.compare(0, 4, "RIFF") == 0 && b.compare(8, 4, "WEBP") == 0) return "webp";
+    // SVG is text: an <svg element near the start, after an optional BOM, XML declaration, comments or
+    // DOCTYPE. A gzip-compressed .svgz is not read.
+    const size_t window = std::min<size_t>(b.size(), 4096);
+    const std::string head = b.substr(0, window);
+    const size_t svg = head.find("<svg");
+    if (svg != std::string::npos) {
+        const size_t first = head.find_first_not_of(" \t\r\n\xEF\xBB\xBF");
+        if (first != std::string::npos && head[first] == '<') return "svg";
+    }
+    return "";
+}
 
 DecodeResult decode_image(const std::string &bytes, int max_w, int max_h, const DecodeLimits &limits) {
     DecodeResult r;
@@ -134,6 +291,10 @@ DecodeResult decode_image(const std::string &bytes, int max_w, int max_h, const 
         r.detail = bytes.empty() ? "empty data" : "encoded image exceeds limit";
         return r;
     }
+    const std::string format = sniff_format(bytes);
+    if (format == "svg") return decode_svg(bytes, max_w, max_h, limits);
+    if (format == "webp") return decode_webp(bytes, max_w, max_h, limits);
+    if (format.empty()) return failed("not a PNG, JPEG, GIF, BMP, WebP or SVG image");
     int w = 0, h = 0, comp = 0;
     if (peek_dimensions(bytes, &w, &h) && !within(w, h, limits)) {
         r.error = ImageError::TooLarge;
@@ -149,7 +310,7 @@ DecodeResult decode_image(const std::string &bytes, int max_w, int max_h, const 
         const bool too_large = why != nullptr && std::string(why) == "too large";
         r.error = too_large ? ImageError::TooLarge : ImageError::Decode;
         r.detail = too_large ? "image dimensions exceed the decoder limit"
-                             : std::string("not a PNG or JPEG image (") + (why != nullptr ? why : "?") + ")";
+                             : std::string("unreadable ") + format + " (" + (why != nullptr ? why : "?") + ")";
         return r;
     }
     if (!within(w, h, limits)) {
@@ -168,12 +329,7 @@ DecodeResult decode_image(const std::string &bytes, int max_w, int max_h, const 
     img->height = h;
     img->pixels.assign(px, px + static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
     stbi_image_free(px);
-    int fw = w, fh = h;
-    fit_size(w, h, max_w, max_h, &fw, &fh);
-    if (fw != w || fh != h) {
-        img = std::make_shared<ImageRGBA>(downscale(*img, fw, fh));
-    }
-    r.image = std::move(img);
+    finish(r, std::move(img), max_w, max_h);
     return r;
 }
 

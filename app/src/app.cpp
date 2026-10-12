@@ -594,7 +594,7 @@ class Shell final : public Context {
         } else {
             caps_.set("audio.output", Support::Unknown, "not requested by the app", "not-probed");
         }
-        caps_.set("images.decode", config_.images ? Support::Supported : Support::Unknown, config_.images ? "PNG, JPEG" : "not requested");
+        caps_.set("images.decode", config_.images ? Support::Supported : Support::Unknown, config_.images ? "PNG, JPEG, GIF, BMP, WebP, SVG" : "not requested");
         caps_.set("input.pointer", Support::Unknown, "no pointer event yet");
         caps_.set("lifecycle.background", Support::Unknown, "no background event yet");
         caps_.set("lifecycle.relaunch_params", take_relaunch_ != nullptr ? Support::Supported : Support::Unsupported,

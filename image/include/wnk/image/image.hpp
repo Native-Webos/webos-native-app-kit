@@ -48,9 +48,16 @@ struct DecodeResult {
     std::shared_ptr<ImageRGBA> image;
 };
 
-// Decode PNG or JPEG bytes to RGBA and, if max_w/max_h are > 0, downscale (never upscale) to fit inside
-// them keeping the aspect ratio. Dimensions are checked before any pixel memory is allocated.
+// Decode an image to RGBA. The format is taken from the bytes, not from a file name or Content-Type:
+//   PNG, JPEG, BMP, GIF (first frame), WebP (lossy, lossless, alpha; first frame of an animation),
+//   SVG (nanosvg: shapes, paths, gradients, transforms; no text, filters, CSS or embedded images).
+// Raster images are downscaled (never enlarged) to fit inside max_w/max_h when > 0, keeping the
+// aspect ratio. An SVG is drawn at the size that fits max_w/max_h, enlarged if need be, so a vector icon
+// stays sharp. Dimensions are checked against `limits` before any pixel memory is allocated.
 DecodeResult decode_image(const std::string &bytes, int max_w = 0, int max_h = 0, const DecodeLimits &limits = {});
+
+// "png", "jpeg", "gif", "bmp", "webp", "svg", or "" when the bytes are none of these.
+const char *sniff_format(const std::string &bytes);
 
 // Area-averaging downscale to exactly dst_w x dst_h (each <= source size).
 ImageRGBA downscale(const ImageRGBA &src, int dst_w, int dst_h);

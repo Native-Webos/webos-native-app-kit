@@ -198,7 +198,9 @@ ImageTicket ImageService::start(const ImageRequest &req, async::Lifetime::Weak o
             const async::CancellationToken &t) {
             ImageResult r = core->fetch(req, key, t);
             if (r.error != ImageError::None && r.error != ImageError::Cancelled) {
-                WNK_LOGD("image", "%s failed: %s %s", req.url.c_str(), error_name(r.error), r.detail.c_str());
+                // Without the query: image URLs of media servers often carry an access token there.
+                const std::string url = req.url.substr(0, req.url.find('?'));
+                WNK_LOGW("image", "%s failed: %s %s", url.c_str(), error_name(r.error), r.detail.c_str());
             }
             main.post([svc, alive, key, flight_id, r = std::move(r)]() mutable {
                 if (alive.alive()) svc->finish(key, flight_id, std::move(r));

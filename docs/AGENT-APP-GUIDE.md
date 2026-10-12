@@ -83,7 +83,7 @@ These are enforced by the architecture, the packaging checks, and the way the TV
 | `render/` | `Renderer` interface. Apps draw through widgets, or `ctx.renderer()` for a custom `View::draw`. |
 | `async/` | Pool, dispatcher, cancellation, `Lifetime`, `run_then_post`. |
 | `net/` | HTTP(S), streaming body, WebSocket. |
-| `image/` | PNG/JPEG fetch, decode, caches. `ImageView` uses this through the shell. |
+| `image/` | Fetch, decode (PNG, JPEG, GIF, BMP, WebP, SVG), caches. `ImageView` uses this through the shell. |
 | `storage/` | Key/value store (DB8 on the TV) and `SecretStore`. |
 | `services/auth/` | Optional: sign-in state, stored credentials, authorized requests with token refresh. Link `wnk_auth`. |
 | `platform/` | Launch params, paths, synchronous Luna. |
@@ -291,7 +291,8 @@ stubbing a lookalike.
 | Horizontal poster row ("rail") | `CollectionView(Axis::Horizontal, 1, cell, spacing)` + `Card`. |
 | Long vertical list or poster grid | `CollectionView(Axis::Vertical, columns, cell, spacing)`. Cells exist only in the viewport. |
 | Details page taller than the screen | `ScrollView` with one `Column` child. It follows focus. |
-| Poster / thumbnail | `ImageView` or `Card`. URL is `https://…` or `file://` + `ctx.launch().app_dir`. |
+| Poster / thumbnail | `ImageView` or `Card`. URL is `https://…` or `file://` + `ctx.launch().app_dir`. PNG, JPEG, WebP, GIF (first frame), BMP and SVG, recognised by content. |
+| Icons that stay sharp at any size | SVG in an `ImageView`: drawn at the view's size (nanosvg: shapes, paths, gradients, transforms; no text, filters or CSS). Animated GIF/WebP show their first frame. |
 | Button, disabled control | `Button`, `set_enabled(false)`. |
 | Deep link, launcher shortcut, "open this" from another app | Read `ctx.launch().params_json` in `on_start` and the new object in `on_relaunch`. Log parameter names, not values. |
 | Settings page | `wnk/ui/forms.hpp` rows in a `Column`: `Toggle` (switch or `Style::Check`), `Slider` (Left/Right), `Choice` (Left/Right, OK opens the list), `ValueRow` (label + value, OK opens something), `Tabs` over pages (`set_visible`), `TextView` for long text. See Example B's Settings. |
@@ -366,7 +367,7 @@ the font path is built for.
 
 `ImageView` loads through `Ui`'s `ImageSource` once it has a frame, at about the frame size. It
 shows a pulsing placeholder, then a muted panel on failure. Remote URLs need `AppConfig::http`.
-Bundled files use `file://` + `ctx.launch().app_dir + "/posters/x.jpg"`. PNG and JPEG only.
+Bundled files use `file://` + `ctx.launch().app_dir + "/posters/x.jpg"`. PNG, JPEG, WebP, GIF (first frame), BMP or SVG.
 Each image is its own GL texture (a grid of posters costs one draw call per tile).
 
 `Card` is focusable. Its focus ring surrounds the image, not the title (`focus_bounds`).

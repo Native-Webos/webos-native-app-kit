@@ -379,6 +379,19 @@ class HomeScreen : public Screen {
         col.add<Label>("Long labels are shortened with an ellipsis when they do not fit in the space they are given, "
                        "which this one demonstrates on a single line.")
             .set_muted(true);
+        // Other image formats: one SVG drawn sharp at three sizes, and a WebP.
+        auto &images = col.add<Row>(32);
+        const std::string media = "file://" + ctx_.launch().app_dir + "/media/";
+        for (float side : {48.0f, 96.0f, 160.0f}) {
+            auto &icon = images.add<ImageView>(media + "play.svg");
+            icon.set_fit(ImageFit::Contain);
+            icon.set_size(side, side);
+            icon.set_align(Align::Start, Align::Center);
+            icon.name = "widgets.svg" + std::to_string(static_cast<int>(side));
+        }
+        auto &webp = images.add<ImageView>(media + "poster.webp");
+        webp.set_size(107, 160);
+        webp.name = "widgets.webp";
         return col;
     }
 

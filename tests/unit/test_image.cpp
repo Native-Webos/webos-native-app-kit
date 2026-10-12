@@ -418,3 +418,133 @@ TEST("prefetch warms the cache without a callback") {
     }));
     CHECK_EQ(env.svc->stats().in_flight, 0u);
 }
+
+// ---- more formats ---------------------------------------------------------------------------------
+
+namespace {
+
+std::string read_file(const std::string &path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// A WebP written by the host's ffmpeg (libwebp) from the halves pattern; "" when ffmpeg cannot.
+std::string ffmpeg_webp(int w, int h, bool lossless, bool animated) {
+    const std::string dir = temp_dir();
+    const std::string src = dir + "/in.png", out = dir + "/out.webp";
+    {
+        std::ofstream(src, std::ios::binary) << png(w, h);
+    }
+    std::string cmd = "ffmpeg -loglevel error -y ";
+    cmd += animated ? "-loop 1 -t 0.3 -framerate 10 -i '" + src + "' -c:v libwebp_anim -loop 0 "
+                    : "-i '" + src + "' -c:v libwebp ";
+    cmd += lossless ? "-lossless 1 " : "-quality 90 ";
+    cmd += "'" + out + "' 2>/dev/null";
+    const std::string bytes = std::system(cmd.c_str()) == 0 ? read_file(out) : std::string();
+    std::system(("rm -rf '" + dir + "'").c_str());
+    return bytes;
+}
+
+bool reddish(const ImageRGBA &img, int x, int y) {
+    const uint8_t *p = &img.pixels[(static_cast<size_t>(y) * img.width + x) * 4];
+    return p[0] > 200 && p[2] < 60 && p[3] > 200;
+}
+bool bluish(const ImageRGBA &img, int x, int y) {
+    const uint8_t *p = &img.pixels[(static_cast<size_t>(y) * img.width + x) * 4];
+    return p[2] > 200 && p[0] < 60 && p[3] > 200;
+}
+
+}  // namespace
+
+TEST("formats are recognised by content, not by name") {
+    CHECK_EQ(std::string(sniff_format(png(4, 4))), std::string("png"));
+    CHECK_EQ(std::string(sniff_format(jpeg(4, 4))), std::string("jpeg"));
+    CHECK_EQ(std::string(sniff_format("GIF89a\x01\x00\x01\x00")), std::string("gif"));
+    CHECK_EQ(std::string(sniff_format(std::string("RIFF\x10\x00\x00\x00WEBPVP8 ", 16))), std::string("webp"));
+    CHECK_EQ(std::string(sniff_format("\xEF\xBB\xBF<?xml version=\"1.0\"?>\n<!-- icon -->\n<svg xmlns=\"http://www.w3.org/2000/svg\"/>")),
+             std::string("svg"));
+    CHECK_EQ(std::string(sniff_format("<html><body><svg/></body></html>")), std::string("svg"));  // starts with markup
+    CHECK_EQ(std::string(sniff_format("hello <svg")), std::string(""));
+    CHECK_EQ(std::string(sniff_format("RIFF....WAVE")), std::string(""));
+    CHECK(decode_image("RIFF\x10\x00\x00\x00WAVEfmt ").error == ImageError::Decode);
+}
+
+TEST("BMP and GIF (first frame) decode") {
+    std::string bmp;
+    auto px = halves(8, 4);
+    stbi_write_bmp_to_func(append, &bmp, 8, 4, 4, px.data());
+    DecodeResult b = decode_image(bmp);
+    REQUIRE(b.image != nullptr);
+    CHECK(b.image->width == 8 && b.image->height == 4);
+    CHECK(reddish(*b.image, 1, 1) && bluish(*b.image, 6, 2));
+    // A 2x1 GIF: red then blue pixel (two-colour global palette, LZW minimum code size 2).
+    const unsigned char gif[] = {'G', 'I', 'F', '8', '9', 'a', 2, 0, 1, 0, 0x80, 0, 0, 255, 0, 0, 0, 0, 255,
+                                 0x2C, 0, 0, 0, 0, 2, 0, 1, 0, 0, 2, 2, 0x44, 0x0A, 0, 0x3B};
+    DecodeResult g = decode_image(std::string(reinterpret_cast<const char *>(gif), sizeof gif));
+    REQUIRE(g.image != nullptr);
+    CHECK(g.image->width == 2 && g.image->height == 1);
+    CHECK(reddish(*g.image, 0, 0) && bluish(*g.image, 1, 0));
+    // Header sizes are checked before decoding.
+    std::string big_gif(reinterpret_cast<const char *>(gif), sizeof gif);
+    big_gif[6] = big_gif[7] = static_cast<char>(0xFF);
+    CHECK(decode_image(big_gif).error == ImageError::TooLarge);
+    std::string big_bmp = bmp;
+    big_bmp[18] = big_bmp[19] = static_cast<char>(0xFF);
+    big_bmp[20] = 0x01;
+    CHECK(decode_image(big_bmp).error == ImageError::TooLarge);
+}
+
+TEST("SVG is drawn at the size it is shown, enlarged if need be, with gradients and transparency") {
+    const std::string svg =
+        "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"12\" viewBox=\"0 0 24 12\">"
+        "<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#00f\"/><stop offset=\"1\" stop-color=\"#00f\"/></linearGradient></defs>"
+        "<rect x=\"0\" y=\"0\" width=\"12\" height=\"12\" fill=\"#ff0000\"/>"
+        "<circle cx=\"18\" cy=\"6\" r=\"5\" fill=\"url(#g)\"/></svg>";
+    DecodeResult own = decode_image(svg);
+    REQUIRE(own.image != nullptr);
+    CHECK(own.image->width == 24 && own.image->height == 12);
+    DecodeResult big = decode_image(svg, 480, 480);  // fits 480 wide: 20x enlargement, still sharp
+    REQUIRE(big.image != nullptr);
+    CHECK(big.image->width == 480 && big.image->height == 240);
+    CHECK(reddish(*big.image, 100, 100));
+    CHECK(bluish(*big.image, 360, 120));
+    const uint8_t *corner = &big.image->pixels[(static_cast<size_t>(5) * 480 + 475) * 4];
+    CHECK(corner[3] == 0);  // outside the circle: transparent
+    // The edge between red and transparent is one pixel wide, not a blurry upscale.
+    int partial = 0;
+    for (int x = 230; x < 250; ++x) {
+        const uint8_t a = big.image->pixels[(static_cast<size_t>(5) * 480 + x) * 4 + 3];
+        if (a > 0 && a < 255) ++partial;
+    }
+    CHECK(partial <= 2);
+    CHECK(decode_image("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>").error == ImageError::Decode);  // no size
+    CHECK(decode_image("<svg width=\"100000\" height=\"100000\"><rect width=\"10\" height=\"10\"/></svg>").error ==
+          ImageError::TooLarge);
+}
+
+TEST("WebP lossy, lossless and animated (first frame) decode") {
+    const std::string lossless = ffmpeg_webp(16, 8, true, false);
+    if (lossless.empty()) {
+        std::printf("  SKIP (no ffmpeg with libwebp)\n");
+        return;
+    }
+    CHECK_EQ(std::string(sniff_format(lossless)), std::string("webp"));
+    DecodeResult l = decode_image(lossless);
+    REQUIRE(l.image != nullptr);
+    CHECK(l.image->width == 16 && l.image->height == 8);
+    CHECK(reddish(*l.image, 2, 4) && bluish(*l.image, 13, 4));
+    DecodeResult lossy = decode_image(ffmpeg_webp(64, 32, false, false), 32, 32);  // downscaled to fit
+    REQUIRE(lossy.image != nullptr);
+    CHECK(lossy.image->width == 32 && lossy.image->height == 16);
+    CHECK(reddish(*lossy.image, 4, 8) && bluish(*lossy.image, 28, 8));
+    const std::string anim = ffmpeg_webp(16, 8, true, true);
+    REQUIRE(!anim.empty());
+    DecodeResult a = decode_image(anim);
+    REQUIRE(a.image != nullptr);
+    CHECK(a.image->width == 16 && a.image->height == 8);
+    CHECK(reddish(*a.image, 2, 4) && bluish(*a.image, 13, 4));
+    DecodeLimits tight;
+    tight.max_dimension = 8;
+    CHECK(decode_image(lossless, 0, 0, tight).error == ImageError::TooLarge);
+    CHECK(decode_image(lossless.substr(0, 30)).error == ImageError::Decode);
+}

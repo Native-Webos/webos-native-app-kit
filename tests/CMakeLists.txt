@@ -159,6 +159,10 @@ if (TARGET wnk-tvui)
             PASS_REGULAR_EXPRESSION "focus is spoken \\(launch parameters\\).*say \"Home, button\".*say \"Settings, button\".*say \"Subtitle size, 100 %\".*say \"Show clock, off\""
             FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
             TIMEOUT 30)
+    # Other image formats on the Widgets page: an SVG at three sizes and a WebP, none failing to load.
+    wnk_tvui_e2e(svg_and_webp_load "Left,Down,Down,Z,Z,Z,Z" "section 2.*focus nav.Widgets")
+    set_tests_properties(e2e.tvui.svg_and_webp_load PROPERTIES
+            FAIL_REGULAR_EXPRESSION "\\[image\\].*failed|${WNK_SANITIZER_FAIL}")
     # A still screen is drawn but not presented: under 100 presents (about 7; 13 under ASan) in ~7 s of
     # waiting, not 400.
     string(REPEAT "Z," 60 WNK_TVUI_IDLE)

@@ -53,8 +53,8 @@ Sources:
 | **Form widgets**. **Done:** `wnk/ui/forms.hpp` (Toggle, Slider, Choice, ValueRow, Tabs, TextView, QrCode on nayuki/QR-Code-generator), Example B's Settings; host-tested, the QR code decoded from a screenshot. | Every settings screen in moonlight-tv, PlxNative and client-webos `[SRC]`. The kit has Button, Card, Label, ImageView, Spinner, ProgressBar, Dialog, CollectionView `[KIT]`. | Toggle, Slider, option picker, checkbox/radio, tabs, list rows with values, scrolling long text, and a QR code (to finish a sign-in or open a link on a phone, which PlxNative does). |
 | **Screensaver control** | Finding 1. | Allow the screensaver by default; a wake lock an app holds while playing video or a game. |
 | **Deep links / relaunch** | Finding 2. | Patch the SDL-webOS build to forward relaunch parameters as an event; `Delegate::on_relaunch(params)`. |
-| **Opening other apps and system toasts** | All three reference apps call `com.webos.applicationManager/launch` (Home, browser); PlxNative uses `com.webos.notification/createToast` `[SRC]`. | `platform::launch_app(id, params)`, `open_url`, `system_toast`. |
-| **Network status** | Abnormal-network handling is LG checklist row 14 `[SRC]`. | Connectivity state and changes (`com.webos.service.connectionmanager/getStatus`, subscribed), so apps can say "offline" instead of timing out. |
+| **Opening other apps and system toasts**. **Done:** `platform/system.hpp`, `Context::launch_app/open_url/system_toast` on a worker; payloads unit-tested, not yet sent on a TV. | All three reference apps call `com.webos.applicationManager/launch` (Home, browser); PlxNative uses `com.webos.notification/createToast` `[SRC]`. | `platform::launch_app(id, params)`, `open_url`, `system_toast`. |
+| **Network status**. **Done:** connectionmanager subscription (host: interfaces), `Context::network()`, `Delegate::on_network`; reply parsing unit-tested, the TV's replies not yet seen. | Abnormal-network handling is LG checklist row 14 `[SRC]`. | Connectivity state and changes (`com.webos.service.connectionmanager/getStatus`, subscribed), so apps can say "offline" instead of timing out. |
 
 ### Games, emulators, interactive apps
 
@@ -70,8 +70,8 @@ Sources:
 
 | Gap | Evidence | What the kit would add |
 |---|---|---|
-| **LAN discovery** | moonlight-tv (libmicrodns), client-webos (`services/discovery.rs`) `[SRC]`. | mDNS and SSDP browsing. |
-| **Wake-on-LAN** | moonlight-tv, client-webos (`services/wol.rs`) `[SRC]`. | Magic-packet sender. |
+| **LAN discovery**. **Done:** `net::mdns_browse` (DNS-SD over legacy unicast mDNS), verified on the host against real Cast/AirPlay devices; not yet run from the TV's jail. SSDP not done. | moonlight-tv (libmicrodns), client-webos (`services/discovery.rs`) `[SRC]`. | mDNS and SSDP browsing. |
+| **Wake-on-LAN**. **Done:** `net::wake_on_lan`, packet verified on a local socket. | moonlight-tv, client-webos (`services/wol.rs`) `[SRC]`. | Magic-packet sender. |
 | **Phone-to-TV** (DIAL) | client-webos `core/dial.rs` `[SRC]`. | Later; depends on finding 2. |
 
 ### Accessibility and store readiness

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket auth i18n audio)
+foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket auth i18n audio lan)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -29,6 +29,7 @@ target_link_libraries(test_websocket PRIVATE wnk_net)
 target_link_libraries(test_auth PRIVATE wnk_auth)
 target_link_libraries(test_i18n PRIVATE wnk_i18n)
 find_package(Threads REQUIRED)
+target_link_libraries(test_lan PRIVATE wnk_net wnk_platform)
 target_link_libraries(test_audio PRIVATE wnk_audio Threads::Threads)
 target_include_directories(test_secret SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
@@ -144,6 +145,10 @@ if (TARGET wnk-tvui)
     # the app's on_gamepad, and unplugging is reported.
     wnk_tvui_e2e(gamepad_navigates "pad,Z,pad+dpright,pad-dpright,pad+a,pad-a,Z,pad+b,pad-b,Z,pad+x,pad-x,padx=1,Z,Z,Z,Z,Z,Z,padx=0,pad~,Z"
             "pad 0 connected: wnk virtual pad.*focus rail0.item1.*open details for item 1.*back to home focus=rail0.item1.*gamepad 0: X pressed \\(handled by the app\\).*focus rail0.item2.*focus rail0.item3.*focus rail0.item4.*pad 0 disconnected")
+    # Outside the app: the network status at start; on the host the browser and notification requests
+    # are refused (no Luna bus) and reported; device discovery answers with whatever the LAN has (0 or more).
+    wnk_tvui_e2e(system_requests "Left,Down,Down,Right,Up,Return,Right,Return,Right,Return,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z"
+            "network\\] \\([0-9]+\\) (online|offline).*focus widgets.url.*open url: unsupported: not a webOS build.*toast: unsupported: not a webOS build.*find devices: [0-9]+ service types")
     # A still screen is drawn but not presented: under 100 presents (about 7; 13 under ASan) in ~7 s of
     # waiting, not 400.
     string(REPEAT "Z," 60 WNK_TVUI_IDLE)

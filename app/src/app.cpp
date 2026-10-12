@@ -40,6 +40,7 @@ bool Delegate::on_action(Context &, const input::ActionEvent &) { return false; 
 void Delegate::on_lifecycle(Context &, const Lifecycle::Transition &) {}
 void Delegate::on_relaunch(Context &, const std::string &) {}
 bool Delegate::on_gamepad(Context &, const input::GamepadEvent &) { return false; }
+void Delegate::on_network(Context &, const platform::NetworkStatus &) {}
 bool Delegate::on_key(Context &, const input::KeyEvent &) { return false; }
 void Delegate::on_frame(Context &, float) {}
 void Delegate::on_stop(Context &) {}
@@ -348,6 +349,16 @@ class Shell final : public Context {
         overlay_ = visible;
     }
     bool metrics_overlay() const override { return overlay_; }
+    const platform::NetworkStatus &network() const override { return network_; }
+    void launch_app(const std::string &app_id, const std::string &params_json, std::function<void(bool)> done) override {
+        system_call("launch " + app_id, [app_id, params_json] { return platform::launch_app(app_id, params_json); }, std::move(done));
+    }
+    void open_url(const std::string &url, std::function<void(bool)> done) override {
+        system_call("open url", [url] { return platform::open_url(url); }, std::move(done));
+    }
+    void system_toast(const std::string &message, std::function<void(bool)> done) override {
+        system_call("toast", [id = launch_.app_id, message] { return platform::system_toast(id, message); }, std::move(done));
+    }
     void quit(const char *reason) override {
         if (!quit_requested_) WNK_LOGI(kCat, "quit requested: %s", reason);
         quit_requested_ = true;
@@ -533,6 +544,7 @@ class Shell final : public Context {
         // Kit SDL patch (cmake/patches/sdl-webos-relaunch-message.patch); absent in other SDL builds.
         take_relaunch_ = reinterpret_cast<char *(*)()>(dlsym(RTLD_DEFAULT, "SDL_webOSTakeRelaunchMessage"));
         probe_capabilities(mode, gpu);
+        watch_network();
         delegate_ = factory();
         if (!delegate_) return fail("no delegate");
         delegate_->on_start(*this);
@@ -961,6 +973,55 @@ class Shell final : public Context {
         for (const auto &a : pad_nav_.on_event(*e)) handle_action(a);
     }
 
+    // One Luna request on a worker; the outcome is logged and handed to `done` on the main thread.
+    void system_call(std::string what, std::function<platform::LunaReply()> call, std::function<void(bool)> done) {
+        async::run_then_post<std::pair<bool, std::string>>(
+            *pool_, *dispatcher_, life_.weak(), {},
+            [call = std::move(call)](const async::CancellationToken &) {
+                const platform::LunaReply r = call();
+                std::string why = r.detail;
+                const bool ok = r.status == platform::LunaStatus::Ok && platform::reply_ok(r.payload, &why);
+                if (r.status != platform::LunaStatus::Ok) why = std::string(platform::luna_status_name(r.status)) + ": " + r.detail;
+                return std::make_pair(ok, why);
+            },
+            [what = std::move(what), done = std::move(done)](std::pair<bool, std::string> r) {
+                if (r.first) {
+                    WNK_LOGI("system", "%s: accepted", what.c_str());
+                } else {
+                    WNK_LOGW("system", "%s: %s", what.c_str(), r.second.c_str());
+                }
+                if (done) done(r.first);
+            });
+    }
+
+    // Network status: the connection manager's subscription on the TV, the interfaces on the host.
+    void watch_network() {
+        if constexpr (!platform::kIsWebOS) {
+            set_network(platform::host_network_status());
+            return;
+        }
+        std::string err;
+        network_sub_ = platform::subscribe_network_status(
+            [this, d = dispatcher_.get(), weak = life_.weak()](const platform::NetworkStatus &s) {
+                d->post([this, weak, s] {
+                    if (weak.alive()) set_network(s);
+                });
+            },
+            &err);
+        if (!network_sub_) {
+            WNK_LOGW("network", "no connection status: %s", err.c_str());
+            caps_.set("network.status", diagnostics::Support::Unsupported, err);
+        }
+    }
+
+    void set_network(const platform::NetworkStatus &s) {
+        if (s == network_) return;
+        WNK_LOGI("network", "%s", s.summary().c_str());
+        network_ = s;
+        note_capability("network.status", diagnostics::Support::Supported, s.summary());
+        if (delegate_ && ui_) delegate_->on_network(*this, s);
+    }
+
     // {"event":"relaunch","parameters":{...},...} (registerApp, interface 2) or {"message":"relaunch",...}
     // (registerNativeApp, interface 1). The parameters replace the launch parameters.
     void on_relaunch_message(const char *message) {
@@ -1106,6 +1167,7 @@ class Shell final : public Context {
         };
         if (delegate_ && ui_) run_step("delegate on_stop", [this] { delegate_->on_stop(*this); });
         run_step("write capabilities", [this] { write_capabilities(); });
+        if (network_sub_) network_sub_->close();
         if (dispatcher_) run_step("close dispatcher", [this] {
             dispatcher_->close();
             dispatcher_->set_wake(nullptr);
@@ -1169,6 +1231,8 @@ class Shell final : public Context {
     std::vector<std::string> font_preferences_;          // file-name tags for the UI language
     std::set<std::string> loaded_fallbacks_;
     std::map<std::string, std::unique_ptr<render::FontFace>> path_faces_;
+    platform::NetworkStatus network_;
+    std::unique_ptr<platform::LunaSubscription> network_sub_;
     i18n::Catalog catalog_;
     i18n::Locale formats_;
     async::Lifetime life_;  // results posted to the shell

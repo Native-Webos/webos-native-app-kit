@@ -33,6 +33,7 @@
 #include "wnk/input/input.hpp"
 #include "wnk/net/http.hpp"
 #include "wnk/platform/process.hpp"
+#include "wnk/platform/system.hpp"
 #include "wnk/render/renderer.hpp"
 #include "wnk/storage/kv.hpp"
 #include "wnk/ui/ui.hpp"
@@ -124,6 +125,15 @@ class Context {
     virtual WakeLock keep_screen_on(std::string reason) = 0;
     virtual void set_metrics_overlay(bool visible) = 0;
     virtual bool metrics_overlay() const = 0;
+    // The network as the TV reports it (connectionmanager, kept up to date), or the host's interfaces.
+    virtual const platform::NetworkStatus &network() const = 0;
+    // Outside the app, each on a worker; the result is logged ("system" category), and `done` (if
+    // given) runs on the main thread with whether the TV accepted the request.
+    virtual void launch_app(const std::string &app_id, const std::string &params_json = {},
+                            std::function<void(bool)> done = {}) = 0;
+    virtual void open_url(const std::string &url, std::function<void(bool)> done = {}) = 0;
+    // A notification card from the TV itself, attributed to this app (stays when the app closes).
+    virtual void system_toast(const std::string &message, std::function<void(bool)> done = {}) = 0;
     // Ends the main loop after the current iteration; the shutdown sequence then runs.
     virtual void quit(const char *reason) = 0;
 };
@@ -148,6 +158,9 @@ class Delegate {
     // Every raw key event (USB/Bluetooth keyboard, remote) before text input and the keymap. Return true
     // to consume it: a game that wants WASD or key-up timing reads keys here.
     virtual bool on_key(Context &ctx, const input::KeyEvent &e);
+    // The network status changed (Context::network() already holds the new one): say "offline" instead
+    // of waiting for requests to time out, and refresh when it comes back.
+    virtual void on_network(Context &ctx, const platform::NetworkStatus &status);
     // Once per drawn frame, after the Ui has been updated.
     virtual void on_frame(Context &ctx, float dt);
     // Shutdown has begun: save state. Workers and the dispatcher still run; the UI still exists.

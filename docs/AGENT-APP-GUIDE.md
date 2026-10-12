@@ -274,6 +274,7 @@ Reject a non-object. Do not trust strings as paths outside `app_dir` and URLs yo
 | `on_relaunch` | The app was launched again while running (deep link, launcher shortcut, voice search, a second `ares-launch` with parameters). `params_json` is the new parameters object; `ctx.launch()` already holds it. Open what it asks for, or ignore it when it asks for nothing. See Example D. |
 | `on_gamepad` | Every pad event (added/removed, buttons, sticks, triggers) before the UI. Return true to take it (games). Otherwise D-pad/left stick move focus, A is OK, B is Back, Start is Play/Pause. |
 | `on_key` | Every raw key event before text input and the keymap. Return true to take it (a game reading WASD or key-up timing). |
+| `on_network` | The network went up or down (`ctx.network()`). Show "offline" instead of waiting for timeouts; refresh when it returns. |
 | `on_frame` | Once per drawn frame, after `Ui::update`. Drive a progress label from `PlaybackController::snapshot()`. A still screen is drawn only every `idle_probe_ms` (100 ms), so do not count frames as time: use the `dt` argument or `ui.now_ms()`. |
 | `on_stop` | Save state. The pool and dispatcher still run; the UI still exists. Keep it short; a watchdog (default 3 s) ends the process if teardown overruns. |
 
@@ -299,6 +300,11 @@ stubbing a lookalike.
 | Modal confirm | `ui.show_dialog`. Focus is trapped; Back dismisses when `back_dismisses` is true; focus returns to the opener. |
 | Transient message | `ui.toast(text)`. |
 | Gamepad support | Nothing for UI navigation (`AppConfig::gamepads` is on). A game reads `Delegate::on_gamepad` (buttons by position: A is the bottom face button) and returns true. Ship `gamecontrollerdb.txt` in the app directory for pads SDL does not know. |
+| Open a web page, another app, the Home screen | `ctx.open_url(url)`, `ctx.launch_app(id, params_json)`, `ctx.launch_app("com.webos.app.home")`. Each runs on a worker; pass `done` to learn whether the TV accepted. |
+| A notice that outlives the app | `ctx.system_toast(text)` (the TV's own notification card). `ui.toast` for anything inside the app. |
+| Offline state | `ctx.network()` and `Delegate::on_network`. |
+| Find a server, a Cast device, a PC on the LAN | `net::mdns_browse("_myservice._tcp", 1500ms, token)` on a worker (`wnk/net/lan.hpp`); results have name, host, IPv4, port and TXT. |
+| Wake a PC before connecting to it | `net::wake_on_lan("aa:bb:cc:dd:ee:ff")` on a worker. |
 | Interface sounds, game effects, music | `AppConfig::audio = true`; `audio::load_sound(app_dir + "/sounds/x.ogg")` once, then `ctx.audio()->play(sound, {gain, pan, loop})` from any thread; `play_stream(fn)` for generated or streamed audio. Paused in the background. See Example B (Settings, Widgets). |
 | Keep the screen on during video, a slideshow or a game | Hold `ctx.keep_screen_on("video playing")` while it moves; `release()` on pause, end or error. See Example D. |
 | Busy and determinate progress | `Spinner`, `ProgressBar` (`set_value` / `set_indeterminate`). |

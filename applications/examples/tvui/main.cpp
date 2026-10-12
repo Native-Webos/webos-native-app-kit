@@ -24,6 +24,7 @@
 #include "wnk/app/app.hpp"
 #include "wnk/audio/audio.hpp"
 #include "wnk/log.hpp"
+#include "wnk/net/lan.hpp"
 #include "wnk/ui/collection.hpp"
 #include "wnk/ui/forms.hpp"
 #include "wnk/ui/navigation.hpp"
@@ -160,7 +161,8 @@ struct Sounds {
 
 class HomeScreen : public Screen {
  public:
-    HomeScreen(const Catalogue &cat, Navigator &nav, Sounds &sounds) : Screen("home"), cat_(cat), nav_(nav), sounds_(sounds) {
+    HomeScreen(wnk::app::Context &ctx, const Catalogue &cat, Navigator &nav, Sounds &sounds)
+        : Screen("home"), ctx_(ctx), cat_(cat), nav_(nav), sounds_(sounds) {
         name = "home";
         auto &row = add<Row>(0);
 
@@ -187,6 +189,10 @@ class HomeScreen : public Screen {
     }
 
     View &first_rail() { return *rails_[0]; }
+
+    void show_network(const wnk::platform::NetworkStatus &s) {
+        if (network_row_ != nullptr) network_row_->set_value(s.summary());
+    }
 
     std::string describe() const { return std::to_string(grid_->live_count()); }
 
@@ -255,6 +261,13 @@ class HomeScreen : public Screen {
         col.name = "section.widgets";
         col.set_padding({16, 0, 60, 0});
         col.add<Label>("Widgets", TextRole::Title);
+        // Outside the app: the TV's browser, its notification cards, and the home network.
+        auto &system = col.add<Row>(24);
+        system.add<Button>("Open a web page", [this](Ui &) { ctx_.open_url("https://www.webosbrew.org/"); }).name = "widgets.url";
+        system.add<Button>("TV notification", [this](Ui &ui) {
+            ctx_.system_toast("Hello from WNK TV", [&ui](bool ok) { ui.toast(ok ? "Sent to the TV" : "The TV refused the notification"); });
+        }).name = "widgets.notify";
+        system.add<Button>("Find devices", [this](Ui &ui) { find_devices(ui); }).name = "widgets.devices";
         auto &buttons = col.add<Row>(24);
         buttons.add<Button>("Show a dialog", [](Ui &ui) {
             auto d = std::make_unique<Dialog>("Remove from list?",
@@ -298,6 +311,30 @@ class HomeScreen : public Screen {
                        "which this one demonstrates on a single line.")
             .set_muted(true);
         return col;
+    }
+
+    // DNS-SD: which kinds of service answer on this network (Cast, AirPlay, printers...), on a worker.
+    void find_devices(Ui &ui) {
+        ui.toast("Looking for devices…");
+        wnk::async::run_then_post<std::vector<std::string>>(
+            ctx_.pool(), ctx_.dispatcher(), life_.weak(), {},
+            [](const wnk::async::CancellationToken &t) {
+                std::vector<std::string> kinds;
+                std::string err;
+                for (const auto &s : wnk::net::mdns_browse("_services._dns-sd._udp.local", std::chrono::milliseconds(1500), t, &err)) {
+                    kinds.push_back(s.name);
+                }
+                if (!err.empty()) WNK_LOGW(kCat, "find devices: %s", err.c_str());
+                return kinds;
+            },
+            [this](std::vector<std::string> kinds) {
+                WNK_LOGI(kCat, "find devices: %zu service types", kinds.size());
+                std::string list;
+                for (const auto &k : kinds) list += (list.empty() ? "" : ", ") + k;
+                auto d = std::make_unique<Dialog>("On this network", kinds.empty() ? "Nothing answered." : list);
+                d->add_button("Close");
+                ctx_.ui().show_dialog(std::move(d));
+            });
     }
 
     // A settings screen from the form controls: tabs over three pages of rows, a value row that edits
@@ -350,6 +387,8 @@ class HomeScreen : public Screen {
             sounds_.on = on;
             WNK_LOGI(kCat, "setting interface sounds = %s", on ? "on" : "off");
         }).name = "settings.sounds";
+        network_row_ = &general.add<ValueRow>("Network", ctx_.network().summary());
+        network_row_->name = "settings.network";
 
         auto &playback = stack.add<Column>(16);
         playback.set_width(Dim::fixed(1100)).set_align(Align::Start, Align::Start);
@@ -386,9 +425,12 @@ class HomeScreen : public Screen {
         return col;
     }
 
+    wnk::app::Context &ctx_;
     const Catalogue &cat_;
     Navigator &nav_;
     Sounds &sounds_;
+    ValueRow *network_row_ = nullptr;
+    wnk::async::Lifetime life_;
     std::vector<View *> settings_pages_;
     View *content_ = nullptr;
     std::vector<View *> sections_;
@@ -418,7 +460,7 @@ class TvUi : public wnk::app::Delegate {
         const auto params = nlohmann::json::parse(ctx.launch().params_json.empty() ? "{}" : ctx.launch().params_json, nullptr, false);
         sounds_.on = params.is_object() && params.value("sounds", false);
         if (sounds_.on) WNK_LOGI(kCat, "interface sounds on");
-        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(cat_, *nav_, sounds_)));
+        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(ctx, cat_, *nav_, sounds_)));
         ui.focus_within(&home_->first_rail());
     }
 
@@ -431,6 +473,10 @@ class TvUi : public wnk::app::Delegate {
             sounds_.play(sounds_.chord);
         }
         return true;
+    }
+
+    void on_network(wnk::app::Context &, const wnk::platform::NetworkStatus &s) override {
+        if (home_ != nullptr) home_->show_network(s);
     }
 
     void on_frame(wnk::app::Context &ctx, float) override {

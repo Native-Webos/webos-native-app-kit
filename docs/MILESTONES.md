@@ -418,6 +418,27 @@ ffmpeg's own fragmented CENC output does not demux (its sample-encryption boxes 
 so the DASH test checks the manifest and licence path, and fragmented decryption is checked with the
 public streams.
 
+### M10 status (2026-10-12): licence audit and release workflow
+
+Licence audit: every component compiled into or bundled with a package is GPL-3.0-compatible (zlib,
+MIT or public domain, OFL-1.1, LGPL-2.1-or-later FFmpeg built without GPL or non-free parts); LG's
+libraries and libcurl come from the TV. Packages now carry `licenses/` (GPL text, notices, the
+licence of each bundled library, and `SOURCE.txt` naming the source and, with FFmpeg, the exact
+tarball); `check-package.py` refuses packages without them. Details in `LICENSING.md`.
+
+Release workflow: `tools/release.sh` (see `docs/RELEASING.md`) builds every package from a clean
+tree, runs the tests and checks, writes the source archive, the verified FFmpeg tarball,
+`RELEASE-NOTES.md` (generated from the packages, fw-check and the TV records) and `SHA256SUMS`.
+
+| Evidence | Tag |
+|---|---|
+| Packaging tool tests, with missing-licence and bundled-FFmpeg cases | `[TEST]` 22 tests |
+| Release 0.1.0 from 54ebef1: four packages pass check-package and fw-check 7/7 (webOS 5.3.1-11.2.0) | `[BUILD]` |
+| Two builds in different directories give byte-identical packages (after mapping SDL's build paths, whose asserts embedded them) | `[BUILD]` `--check-reproducible` |
+
+Open: installing and launching the release packages on the TV (the TV was off the network when the
+release was made), and tagging `v0.1.0`, which the script leaves to the owner.
+
 ## Device dependency
 
 Every milestone from M2 has a device column. Without a TV the kit can reach "builds, verifies, host

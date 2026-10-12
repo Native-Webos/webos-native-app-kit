@@ -311,6 +311,7 @@ stubbing a lookalike.
 | Busy and determinate progress | `Spinner`, `ProgressBar` (`set_value` / `set_indeterminate`). |
 | Section that changes with the D-pad but not with pointer hover | Example B `NavItem`: select on focus only when `ui.focus_source() != FocusSource::Pointer`; pointer selects on click. |
 | Settings that survive relaunch and reboot | `AppConfig::storage = true`, `database.operation`, `ctx.store()` (DB8 on the TV). |
+| Save games, a cached catalogue, anything over 64 KiB | `storage::BlobStore(*ctx.store())` (`wnk/storage/blob.hpp`) on a worker: chunked, a write replaces the old value whole or not at all, 8 MiB per value by default. |
 | Access token / password | `storage::SecretStore` on that store. Check `protection()` before saving if a plain envelope is unacceptable. |
 | Accounts, sign-in, sign-out, token refresh | `auth::Session` + `auth::CredentialStore` (`wnk_auth`), with an `Authenticator` for the provider. See "Sign-in and sessions". |
 | Device id for an API | `auth::installation_id(*ctx.store())`: random, per install. Never a serial or MAC. |

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Local HTTP + HTTPS test server for the curl transport tests, then run the test binary.
 
-    http_server.py TEST_BINARY
+    http_server.py TEST_BINARY [ARG...]
     http_server.py --serve HOST:PORT [DIR]   plain HTTP/WebSocket only, until interrupted (device
                                              tests); DIR is served at /files/<name>
 
@@ -13,12 +13,20 @@ HTTP server and an HTTPS server on 127.0.0.1 (ephemeral ports), and runs TEST_BI
     WNK_TEST_HTTPS_IP    https://127.0.0.1:<port>   (same server, name not in the certificate)
     WNK_TEST_CA          path of the CA certificate (PEM)
     WNK_TEST_FILES_DIR   a directory served at /files/<name> (byte ranges supported)
+In each ARG, @HTTP@ is replaced by the http base (for apps that take the server from launch params).
 Exits with the test binary's exit code. Stdlib + openssl CLI only; nothing leaves the machine.
 
 Byte-range routes (Range: bytes=FIRST- or FIRST-LAST, answered with 206/416), for streaming tests:
     /range?n=N        N bytes, byte i = i % 251; &noranges=1 ignores Range (200, whole body);
                       &drop=K closes every connection after K body bytes
     /files/NAME       a file from the served directory
+
+Catalogue routes, a synthetic stand-in for the TVmaze API used by Example C (applications/examples/shows):
+    /catalogue[/MODE]/shows?page=N   page 0: 250 shows, page 1: 50, later pages 404 (like TVmaze)
+    /catalogue[/MODE]/shows/ID       one show with _embedded seasons and cast
+    MODE fail: every request answers 503; flaky: the first 3 requests of the server's life answer
+    503 (one refresh with its retries), then normal; slow: show details arrive after 4 s; broken:
+    page 0 is not JSON
 
 WebSocket routes (GET with Upgrade: websocket), for tests/integration/test_websocket_curl.cpp:
     /ws/echo     echoes messages; text commands: ping-me (server ping), close-me (server close 1000
@@ -49,7 +57,8 @@ import struct
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 WS_DROPS = {"n": 0}
 FILES_DIR = {"path": None}
-RANGE_LOG: list[str] = []  # Range header of every /range and /files request, for /range-log
+RANGE_LOG: list[str] = []
+CATALOGUE_FLAKY = {"left": 3}  # Range header of every /range and /files request, for /range-log
 
 
 def parse_range(value: str, size: int) -> tuple[int, int] | None | str:
@@ -64,6 +73,31 @@ def parse_range(value: str, size: int) -> tuple[int, int] | None | str:
     if a >= size or b < a:
         return "416"
     return a, b
+
+
+CATALOGUE_WORDS = ["Northern", "Harbour", "Signal", "Quiet", "Summit", "Echo", "Atlas", "Ember", "Tide",
+                   "Orbit", "Meadow", "Glass", "River", "Lantern"]
+
+
+def catalogue_show(i: int) -> dict:
+    """Synthetic show i (1..300): deterministic, so tests can name what they expect."""
+    return {
+        "id": i,
+        "name": f"{CATALOGUE_WORDS[i % 14]} {CATALOGUE_WORDS[(i * 5 + 3) % 14]} {i}",
+        "premiered": f"{1990 + i % 35}-0{1 + i % 9}-15",
+        "ended": None if i % 3 else f"{2000 + i % 25}-06-01",
+        "status": "Running" if i % 3 else "Ended",
+        "language": "English",
+        "genres": ["Drama", "Comedy", "Mystery"][: 1 + i % 3],
+        "runtime": 30 + (i % 4) * 15,
+        "rating": {"average": None if i % 7 == 0 else round(5 + (i * 37 % 50) / 10, 1)},
+        "weight": i * 13 % 101,
+        "updated": 1700000000 + (i * 97 % 5000) * 60,
+        "network": {"name": "Test Network"} if i % 2 else None,
+        "webChannel": None if i % 2 else {"name": "Test Stream"},
+        "image": None,
+        "summary": f"<p>Synthetic show <b>{i}</b> &amp; its &quot;friends&quot;.</p><p>Second paragraph.</p>",
+    }
 
 
 def ws_send(w, op: int, payload: bytes, fin: bool = True, mask: bool = False):
@@ -202,6 +236,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 continue
             ws_send(self.wfile, op, data)
 
+    def _catalogue(self, path: str, q: dict):
+        mode, _, rest = path.partition("/")
+        if mode not in ("fail", "flaky", "slow", "broken"):
+            mode, rest = "", path
+        if mode == "flaky" and CATALOGUE_FLAKY["left"] > 0:
+            CATALOGUE_FLAKY["left"] -= 1
+            return self._send(503, b"unavailable")
+        if mode == "fail":
+            return self._send(503, b"unavailable")
+        js = {"Content-Type": "application/json"}
+        if rest == "shows":
+            page = int(q.get("page", ["0"])[0])
+            if mode == "broken" and page == 0:
+                return self._send(200, b"<html>maintenance</html>", {"Content-Type": "text/html"})
+            if page > 1:
+                return self._send(404, b'{"name":"Not Found","status":404}', js)
+            ids = range(1, 251) if page == 0 else range(251, 301)
+            return self._send(200, json.dumps([catalogue_show(i) for i in ids]).encode(), js)
+        if rest.startswith("shows/") and rest[6:].isdigit():
+            i = int(rest[6:])
+            if not 1 <= i <= 300:
+                return self._send(404, b'{"name":"Not Found","status":404}', js)
+            if mode == "slow":
+                time.sleep(4)
+            show = catalogue_show(i)
+            show["_embedded"] = {
+                "seasons": [{"number": n, "episodeOrder": 8 + n, "premiereDate": f"{2000 + n}-09-01"}
+                            for n in range(1, 2 + i % 5)],
+                "cast": [{"person": {"name": f"Actor {i}-{k}"}, "character": {"name": f"Role {k}"}} for k in range(3)],
+            }
+            return self._send(200, json.dumps(show).encode(), js)
+        return self._send(404, b"not found")
+
     def _route(self):
         url = urllib.parse.urlparse(self.path)
         if self.headers.get("Upgrade", "").lower() == "websocket" and url.path.startswith("/ws/"):
@@ -226,6 +293,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     f.seek(a)
                     return f.read(k)
                 return self._ranged(os.path.getsize(path), read)
+        if url.path.startswith("/catalogue/"):
+            return self._catalogue(url.path[len("/catalogue/"):], q)
         if url.path == "/ok":
             return self._send(200, b"hello", {"Content-Type": "text/plain", "X-Server": "wnk-test"})
         if url.path.startswith("/status/"):
@@ -301,7 +370,7 @@ def main() -> int:
         print(f"serving http/ws on {host}:{port}", flush=True)
         srv.serve_forever()
         return 0
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
     if shutil.which("openssl") is None:
@@ -325,7 +394,8 @@ def main() -> int:
                    WNK_TEST_HTTPS_IP=f"https://127.0.0.1:{https_srv.server_address[1]}",
                    WNK_TEST_CA=ca,
                    WNK_TEST_FILES_DIR=FILES_DIR["path"])
-        return subprocess.run([sys.argv[1]], env=env).returncode
+        args = [a.replace("@HTTP@", env["WNK_TEST_HTTP_BASE"]) for a in sys.argv[2:]]
+        return subprocess.run([sys.argv[1], *args], env=env).returncode
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

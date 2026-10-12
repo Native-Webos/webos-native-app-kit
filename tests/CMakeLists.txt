@@ -157,6 +157,69 @@ if (TARGET wnk-tvui)
     wnk_tvui_e2e(metrics_overlay_toggle "F4,Right,F4" "metrics overlay on.*focus rail0.item1.*metrics overlay off")
 endif ()
 
+# Example C (networked app): its catalogue code on its own, then the app against the synthetic
+# /catalogue routes of http_server.py (nothing reaches the real TVmaze API).
+if (TARGET wnk_example_shows_catalogue)
+    add_executable(test_shows_catalogue unit/test_shows_catalogue.cpp)
+    target_include_directories(test_shows_catalogue PRIVATE unit)
+    target_link_libraries(test_shows_catalogue PRIVATE wnk_example_shows_catalogue)
+    add_test(NAME unit.shows_catalogue COMMAND test_shows_catalogue)
+endif ()
+if (TARGET wnk-shows AND Python3_FOUND)
+    # Z is unmapped on the host keymap: a step that only waits (steps are ~0.1 s apart).
+    set(WNK_SHOWS_WAIT "Z,Z,Z,Z,Z,Z,Z,Z,Z,Z")
+    set(WNK_SHOWS_DATA "${CMAKE_CURRENT_BINARY_DIR}/e2e-shows")
+    # Each run gets its own data directory: a saved copy from another run would change what loads first.
+    function(wnk_shows_e2e name mode keys pass)
+        add_test(NAME e2e.shows.${name}
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                        "$<TARGET_FILE:wnk-shows>" "{\"api\":\"@HTTP@/catalogue${mode}\"}")
+        set_tests_properties(e2e.shows.${name} PROPERTIES
+                ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_DATA_HOME=${WNK_SHOWS_DATA}/${name};WNK_SHOWS_KEYS=${keys}"
+                PASS_REGULAR_EXPRESSION "${pass}"
+                FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
+                TIMEOUT 60)
+    endfunction()
+    add_test(NAME e2e.shows.reset_state COMMAND "${CMAKE_COMMAND}" -E rm -rf "${WNK_SHOWS_DATA}")
+    set_tests_properties(e2e.shows.reset_state PROPERTIES FIXTURES_SETUP shows_state)
+
+    # Rails fill from page 0; OK opens the details (seasons and cast fetched), Back returns to the card.
+    wnk_shows_e2e(details_back_restores_focus "" "${WNK_SHOWS_WAIT},Right,Return,${WNK_SHOWS_WAIT},Escape,Z,Z"
+            "catalogue page 0: 250 shows.*open details for show 127.*details 127 loaded in [0-9.]+ s: 3 seasons, 3 cast.*back to home focus=rail0.item1")
+    # 503 three times (HttpClient retries with backoff), the error panel takes focus, Try again succeeds.
+    wnk_shows_e2e(retry_after_server_error "/flaky" "${WNK_SHOWS_WAIT},${WNK_SHOWS_WAIT},Return,${WNK_SHOWS_WAIT}"
+            "HTTP 503 after 3 attempt.*showing error: The catalogue server has a problem \\(HTTP 503\\).*focus home.retry.*catalogue page 0: 250 shows.*focus rail0.item0")
+    wnk_shows_e2e(unreadable_reply "/broken" "${WNK_SHOWS_WAIT}"
+            "showing error: The catalogue sent a reply the app cannot read")
+    # Back while the details are still loading stops the transfer; the late reply never reaches the UI.
+    wnk_shows_e2e(back_cancels_details "/slow" "${WNK_SHOWS_WAIT},Right,Return,Z,Z,Z,Z,Z,Escape,${WNK_SHOWS_WAIT}"
+            "details 127: closed while loading, cancelling the request.*details 127: request cancelled after 0\\.[0-9]+ s")
+    # Paging: the last rows of page 0 fetch page 1, the end of page 1 meets the 404 that ends the list.
+    string(REPEAT ",Down" 50 WNK_SHOWS_DOWN50)
+    wnk_shows_e2e(grid_pages_to_the_end "" "${WNK_SHOWS_WAIT},Left,Down,Right${WNK_SHOWS_DOWN50}${WNK_SHOWS_DOWN50},${WNK_SHOWS_WAIT}"
+            "page 1: 50 shows.*page 2: end of the catalogue at 300 shows")
+    foreach (t details_back_restores_focus retry_after_server_error unreadable_reply back_cancels_details grid_pages_to_the_end)
+        set_tests_properties(e2e.shows.${t} PROPERTIES FIXTURES_REQUIRED shows_state)
+    endforeach ()
+    set_tests_properties(e2e.shows.back_cancels_details PROPERTIES
+            FAIL_REGULAR_EXPRESSION "details 127 loaded|${WNK_SANITIZER_FAIL}")
+
+    # Across launches: the first run saves the catalogue and a favourite in the store; the second has
+    # no server at all (port 9 refuses) and shows the saved copy and the favourite.
+    wnk_shows_e2e(saved_copy_first_run "" "${WNK_SHOWS_WAIT},Right,Return,${WNK_SHOWS_WAIT},Return,${WNK_SHOWS_WAIT}"
+            "saved copy: 150 shows.*favourites: 1 saved")
+    set_tests_properties(e2e.shows.saved_copy_first_run PROPERTIES
+            FIXTURES_REQUIRED shows_state FIXTURES_SETUP shows_saved RESOURCE_LOCK shows_saved
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_DATA_HOME=${WNK_SHOWS_DATA}/saved;WNK_SHOWS_KEYS=${WNK_SHOWS_WAIT},Right,Return,${WNK_SHOWS_WAIT},Return,${WNK_SHOWS_WAIT}")
+    add_test(NAME e2e.shows.saved_copy_offline COMMAND wnk-shows "{\"api\":\"http://127.0.0.1:9/catalogue\"}")
+    set_tests_properties(e2e.shows.saved_copy_offline PROPERTIES
+            FIXTURES_REQUIRED "shows_state;shows_saved" RESOURCE_LOCK shows_saved
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};XDG_DATA_HOME=${WNK_SHOWS_DATA}/saved;WNK_SHOWS_KEYS=${WNK_SHOWS_WAIT},${WNK_SHOWS_WAIT}"
+            PASS_REGULAR_EXPRESSION "saved copy ok \\(150 shows\\), favourites ok \\(1\\).*showing saved copy of 150 shows.*keeping the saved list: Cannot reach the catalogue"
+            FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
+            TIMEOUT 60)
+endif ()
+
 # FfmpegSource on real clips generated by the system ffmpeg CLI (SKIPs without it).
 if (TARGET wnk_media_ffmpeg)
     add_executable(test_ffmpeg_source integration/test_ffmpeg_source.cpp)

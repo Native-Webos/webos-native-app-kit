@@ -719,6 +719,15 @@
       "method": "Example D 0.13.1-0.13.6 on Mux HLS-TS with scripted seeks ({\"seeks\": ...}: pairs 0.3-1.5 s apart, forward and backward, a triple) and the sink's displayed/dropped counters (callbacks 49/48) summed every 5 s",
       "evidence": "0.13.4: after a pair 0.7 s apart the sink showed 0 of ~300 frames per 5 s for the rest of playback while position and audio ran on; 0.13.5 holds a seek until the previous splice is on screen (max 2.5 s) and keeps 600 ms ahead of the clock: 260-300 displayed, at most 4 dropped around each seek, all patterns; owner: seek pairs, held keys and quick Left presses smooth, presses add up in 0.13.6",
       "limitations": "a held seek shows the previous target's picture for up to about a second before the next one"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "examples.shows.https_json_db8",
+      "result": "supported",
+      "method": "Example C (org.wnk.examples.shows 0.1.0) launched with ares-launch against the public TVmaze API, then closed and launched again; events.log read with tools/logs.sh",
+      "evidence": "firmware libcurl/7.61.0 OpenSSL/1.1.1t fetched https://api.tvmaze.com/shows?page=0 (240 shows, ~370 KB) in 2.09 s and 2.14 s, parsed on a worker in ~60 ms; the 150-show saved copy (23361 bytes) was written to DB8 and on the second launch read back and on screen 333 ms after start, replaced by the live list at 2.5 s",
+      "limitations": "launches only: browsing, details, Back-cancels-request, favourites and paging were exercised on the host (tests/CMakeLists.txt e2e.shows.*), not yet with a remote on the TV"
     }
   ]
 }

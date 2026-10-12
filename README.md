@@ -49,6 +49,7 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 | `media/` | Media model, playback controller, FFmpeg source (bundled FFmpeg via `tools/build-ffmpeg.sh`), NDL v2 backend, no-output pacing backend |
 | `applications/examples/hello/` | Example A: tile grid with focus ring, modal dialog, key log, device probe |
 | `applications/examples/tvui/` | Example B: sidebar, poster rails, 1000-item grid, details screen, dialogs; `ui/` on the `app/` shell |
+| `applications/examples/shows/` | Example C: networked app on the TVmaze API: paged grid, details, cancellation, error states, saved copy and favourites in DB8 |
 | `applications/examples/player/` | Example D: native playback of bundled A/V-sync clips (`tools/make-test-clips.sh`) through NDL |
 | `cmake/` | Target detection, SDL-webOS build, `wnk_add_webos_package()` |
 | `tools/` | `mkipk.py` (reproducible ipk), `check-package.py`, `fw-check.py`, shell tools |
@@ -63,6 +64,7 @@ build/host-debug/applications/examples/hello/wnk-hello      # arrows, Enter, Esc
 SDL_VIDEODRIVER=offscreen WNK_HELLO_KEYS=Right,Down,Return WNK_HELLO_SHOT=/tmp/shot.bmp \
     build/host-debug/applications/examples/hello/wnk-hello
 build/host-debug/applications/examples/tvui/wnk-tvui        # Example B; WNK_TVUI_KEYS / WNK_TVUI_SHOT likewise
+build/host-debug/applications/examples/shows/wnk-shows      # Example C (needs the network); WNK_SHOWS_KEYS / _SHOT
 ```
 
 ## Licence

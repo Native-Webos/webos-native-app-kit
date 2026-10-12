@@ -27,6 +27,7 @@ Reference apps already in the tree:
 | App | Path | What to copy |
 |---|---|---|
 | Example B, TV UI | `applications/examples/tvui/` | **Default template.** Shell + widget tree + navigation. |
+| Example C, shows | `applications/examples/shows/` | REST/JSON on the pool, cancellation on Back, error + Try again, paging, saved copy and favourites in DB8. |
 | Example D, player | `applications/examples/player/` | Video, DASH/HLS, subtitles, background pause. |
 | Example A, hello | `applications/examples/hello/` | Diagnostics only. It keeps its own SDL loop on purpose. **Do not copy that loop.** |
 
@@ -287,7 +288,7 @@ stubbing a lookalike.
 | Section that changes with the D-pad but not with pointer hover | Example B `NavItem`: select on focus only when `ui.focus_source() != FocusSource::Pointer`; pointer selects on click. |
 | Settings that survive relaunch and reboot | `AppConfig::storage = true`, `database.operation`, `ctx.store()` (DB8 on the TV). |
 | Access token / password | `storage::SecretStore` on that store. Check `protection()` before saving if a plain envelope is unacceptable. |
-| REST/JSON API | `AppConfig::http = true`, `net::HttpClient` on `ctx.http()`, `ctx.pool()`, `ctx.dispatcher()`. |
+| REST/JSON API | `AppConfig::http = true`, `net::HttpClient` on `ctx.http()`, `ctx.pool()`, `ctx.dispatcher()`. See Example C. |
 | Live updates | `net::WebSocketClient` (`ws://` / `wss://`). The shell does not create one; the app does. |
 | File or HTTP video, pause, seek | `FfmpegSource` + `PlaybackController` + `AutoBackend` (Starfish preferred, NDL fallback). Example D. |
 | DASH (`.mpd`) or HLS (`.m3u8`), including live | `AdaptiveSource` when `AdaptiveSource::handles(uri)`. |

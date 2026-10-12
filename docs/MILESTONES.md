@@ -13,7 +13,7 @@ level stated. Device items stay open until run on a TV.
 | 5 | Platform services | ✅ storage, background work, HTTP, images, secrets and WebSocket (all run on an OLED65C1PTB, webOS 6.5.3) |
 | 6 | Lifecycle and diagnostics | 🟡 shell, lifecycle, crash record, capabilities, metrics overlay done and run on an OLED65C1PTB (webOS 6.5.3) |
 | 7 | Media foundation | 🟡 controller, FFmpeg source, NDL v2 backend, Example D; plays H.264/HEVC with sound on an OLED65C1PTB (webOS 6.5.3) |
-| 8 | Reference applications | ⬜ |
+| 8 | Reference applications | 🟡 A, B and D exist; Example C (networked app) host-tested, launched on an OLED65C1PTB (webOS 6.5.3) |
 | 9 | Optional Jellyfin client | ⬜ |
 | 10 | Compatibility and release | ⬜ |
 
@@ -329,6 +329,27 @@ a decoder-side position, real pause via Starfish, and a PTS-unit test that does 
 
 Reference apps A–D polished; Jellyfin client (app-only module) on top; compatibility test runs,
 licence audit, release workflow.
+
+### M8 status (2026-10-12)
+
+Example C, `applications/examples/shows` (org.wnk.examples.shows): browses the public TVmaze API
+(HTTPS JSON, no key). It is the reference for the network side of an app: requests and JSON parsing on
+the worker pool, results delivered through the dispatcher and dropped when the asking screen is gone,
+a paged grid (focus near the end fetches the next page; 404 ends it), a details screen whose request is
+cancelled on Back, failures turned into one sentence with Try again (transient ones retried by
+`HttpClient` first), a saved copy of the catalogue in DB8 shown at launch and kept when offline, and
+favourites written with compare-and-set. The catalogue code (`catalogue.cpp`) has no UI or threads and
+has its own unit tests.
+
+| Evidence | Tag |
+|---|---|
+| 10 unit tests of the catalogue code (malformed pages, HTML summaries, saved copy within the value limit, favourites, rails, error text) | `[TEST]` `unit.shows_catalogue` |
+| 7 host runs against synthetic `/catalogue` routes of `http_server.py` (details and Back, 503 then Try again, unreadable reply, Back cancels a slow request, paging to the 404, saved copy and favourite used by an offline second launch) | `[TEST]` `e2e.shows.*` |
+| On the TV: firmware libcurl 7.61 / OpenSSL 1.1.1t fetches page 0 (~370 KB) in 2.1 s; the saved copy is written to DB8 and on the next launch shown 333 ms after start | `[DEVICE]` records.json |
+
+The app raises `worker_threads` to 4: posters and API requests share the pool, and with 2 workers a
+0.36 s details request answered 0.98 s after OK (host). Open: the same checks with a remote on the TV
+(details, Back during a load, favourites, paging, Magic Remote), and polish of Examples A, B and D.
 
 ## Device dependency
 

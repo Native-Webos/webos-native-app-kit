@@ -60,6 +60,7 @@ if (WNK_BUILD_EXAMPLES)
     include(WebOSPackage)
     add_subdirectory(applications/examples/hello)
     add_subdirectory(applications/examples/tvui)
+    add_subdirectory(applications/examples/shows)
     add_subdirectory(applications/examples/player)
 endif ()
 

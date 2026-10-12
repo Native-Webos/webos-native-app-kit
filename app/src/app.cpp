@@ -440,9 +440,14 @@ class Shell final : public Context {
         SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
         if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) return fail("SDL video init");
         if (config_.gamepads) {
+            // Nintendo pads over Bluetooth: SDL's own Switch driver (HIDAPI) fails on the TV reading the
+            // stick calibration ("Couldn't load stick calibration", Pro Controller, OLED65C1PTB); the
+            // kernel's driver works, so leave those to it, as moonlight-tv does (src/app/app.c).
+            SDL_SetHintWithPriority("SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES", "0x057e/0x0000", SDL_HINT_DEFAULT);
             if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
                 WNK_LOGW("gamepad", "no game controller support: %s", SDL_GetError());
             } else {
+                log_input_devices();
                 const std::string db = launch_.app_dir + "/" + config_.gamepad_mappings;
                 if (!config_.gamepad_mappings.empty() && access(db.c_str(), R_OK) == 0) {
                     const int n = SDL_GameControllerAddMappingsFromFile(db.c_str());
@@ -764,6 +769,9 @@ class Shell final : public Context {
             case SDL_MOUSEWHEEL:
                 if (auto p = input::pointer_event_from_sdl(ev, window_)) on_pointer(*p);
                 break;
+            case SDL_JOYDEVICEADDED:
+                if (config_.gamepads) log_joysticks("joystick added");
+                break;
             case SDL_CONTROLLERDEVICEADDED:
             case SDL_CONTROLLERDEVICEREMOVED:
             case SDL_CONTROLLERBUTTONDOWN:
@@ -961,9 +969,45 @@ class Shell final : public Context {
         return it->second && it->second->covers(cp);
     }
 
+    // What the app can see of game controllers: its groups, which input event files it may open, and
+    // every joystick SDL found (a pad without a controller mapping is a joystick but not a controller).
+    void log_input_devices() {
+        gid_t groups[64];
+        const int n = getgroups(64, groups);
+        std::string gs;
+        for (int i = 0; i < n; ++i) gs += (gs.empty() ? "" : ",") + std::to_string(groups[i]);
+        int readable = 0, total = 0;
+        for (int i = 0; i < 64; ++i) {
+            const std::string path = "/dev/input/event" + std::to_string(i);
+            if (access(path.c_str(), F_OK) != 0) continue;
+            ++total;
+            if (access(path.c_str(), R_OK) == 0) ++readable;
+        }
+        WNK_LOGI("gamepad", "uid %u gid %u groups [%s]; /dev/input event files readable %d of %d", getuid(), getgid(),
+                 gs.c_str(), readable, total);
+        log_joysticks("at start");
+    }
+
+    void log_joysticks(const char *when) {
+        const int count = SDL_NumJoysticks();
+        WNK_LOGI("gamepad", "%s: %d joystick(s)", when, count);
+        for (int i = 0; i < count; ++i) {
+            char guid[40];
+            SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof guid);
+            const char *name = SDL_JoystickNameForIndex(i);
+            WNK_LOGI("gamepad", "  joystick %d: %s, guid %s, %s", i, name != nullptr ? name : "?", guid,
+                     SDL_IsGameController(i) ? "game controller" : "NO controller mapping");
+        }
+    }
+
     void on_pad(const SDL_Event &ev) {
         auto e = gamepads_.on_sdl(ev);
-        if (!e) return;
+        if (!e) {
+            if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                WNK_LOGW("gamepad", "controller %d not opened: %s", ev.cdevice.which, SDL_GetError());
+            }
+            return;
+        }
         if (e->type == input::GamepadEvent::Type::Added) {
             WNK_LOGI("gamepad", "pad %d connected: %s (%zu connected)", e->id, e->name.c_str(), gamepads_.connected());
             note_capability("input.gamepad", diagnostics::Support::Supported, e->name);

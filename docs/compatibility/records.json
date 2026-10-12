@@ -807,8 +807,8 @@
       "feature": "text.system_fallback_fonts",
       "result": "supported",
       "method": "Example C 0.3.0 {\"wnkLocale\":\"ja-JP\"}",
-      "evidence": "The app jail lists 90 font files under /usr/share/fonts; FontFinder picked /usr/share/fonts/LG_Display_GP3_JP.ttf for the Japanese catalogue's kana and kanji",
-      "limitations": "The first search took 2.4 s, so Japanese text appears that long after the screen; not yet checked by eye"
+      "evidence": "The app jail lists 90 font files under /usr/share/fonts; FontFinder picked /usr/share/fonts/LG_Display_GP3_JP.ttf for the Japanese catalogue's kana and kanji; owner saw Example C's menu in Japanese without missing glyphs",
+      "limitations": "The first search took 2.4 s, so Japanese text appears that long after the screen"
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",
@@ -888,8 +888,8 @@
       "feature": "input.text_field_vkb",
       "result": "supported",
       "method": "Example C 0.3.0 Browse search: OK on the field, typing with LG's on-screen keyboard and the remote",
-      "evidence": "SDL_StartTextInput opened LG's keyboard ('screen keyboard supported'); typed text reached the field and filtered the grid; Backspace (sc 42) and OK (sc 40) arrive as keys; closing the keyboard ends editing ('keyboard closed by the system')",
-      "limitations": "In 0.3.0 moving the Magic Remote pointer towards the keyboard hovered grid cards, which moved focus and closed the keyboard; fixed in 0.3.1 (hover does not move focus while a field edits), not yet re-checked"
+      "evidence": "SDL_StartTextInput opened LG's keyboard ('screen keyboard supported'); typed text reached the field and filtered the grid; Backspace (sc 42) and OK (sc 40) arrive as keys; closing the keyboard ends editing ('keyboard closed by the system'); 0.3.1: with hover no longer moving focus while editing, the owner moved the Magic Remote pointer onto LG's keyboard and typed with it; the keyboard stayed open",
+      "limitations": "None found"
     }
   ]
 }

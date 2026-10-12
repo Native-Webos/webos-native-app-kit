@@ -868,10 +868,10 @@
       "device": "lg-oled65c1ptb-6.5.3",
       "date": "2026-10-13",
       "feature": "accessibility.tts",
-      "result": "unknown",
+      "result": "unsupported",
       "method": "Example B 0.6.1 {\"wnkSpeak\":true}",
-      "evidence": "com.webos.service.tts/speak answered 'Audio Guidance is off': the service exists and is reachable from the app, and speaks only with Audio Guidance on; the audioGuidance setting subscription reports 'off' (Example B 0.6.2)",
-      "limitations": "Owner turned Audio Guidance on but nothing was spoken: the app read option/audioGuidance as 'off' at start and no change arrived; luna-send-pub from the dev shell also reads 'off' afterwards. Unresolved"
+      "evidence": "com.webos.service.tts/speak answered 'Audio Guidance is off': the service exists and is reachable from the app, and speaks only with Audio Guidance on; the audioGuidance setting subscription reports 'off' (Example B 0.6.2); this TV's Accessibility menu has no Audio Guidance (it offers Audio Description, which is narration for video, not a screen reader); luna-send-pub com.webos.service.tts/speak from the dev shell also returns errorCode 8101 'Audio Guidance is off'",
+      "limitations": "TTS speaks only while Audio Guidance is on, and this TV (region en-AU) has no Audio Guidance setting, so no app can speak here. The kit's path (follow option/audioGuidance, speak focus) still needs a TV that has the setting. The audio description setting's key was not found among audioDescription/adSoundMode in option, sound, general"
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",

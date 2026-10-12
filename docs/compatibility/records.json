@@ -737,6 +737,15 @@
       "method": "Example D 0.14.0, scripted switches ({\"audio\": \"4:2,8:1\"}) on the bundled clip with two AAC tracks (1 kHz English, 500 Hz French) through Starfish and through NDL ({\"backend\": \"ndl\"}), and on Shaka angel-one DASH (Spanish to French, Starfish)",
       "evidence": "Starfish: Seeking at 4.50 s, new track from 3.74 s, first frame 330 ms after the switch, decoder position continuous; NDL (audio decoded to PCM): Seeking to Playing in 175 ms, from 3.49 s and 6.73 s; DASH: French rendition fetched and playing 3.0 s after the switch; all three played to the end or on without errors",
       "limitations": "playback restarts at the keyframe at or before the position, like a seek: up to one segment earlier on DASH/HLS (about 4 s on angel-one). The audio was not judged by ear (no one at the TV); the log shows the track and codec fed"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "unit_tests.auth_on_device",
+      "result": "supported",
+      "method": "tools/device-test.sh test_auth (Developer Mode shell, FileStore in /tmp, plain secret envelopes)",
+      "evidence": "13/13: credential storage, session restore, shared refresh on 401, refresh before expiry, rejected and failed refresh, sign-out, no token in the log",
+      "limitations": "runs outside an app jail, so DB8 and keymanager3 are not exercised; the session has no app on the TV yet"
     }
   ]
 }

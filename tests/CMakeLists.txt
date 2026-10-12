@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket)
+foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket auth)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -26,6 +26,7 @@ target_link_libraries(test_subtitle_view PRIVATE wnk_media_ui)
 target_link_libraries(test_starfish PRIVATE wnk_media_starfish)
 target_link_libraries(test_secret PRIVATE wnk_storage)
 target_link_libraries(test_websocket PRIVATE wnk_net)
+target_link_libraries(test_auth PRIVATE wnk_auth)
 target_include_directories(test_secret SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 

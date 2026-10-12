@@ -55,6 +55,7 @@ add_subdirectory(diagnostics)
 add_subdirectory(app)
 include(Ffmpeg)
 add_subdirectory(media)
+add_subdirectory(services/auth)
 
 if (WNK_BUILD_EXAMPLES)
     include(WebOSPackage)

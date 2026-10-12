@@ -83,6 +83,7 @@ These are enforced by the architecture, the packaging checks, and the way the TV
 | `net/` | HTTP(S), streaming body, WebSocket. |
 | `image/` | PNG/JPEG fetch, decode, caches. `ImageView` uses this through the shell. |
 | `storage/` | Key/value store (DB8 on the TV) and `SecretStore`. |
+| `services/auth/` | Optional: sign-in state, stored credentials, authorized requests with token refresh. Link `wnk_auth`. |
 | `platform/` | Launch params, paths, synchronous Luna. |
 | `diagnostics/` | Capabilities, device info (no serials or MACs), crash record, frame metrics. |
 | `media/` | Demux, playback controller, NDL, Starfish, DASH/HLS, subtitles. Separate link targets. |
@@ -95,7 +96,7 @@ These are enforced by the architecture, the packaging checks, and the way the TV
 | `docs/MILESTONES.md` | What is implemented and what was measured on hardware. |
 
 `wnk_app` already links UI, images, storage, async, net, input, GLES2 renderer, platform, and SDL.
-A UI-only app links `wnk_app` and nothing else.
+A UI-only app links `wnk_app` and nothing else. An app with accounts also links `wnk_auth`.
 
 ## Recipe: add the app
 
@@ -288,6 +289,8 @@ stubbing a lookalike.
 | Section that changes with the D-pad but not with pointer hover | Example B `NavItem`: select on focus only when `ui.focus_source() != FocusSource::Pointer`; pointer selects on click. |
 | Settings that survive relaunch and reboot | `AppConfig::storage = true`, `database.operation`, `ctx.store()` (DB8 on the TV). |
 | Access token / password | `storage::SecretStore` on that store. Check `protection()` before saving if a plain envelope is unacceptable. |
+| Accounts, sign-in, sign-out, token refresh | `auth::Session` + `auth::CredentialStore` (`wnk_auth`), with an `Authenticator` for the provider. See "Sign-in and sessions". |
+| Device id for an API | `auth::installation_id(*ctx.store())`: random, per install. Never a serial or MAC. |
 | REST/JSON API | `AppConfig::http = true`, `net::HttpClient` on `ctx.http()`, `ctx.pool()`, `ctx.dispatcher()`. See Example C. |
 | Live updates | `net::WebSocketClient` (`ws://` / `wss://`). The shell does not create one; the app does. |
 | File or HTTP video, pause, seek | `FfmpegSource` + `PlaybackController` + `AutoBackend` (Starfish preferred, NDL fallback). Example D. |
@@ -446,6 +449,50 @@ secrets.put("token", token);  // blocks; call from a worker or startup
 
 Permissions: `database.operation` and `securitykey.operation`. A sealed value is never overwritten
 with a plain envelope. Reading a sealed value while keymanager3 is down returns `Locked`.
+
+### Sign-in and sessions
+
+`services/auth` keeps who is signed in and sends requests with their credentials. The app owns the
+login flow (pick a user, a code shown on screen, a paired phone) and the provider-specific parts;
+the session owns storage, refresh, retry and sign-out.
+
+```cpp
+#include "wnk/auth/session.hpp"
+
+class ApiAuth final : public auth::Authenticator {
+ public:
+    void authorize(net::HttpRequest *req, const auth::Credentials &c) const override {
+        req->headers.emplace_back("Authorization", "Bearer " + c.access_token);
+    }
+    // Optional: refresh() (worker thread) when the provider has refresh tokens, revoke() for sign-out.
+};
+
+// on_start, with AppConfig::storage = true and http = true:
+secrets_ = std::make_unique<storage::SecretStore>(*ctx.store(), storage::luna_keymanager3(),
+                                                  ctx.launch().app_id + ".secrets.v1");
+http_ = std::make_unique<net::HttpClient>(ctx.http(), ctx.pool(), ctx.dispatcher());
+session_ = std::make_unique<auth::Session>(std::make_shared<auth::CredentialStore>(*secrets_, *ctx.store()),
+                                           std::make_shared<ApiAuth>(), ctx.pool(), ctx.dispatcher());
+session_->set_listener([this](auth::SessionState, auth::SessionState to, const std::string &why) {
+    if (to == auth::SessionState::SignedOut) show_login(why);
+});
+session_->restore([this](auth::SessionState s) { s == auth::SessionState::SignedIn ? show_home() : show_login({}); });
+
+// After the app's own login request succeeded:
+session_->sign_in(creds, /*remember=*/true);
+// Every request that needs the user:
+session_->send(*http_, req, cancel_.token(), life_.weak(), [this](net::HttpResponse r) { ... });
+```
+
+- `send` adds the credentials, refreshes a token that expires within a minute first, and on a 401
+  refreshes once and retries. Concurrent 401s share that one refresh.
+- A refresh the provider rejects signs out (state `SignedOut` with the reason) and removes the stored
+  copy. A refresh that cannot reach the provider keeps the credentials; the requests get their 401.
+- Without a refresh token a 401 signs out (`SessionOptions::sign_out_on_401`, on by default).
+- `sign_out` forgets the credentials at once, then revokes and removes them on a worker.
+- `CredentialStore::accounts()` lists saved accounts without unsealing them (an account picker).
+- Destroy the session before the `SecretStore` and the key/value store it uses.
+- Log with `auth::describe(creds, now)`; never format a token or an `Authorization` header.
 
 ### WebSocket
 

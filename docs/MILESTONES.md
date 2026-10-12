@@ -367,6 +367,27 @@ describe A as the diagnostics app (no app shell; apps start from B).
 Open: the Example C checks with a remote on the TV (details, Back during a load, favourites, paging,
 Magic Remote), and judging the switched audio by ear.
 
+### Auth and sessions (2026-10-12)
+
+`services/auth` (`wnk_auth`), the mission's optional authentication service. It sits on the storage
+and network layers, and nothing in the platform layers depends on it.
+`Credentials` are provider-neutral (user, server, access and refresh token, expiry, extra fields).
+`CredentialStore` seals them per account through `SecretStore` and keeps a non-secret account list.
+`installation_id` gives a random per-install device id. `Session` runs on the main thread: restore at
+launch, sign-in from the app's own login flow, authorized `send` with a refresh before expiry, one
+shared refresh on 401 and a retry, sign-out on a rejected refresh, and sign-out with revoke and
+removal. The provider-specific parts (`authorize`, `refresh`, `revoke`) are an `Authenticator` the
+app implements.
+
+| Evidence | Tag |
+|---|---|
+| 13 unit tests: storage round trip and account order, restore, concurrent 401s sharing one refresh, rejected and failed refresh, refresh before expiry, 401 without a refresh token, sign-out during a refresh, dead callers, no token in any log line | `[TEST]` `unit.auth` |
+| Clean under ASan and under TSan (20 runs) | `[TEST]` |
+| The same 13 tests on the TV's CPU (`tools/device-test.sh test_auth`) | `[DEVICE]` records.json |
+
+Not yet used by an app: the first will be the Jellyfin client. Not covered: keymanager3 sealing on a
+TV that has it (webOS 6.5.3 does not), and a login UI (the kit has no text input).
+
 ## Device dependency
 
 Every milestone from M2 has a device column. Without a TV the kit can reach "builds, verifies, host

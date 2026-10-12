@@ -361,8 +361,11 @@ position; paused stays paused), and Up opens a track menu listing audio and subt
 | Host run: menu opens on the playing track, Right + OK plays the French track | `[TEST]` `e2e.player.tracks_menu_switches_audio` |
 | On the TV: scripted switches through Starfish and NDL on the clip and on Shaka DASH (Spanish to French) | `[DEVICE]` records.json |
 
+Examples A and B needed no new features against their lists. Example A's header and the README now
+describe A as the diagnostics app (no app shell; apps start from B).
+
 Open: the Example C checks with a remote on the TV (details, Back during a load, favourites, paging,
-Magic Remote), judging the switched audio by ear, and polish of Examples A and B.
+Magic Remote), and judging the switched audio by ear.
 
 ## Device dependency
 

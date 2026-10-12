@@ -70,3 +70,36 @@ The sequence that works: SDL exported window → `drm/load` → `drm/sendDrmMess
 
 Protected playback is therefore a separate backend: the platform plays the URL and the
 kit's controller, sources and subtitles are bypassed.
+
+## 2026-10-13: how dash.js does it, and the native equivalents
+
+**dash.js** never decrypts. It uses the browser's EME and MSE: `requestMediaKeySystemAccess` →
+`MediaKeys` on the video element → on the `encrypted` event (PSSH init data) `session.generateRequest`
+→ the CDM's `message` (a licence challenge) is POSTed to the licence server → `session.update(licence)`.
+Encrypted segments go to MSE `SourceBuffer.appendBuffer`; the browser's CDM and the TV's secure decode
+path do the rest. On an LG TV that CDM is the firmware's `libwidevine_ce_cdm_shared.so` (present on the
+OLED65C1PTB with `libplayreadycdm.so` and FairPlay CDMs).
+
+**Native equivalents found:**
+
+| Route | Where | Status |
+|---|---|---|
+| NDL media: `NDL_MediaLoadWithOption(uri, {option.drm {type, licenseUrl, useLicenseCallback}})`, `drmEncrypted` events with a challenge, `NDL_MediaSetDrmOperation(systemId, licence, "update", service, kid, sessionId, requestId)` | LG's own Flutter plugin (github.com/lg-flutter-webos/plugins, `packages/video_player_drm/webos`), Widevine and PlayReady | `NDL_MediaSetDrmOperation` only in the newest inventoried firmware (43.21.70); absent on this TV |
+| `com.webos.media/setDrmOperation {mediaId, systemId, drmData, drmMsgType, service, kid, sessionId, requestId}` | `libumedia_api` (`uMediaClient::setDrmOperation`) on this TV | Exists, but this TV's pipeline never raises `drmEncrypted` (tested with `useLicenseCallback:true`) |
+| webOS DRM Bridge (github.com/lennylxx/webos-drm-bridge): a native Luna service driving GStreamer DASH, the CE CDM and SecurePath directly | webOS 25 | Experimental; not for webOS 6 |
+
+**Measured on the OLED65C1PTB (webOS 6.5.3), Example D 0.19.0 `{"drmTest":{...,"license":"url|callback|service","transportInOption":false}}`,
+Shaka angel-one Widevine DASH:** with `mediaTransportType` beside `option` (as LG's plugin sends it) the
+by-URL pipeline no longer dies on encrypted DASH: it parses the MPD (10 audio tracks), selects tracks,
+buffers, and raises EME's `encrypted` event (`initDataType cenc`, the Widevine PSSH), then
+`error 552 Encrypted Content` and `drmRightsError` (system `edef8ba9-…`) while it waits for a licence.
+`option.drm.licenseUrl` does not make it fetch one; `useLicenseCallback` raises no challenge; a DRM
+service client (`drm/load widevine`, `clientId` in `option.drm`) is accepted but obtains no licence by
+itself.
+
+**What remains on webOS 6:** the licence must reach the DRM service client. For PlayReady the initiator
+message is known (Smooth Streaming played that way); for Widevine the `sendDrmMessage` message type and
+format (EME's generateRequest/update over Luna) are undocumented. Next experiments, if resumed: PlayReady
+DASH with the initiator and `mediaTransportType` beside `option`; then the Widevine message format from
+`libdrmcontroller`/`libdrmhandler` behaviour. On firmware with `NDL_MediaSetDrmOperation`, LG's plugin
+shows the complete flow.

@@ -899,6 +899,15 @@
       "method": "Example B 0.6.6 with a Nintendo Switch Pro Controller paired over Bluetooth in the TV's settings, used by the owner",
       "evidence": "App (uid 6067, group 505 compositor) can open all 32 /dev/input event files; SDL lists the pad as a game controller; with SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES=0x057e/0x0000 it opens through the kernel driver ('pad 0 connected: Nintendo Switch Pro Controller'); focus moved with the pad, OK opened details and Back returned three times, X reached Delegate::on_gamepad, switching the pad off logged 'pad 0 disconnected'",
       "limitations": "Before the hint, SDL's HIDAPI Switch driver failed with 'Couldn't load stick calibration' and the pad never opened. Only a Nintendo pad tried; Xbox and PlayStation pads untested"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "drm.widevine_platform_pipeline",
+      "result": "unknown",
+      "method": "Example D 0.19.0 {\"drmTest\": {drm widevine, Shaka angel-one-widevine MPD, license url|callback|service, transportInOption false}}: com.webos.media/load by URL with mediaTransportType beside option",
+      "evidence": "Encrypted DASH no longer kills the pipeline: MPD parsed (10 audio tracks), tracks selected, buffering, EME-style 'encrypted' event with cenc init data (Widevine PSSH), then error 552 'Encrypted Content' and drmRightsError for edef8ba9-79d6-4ace-a3c8-27dcd51d21ed. option.drm.licenseUrl does not fetch a licence; useLicenseCallback raises no drmEncrypted (libumedia_api has /setDrmOperation, but this pipeline does not call back); a drm service client is accepted but gets no licence by itself",
+      "limitations": "No licence delivered: the DRM service's Widevine message format is undocumented. NDL_MediaSetDrmOperation (LG's Flutter plugin route) is absent on this firmware"
     }
   ]
 }

@@ -41,6 +41,7 @@
 //   {"autoplay": 0}                        open that bundled clip at start (0..5), or stream (6..16)
 #include "wnk/app/app.hpp"
 #include "wnk/log.hpp"
+#include "wnk/storage/secret.hpp"
 #include "wnk/media/auto_backend.hpp"
 #include "wnk/media/controller.hpp"
 #include "wnk/media/device_caps.hpp"
@@ -476,13 +477,22 @@ struct DrmTest {
     std::string uri = "https://test.playready.microsoft.com/media/profficialsite/tearsofsteel_4k.ism/manifest.mpd";
     std::string drm = "playready";
     std::string license_url = "https://test.playready.microsoft.com/service/rightsmanager.asmx?cfg=(persist:false,sl:150)";
-    std::string transport = "MPEG-DASH";  // option.mediaTransportType
+    std::string transport = "MPEG-DASH";  // mediaTransportType
     std::string media_type = "media";     // the load call's "type"
+    // How the licence is obtained:
+    //   "service"   LG's DRM service first (drm/load, sendDrmMessage), its clientId in option.drm
+    //   "url"       option.drm {type, licenseUrl, useLicenseCallback:false}: the pipeline fetches it
+    //   "callback"  option.drm {type, useLicenseCallback:true}: the pipeline raises drmEncrypted with a
+    //               challenge, the app POSTs it to `la` and hands the licence back with setDrmOperation
+    //               (what EME's message/update do; LG's video_player_drm Flutter plugin does the same)
+    std::string license = "service";
+    bool transport_in_option = true;      // mediaTransportType inside option (else beside it, as the plugin)
 };
 
 class DrmTestScreen : public Screen {
  public:
-    DrmTestScreen(wnk::app::Context &ctx, DrmTest test) : Screen("DRM experiment"), ctx_(ctx), test_(std::move(test)) {
+    DrmTestScreen(wnk::app::Context &ctx, DrmTest test, std::shared_ptr<wnk::net::HttpTransport> http)
+        : Screen("DRM experiment"), ctx_(ctx), test_(std::move(test)), http_(std::move(http)) {
         name = "drmtest";
         auto &col = add<Column>(14);
         col.set_align(Align::Stretch, Align::End);
@@ -526,7 +536,8 @@ class DrmTestScreen : public Screen {
                 if (st->screen_alive) fn(*st);
             });
         };
-        ctx_.pool().submit([st, t, app_id, post](const wnk::async::CancellationToken &) {
+        auto http = http_;
+        ctx_.pool().submit([st, t, app_id, post, http](const wnk::async::CancellationToken &) {
             using wnk::platform::luna_call_sync;
             using nlohmann::json;
             auto log = [](const char *what, const wnk::platform::LunaReply &r) {
@@ -534,7 +545,7 @@ class DrmTestScreen : public Screen {
                 return json::parse(r.payload.empty() ? "{}" : r.payload, nullptr, false);
             };
             std::string client, err;
-            if (t.drm != "none") {
+            if (t.drm != "none" && t.license == "service") {
             const json loaded = log("drm/load", luna_call_sync("luna://com.webos.service.drm/load",
                                                                 json{{"drmType", t.drm}, {"appId", app_id}}.dump(), 8000));
             if (!loaded.is_object() || !loaded.value("returnValue", false) || !loaded.contains("clientId")) {
@@ -567,10 +578,17 @@ class DrmTestScreen : public Screen {
             }
             }  // drm != none
             json option = {{"appId", app_id}};
-            if (!t.transport.empty()) option["mediaTransportType"] = t.transport;
-            if (t.drm != "none") option["drm"] = {{"type", t.drm}, {"clientId", client}};
+            if (!t.transport.empty() && t.transport_in_option) option["mediaTransportType"] = t.transport;
+            if (t.drm != "none" && t.license == "service") option["drm"] = {{"type", t.drm}, {"clientId", client}};
+            if (t.drm != "none" && t.license == "url") {
+                option["drm"] = {{"type", t.drm}, {"licenseUrl", t.license_url}, {"useLicenseCallback", false}};
+            }
+            if (t.drm != "none" && t.license == "callback") option["drm"] = {{"type", t.drm}, {"useLicenseCallback", true}};
+            if (t.license != "service") post([t](State &s) { s.drm_text = "DRM: licence by " + t.license; });
             if (!st->window_id.empty()) option["windowId"] = st->window_id;
-            const json load = {{"uri", t.uri}, {"type", t.media_type}, {"payload", {{"option", option}}}};
+            json payload = {{"option", option}};
+            if (!t.transport.empty() && !t.transport_in_option) payload["mediaTransportType"] = t.transport;
+            const json load = {{"uri", t.uri}, {"type", t.media_type}, {"payload", payload}};
             const json media = log("media/load", luna_call_sync("luna://com.webos.media/load", load.dump(), 15000));
             if (!media.is_object() || !media.value("returnValue", false) || !media.contains("mediaId")) {
                 post([media](State &s) { s.media_text = "Media: load refused: " + media.dump(); });
@@ -583,8 +601,15 @@ class DrmTestScreen : public Screen {
             }
             auto events = wnk::platform::luna_subscribe(
                 "luna://com.webos.media/subscribe", json{{"mediaId", media_id}}.dump(),
-                [st, post](const std::string &r) {
+                [st, post, t, http, media_id](const std::string &r) {
                     const json e = json::parse(r, nullptr, false);
+                    if (e.is_object() && e.contains("drmEncrypted") && e["drmEncrypted"].is_object()) {
+                        // EME's "message": a licence challenge. Answer it off this (libhelpers) thread.
+                        WNK_LOGI(kCat, "drmtest: drmEncrypted %s", r.substr(0, 400).c_str());
+                        post([](State &s) { s.drm_text = "DRM: challenge received, fetching the licence"; });
+                        std::thread([d = e["drmEncrypted"], t, http, media_id, post] { answer_challenge(d, t, http, media_id, post); }).detach();
+                        return;
+                    }
                     const bool time = e.is_object() && e.contains("currentTime");
                     if (time) {
                         // {"currentTime": ms} or {"currentTime": {"currentTime": ms, "mediaId": ...}}
@@ -615,6 +640,47 @@ class DrmTestScreen : public Screen {
     bool on_back(Ui &) override {
         stop();
         return false;
+    }
+
+    // POST the challenge to the licence server and give the answer to the pipeline:
+    // com.webos.media/setDrmOperation {mediaId, systemId, drmData, drmMsgType "update", service, kid,
+    // sessionId, requestId} (the fields libumedia_api's uMediaClient::setDrmOperation sends).
+    template <typename Post>
+    static void answer_challenge(const nlohmann::json &d, const DrmTest &t, const std::shared_ptr<wnk::net::HttpTransport> &http,
+                                 const std::string &media_id, Post post) {
+        using nlohmann::json;
+        auto str = [&d](const char *k) { return d.contains(k) && d[k].is_string() ? d[k].get<std::string>() : std::string(); };
+        const auto challenge = wnk::storage::base64_decode(str("drmData"));
+        if (!challenge || !http) {
+            WNK_LOGW(kCat, "drmtest: challenge not base64 or no HTTP transport");
+            return;
+        }
+        wnk::net::HttpRequest req;
+        req.method = "POST";
+        req.url = t.license_url;
+        req.body = *challenge;
+        if (t.drm == "playready") {
+            req.headers = {{"Content-Type", "text/xml; charset=utf-8"},
+                           {"SOAPAction", "\"http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense\""}};
+        } else {
+            req.headers = {{"Content-Type", "application/octet-stream"}};
+        }
+        const wnk::net::HttpResponse res = http->perform(req, {});
+        WNK_LOGI(kCat, "drmtest: licence server %ld, %zu bytes (challenge %zu bytes, msgType %s)", res.status, res.body.size(),
+                 challenge->size(), str("drmMsgType").c_str());
+        if (!res.ok()) {
+            post([res](State &s) { s.drm_text = "DRM: licence server answered " + std::to_string(res.status); });
+            return;
+        }
+        int64_t request_id = 0;
+        if (d.contains("requestId") && d["requestId"].is_number_integer()) request_id = d["requestId"].get<int64_t>();
+        const json op = {{"mediaId", media_id}, {"systemId", str("systemId")}, {"drmData", wnk::storage::base64_encode(res.body)},
+                         {"drmMsgType", "update"}, {"service", str("service")}, {"kid", str("key")},
+                         {"sessionId", str("sessionId")}, {"requestId", request_id}};
+        const auto reply = wnk::platform::luna_call_sync("luna://com.webos.media/setDrmOperation", op.dump(), 8000);
+        WNK_LOGI(kCat, "drmtest: setDrmOperation -> %s %s %s", wnk::platform::luna_status_name(reply.status), reply.payload.c_str(),
+                 reply.detail.c_str());
+        post([reply](State &s) { s.drm_text = "DRM: licence handed to the pipeline: " + reply.payload.substr(0, 120); });
     }
 
     void stop() {
@@ -676,6 +742,7 @@ class DrmTestScreen : public Screen {
     };
     wnk::app::Context &ctx_;
     DrmTest test_;
+    std::shared_ptr<wnk::net::HttpTransport> http_;
     std::shared_ptr<State> st_;
     Label *drm_, *media_, *event_;
     bool started_ = false;
@@ -728,7 +795,7 @@ class HomeScreen : public Screen {
 
     void drm_test(Ui &ui, DrmTest t) {
         WNK_LOGI(kCat, "drm experiment: %s %s via %s", t.drm.c_str(), t.uri.c_str(), t.transport.c_str());
-        nav_.push(ui, std::make_unique<DrmTestScreen>(ctx_, std::move(t)));
+        nav_.push(ui, std::make_unique<DrmTestScreen>(ctx_, std::move(t), settings_.http));
     }
 
     void play(Ui &ui, const std::string &uri, const std::string &title, const std::string &keys = {}) {
@@ -766,6 +833,8 @@ OpenRequest open_request(const nlohmann::json &params) {
         r.drm_test->license_url = d.value("la", r.drm_test->license_url);
         r.drm_test->transport = d.value("transport", r.drm_test->transport);
         r.drm_test->media_type = d.value("type", r.drm_test->media_type);
+        r.drm_test->license = d.value("license", r.drm_test->license);
+        r.drm_test->transport_in_option = d.value("transportInOption", r.drm_test->transport_in_option);
     }
     if (params.contains("autoplay") && params["autoplay"].is_number_integer()) r.autoplay = params["autoplay"];
     return r;

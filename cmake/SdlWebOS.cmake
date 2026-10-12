@@ -10,6 +10,11 @@
 # one struct definition (the TV's system SDL inserts an extra `inputSource` field).
 #
 # The result is staged into the package as lib/libSDL2-2.0.so.0 and found through RPATH $ORIGIN/lib.
+#
+# Kit patches on top of the tag (cmake/patches/, each marked in the code as a kit addition, as SDL's
+# zlib licence asks of altered versions):
+#   sdl-webos-relaunch-message.patch  keeps the relaunch lifecycle message, which SDL-webOS dropped,
+#                                     for SDL_webOSTakeRelaunchMessage (app shell: Delegate::on_relaunch)
 
 include(ExternalProject)
 
@@ -17,6 +22,9 @@ set(WNK_SDL_WEBOS_TAG "release-2.30.12-webos.6" CACHE STRING "webosbrew/SDL-webO
 set(WNK_SDL_WEBOS_REPO "https://github.com/webosbrew/SDL-webOS.git" CACHE STRING "SDL-webOS repository")
 
 set(_wnk_sdl_prefix "${CMAKE_BINARY_DIR}/third_party/sdl-webos")
+set(_wnk_sdl_patch "${CMAKE_CURRENT_LIST_DIR}/patches/sdl-webos-relaunch-message.patch")
+# The hash is part of the command so an edited patch rebuilds SDL; applying twice is a no-op.
+file(SHA256 "${_wnk_sdl_patch}" _wnk_sdl_patch_sha)
 set(WNK_SDL_WEBOS_LIBRARY "${_wnk_sdl_prefix}/lib/libSDL2-2.0.so.0" CACHE INTERNAL "")
 
 ExternalProject_Add(wnk_sdl_webos_ext
@@ -25,6 +33,8 @@ ExternalProject_Add(wnk_sdl_webos_ext
         GIT_SHALLOW ON
         GIT_PROGRESS OFF
         UPDATE_DISCONNECTED ON
+        PATCH_COMMAND "${CMAKE_COMMAND}" -E env "WNK_PATCH_SHA256=${_wnk_sdl_patch_sha}"
+            sh -c "git apply --reverse --check '${_wnk_sdl_patch}' 2>/dev/null || git apply '${_wnk_sdl_patch}'"
         PREFIX "${CMAKE_BINARY_DIR}/third_party/sdl-webos-build"
         INSTALL_DIR "${_wnk_sdl_prefix}"
         CMAKE_ARGS
@@ -56,3 +66,5 @@ target_link_libraries(wnk_sdl2 INTERFACE wnk_sdl2_shared)
 target_compile_definitions(wnk_sdl2 INTERFACE WNK_SDL_WEBOS=1)
 
 unset(_wnk_sdl_prefix)
+unset(_wnk_sdl_patch)
+unset(_wnk_sdl_patch_sha)

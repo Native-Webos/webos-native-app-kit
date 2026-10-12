@@ -268,6 +268,7 @@ Reject a non-object. Do not trust strings as paths outside `app_dir` and URLs yo
 | `on_start` | Build the tree, open the store, kick off the first fetch. The first frame is drawn after it returns, so do not block. |
 | `on_action` | Actions the `Ui` did not consume. Return true to swallow the shell default (Exit quits; Back at the root asks for a second Back). |
 | `on_lifecycle` | `Suspended`: pause media and timers. `Resuming` then `Running`: resume. While suspended the shell draws nothing and drops input. |
+| `on_relaunch` | The app was launched again while running (deep link, launcher shortcut, voice search, a second `ares-launch` with parameters). `params_json` is the new parameters object; `ctx.launch()` already holds it. Open what it asks for, or ignore it when it asks for nothing. See Example D. |
 | `on_frame` | Once per drawn frame, after `Ui::update`. Drive a progress label from `PlaybackController::snapshot()`. A still screen is drawn only every `idle_probe_ms` (100 ms), so do not count frames as time: use the `dt` argument or `ui.now_ms()`. |
 | `on_stop` | Save state. The pool and dispatcher still run; the UI still exists. Keep it short; a watchdog (default 3 s) ends the process if teardown overruns. |
 
@@ -286,6 +287,7 @@ stubbing a lookalike.
 | Details page taller than the screen | `ScrollView` with one `Column` child. It follows focus. |
 | Poster / thumbnail | `ImageView` or `Card`. URL is `https://…` or `file://` + `ctx.launch().app_dir`. |
 | Button, disabled control | `Button`, `set_enabled(false)`. |
+| Deep link, launcher shortcut, "open this" from another app | Read `ctx.launch().params_json` in `on_start` and the new object in `on_relaunch`. Log parameter names, not values. |
 | Search box, server address, user name, password | `TextField` (`set_password`, `set_max_length`, `set_on_change`, `set_on_submit`). OK or a click edits it: the shell opens LG's on-screen keyboard; Back ends editing. See Example C's Browse search. |
 | Modal confirm | `ui.show_dialog`. Focus is trapped; Back dismisses when `back_dismisses` is true; focus returns to the opener. |
 | Transient message | `ui.toast(text)`. |

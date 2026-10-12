@@ -22,6 +22,7 @@
 #include <sstream>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <dlfcn.h>
@@ -33,6 +34,7 @@ namespace wnk::app {
 
 bool Delegate::on_action(Context &, const input::ActionEvent &) { return false; }
 void Delegate::on_lifecycle(Context &, const Lifecycle::Transition &) {}
+void Delegate::on_relaunch(Context &, const std::string &) {}
 void Delegate::on_frame(Context &, float) {}
 void Delegate::on_stop(Context &) {}
 
@@ -109,20 +111,28 @@ class Watchdog {
 // Scripted input for host tests: <prefix>_KEYS is a comma-separated list, one step every 6 loop
 // iterations after the 20th: SDL scancode names, move@X:Y / click@X:Y (logical units), wheel@N,
 // bg / fg (the SDL app background/foreground event pairs SDL-webOS sends), text@STRING (typed text as
-// SDL_TEXTINPUT, what LG's keyboard sends; no commas), kbclose (the viewer closes the keyboard). <prefix>_SHOT saves the
+// SDL_TEXTINPUT, what LG's keyboard sends; no commas), kbclose (the viewer closes the keyboard),
+// relaunch (<prefix>_RELAUNCH, a lifecycle message as the application manager sends it, arrives as
+// SDL_webOSTakeRelaunchMessage would return it). <prefix>_SHOT saves the
 // last drawn frame as BMP. The app quits when the script ends.
 class Script {
  public:
     explicit Script(const std::string &prefix) {
         if (const char *keys = SDL_getenv((prefix + "_KEYS").c_str())) parse(keys);
         if (const char *shot = SDL_getenv((prefix + "_SHOT").c_str())) shot_ = shot;
+        if (const char *m = SDL_getenv((prefix + "_RELAUNCH").c_str())) relaunch_message_ = m;
     }
+    // The relaunch message a "relaunch" step released, once.
+    std::string take_relaunch() { return std::exchange(relaunch_due_, std::string()); }
     bool active() const { return !steps_.empty() || !shot_.empty(); }
     // Returns true when the script has finished (the app should quit).
     bool tick(uint64_t iteration, render::Gles2Renderer &r, SDL_Window *window) {
         if (!active()) return false;
         const uint64_t first = 20, gap = 6;
-        if (iteration >= first && next_ < steps_.size() && (iteration - first) % gap == 0) run(steps_[next_++], r, window);
+        if (iteration >= first && next_ < steps_.size() && (iteration - first) % gap == 0) {
+            if (steps_[next_].kind == Step::Relaunch) relaunch_due_ = relaunch_message_;
+            run(steps_[next_++], r, window);
+        }
         return next_ >= steps_.size() && iteration >= first + steps_.size() * gap + 60;
     }
     void save(render::Gles2Renderer &r, int dw, int dh) const {
@@ -139,7 +149,7 @@ class Script {
 
  private:
     struct Step {
-        enum Kind { Key, Move, Click, Wheel, Background, Foreground, Text, KeyboardClosed } kind = Key;
+        enum Kind { Key, Move, Click, Wheel, Background, Foreground, Text, KeyboardClosed, Relaunch } kind = Key;
         SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
         float x = 0, y = 0;
         std::string text;
@@ -161,6 +171,8 @@ class Script {
                 st.text = name.substr(5);
             } else if (name == "kbclose") {
                 st.kind = Step::KeyboardClosed;
+            } else if (name == "relaunch") {
+                st.kind = Step::Relaunch;
             } else if (name == "bg") {
                 st.kind = Step::Background;
             } else if (name == "fg") {
@@ -236,6 +248,7 @@ class Script {
                 ev.text.timestamp = SDL_GetTicks();
                 SDL_PushEvent(&ev);
                 break;
+            case Step::Relaunch: break;  // tick() hands the message to the shell
             case Step::KeyboardClosed:
                 // What SDL-webOS does when the panel closes: text events off (SDL_IsTextInputActive false).
                 SDL_EventState(SDL_TEXTINPUT, SDL_DISABLE);
@@ -254,6 +267,7 @@ class Script {
     std::vector<Step> steps_;
     size_t next_ = 0;
     std::string shot_;
+    std::string relaunch_message_, relaunch_due_;
 };
 
 class Shell final : public Context {
@@ -432,6 +446,8 @@ class Shell final : public Context {
             image_source_ = std::make_unique<ui::ServiceImageSource>(*images_, *textures_);
             ui_->set_image_source(image_source_.get());
         }
+        // Kit SDL patch (cmake/patches/sdl-webos-relaunch-message.patch); absent in other SDL builds.
+        take_relaunch_ = reinterpret_cast<char *(*)()>(dlsym(RTLD_DEFAULT, "SDL_webOSTakeRelaunchMessage"));
         probe_capabilities(mode, gpu);
         delegate_ = factory();
         if (!delegate_) return fail("no delegate");
@@ -477,6 +493,8 @@ class Shell final : public Context {
         caps_.set("images.decode", config_.images ? Support::Supported : Support::Unknown, config_.images ? "PNG, JPEG" : "not requested");
         caps_.set("input.pointer", Support::Unknown, "no pointer event yet");
         caps_.set("lifecycle.background", Support::Unknown, "no background event yet");
+        caps_.set("lifecycle.relaunch_params", take_relaunch_ != nullptr ? Support::Supported : Support::Unsupported,
+                  take_relaunch_ != nullptr ? "SDL_webOSTakeRelaunchMessage" : "SDL build without the kit's relaunch patch");
         caps_.set("media.playback", Support::Unknown, "not implemented in the kit yet", "not-implemented");
         for (const auto &c : caps_.all()) {
             WNK_LOGI("caps", "%-26s %-11s %s", c.id.c_str(), diagnostics::support_name(c.support), c.detail.c_str());
@@ -542,7 +560,16 @@ class Shell final : public Context {
 
             work += dispatcher_->drain(32, std::chrono::milliseconds(4));
             sync_text_input();
+            if (char *m = take_relaunch_ != nullptr ? take_relaunch_() : nullptr) {
+                on_relaunch_message(m);
+                SDL_free(m);
+                ++work;
+            }
             const bool script_done = script.tick(iteration++, *renderer_, window_);
+            if (std::string m = script.take_relaunch(); !m.empty()) {
+                on_relaunch_message(m.c_str());
+                ++work;
+            }
             if (script_done && !lifecycle_.renders()) {
                 quit("script finished");
                 break;
@@ -713,6 +740,24 @@ class Shell final : public Context {
             if (input::key_types_text(*key)) return;
         }
         if (auto a = mapper_.map(*key)) handle_action(*a);
+    }
+
+    // {"event":"relaunch","parameters":{...},...} (registerApp, interface 2) or {"message":"relaunch",...}
+    // (registerNativeApp, interface 1). The parameters replace the launch parameters.
+    void on_relaunch_message(const char *message) {
+        const auto j = nlohmann::json::parse(message, nullptr, false);
+        nlohmann::json params = nlohmann::json::object();
+        if (j.is_object() && j.contains("parameters") && j["parameters"].is_object()) params = j["parameters"];
+        // Parameter values can be personal (a search, a link): log names only.
+        auto names = [](const nlohmann::json &o) {
+            std::string out;
+            if (!o.is_object()) return out;
+            for (auto it = o.begin(); it != o.end(); ++it) out += (out.empty() ? "" : ",") + it.key();
+            return out;
+        };
+        WNK_LOGI("lifecycle", "relaunch: message fields [%s], parameters [%s]", names(j).c_str(), names(params).c_str());
+        launch_.params_json = params.dump();
+        if (delegate_ && ui_) delegate_->on_relaunch(*this, launch_.params_json);
     }
 
     // SDL text input follows the Ui: on while a view edits (on the TV this shows LG's keyboard), off
@@ -891,6 +936,7 @@ class Shell final : public Context {
     bool quit_requested_ = false;
     bool text_input_on_ = false;  // SDL text input started for a view
     Uint32 wake_event_ = static_cast<Uint32>(-1);
+    char *(*take_relaunch_)() = nullptr;
     std::atomic<bool> wake_pending_{false};
     SDL_Window *window_ = nullptr;
     SDL_GLContext gl_ = nullptr;

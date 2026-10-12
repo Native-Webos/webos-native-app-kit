@@ -31,6 +31,9 @@ Sources:
    receives `{"event":"relaunch", ...}` and only raises the window (`lifecycleCallbackVersion2`
    `[SRC]`). Measured in this project: relaunching Example D with new parameters changed nothing.
    None of the three reference apps handles it either `[SRC]`.
+   **Done:** the kit's SDL build keeps the message (`cmake/patches/sdl-webos-relaunch-message.patch`,
+   `SDL_webOSTakeRelaunchMessage`), the shell delivers `Delegate::on_relaunch(params)`, and Example D
+   opens the new request. Host-tested with a scripted message; the TV's message shape is not yet seen.
 3. **The UI redraws at 60 fps when nothing changes.** Every perf log shows 300 frames per 5 s on idle
    screens `[KIT]`. That is CPU, GPU and heat for no picture change. PlxNative measured its
    options for not redrawing (`docs/perf-damage-tracking-verdict.md` `[SRC]`).

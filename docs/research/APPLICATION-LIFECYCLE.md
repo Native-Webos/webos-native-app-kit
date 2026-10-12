@@ -29,7 +29,7 @@ Traced in the bundled-SDL path (moonlight-tv uses this SDL):
    is false, reads `APPID`, reads `nativeLifeCycleInterfaceVersion` for the app, then calls
    `luna://com.webos.applicationManager/registerApp` (v2) or `registerNativeApp` (v1). Also
    registers a screensaver request (`<appId>.wakelock`) and a power-state subscription.
-3. Lifecycle v2 callback: `"relaunch"` → `SDL_RaiseWindow`; `"close"` → `SDL_SendQuit()` → `SDL_QUIT`.
+3. Lifecycle v2 callback: `"relaunch"` → `SDL_RaiseWindow`; `"close"` → `SDL_SendQuit()` → `SDL_QUIT`. Upstream drops the relaunch parameters; the kit's SDL patch keeps the message for `SDL_webOSTakeRelaunchMessage`, and the shell calls `Delegate::on_relaunch`.
 4. Wayland shell state (SDLW`src/video/wayland/SDL_waylandwebos.c` ~L183–226):
    - about-to-minimise → `SDL_APP_WILLENTERBACKGROUND`
    - minimised → `SDL_WINDOWEVENT_MINIMIZED`, `SDL_APP_WILLENTERBACKGROUND`, `SDL_APP_DIDENTERBACKGROUND`

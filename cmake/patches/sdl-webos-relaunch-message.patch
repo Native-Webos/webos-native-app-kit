@@ -1,0 +1,75 @@
+diff --git a/include/SDL_system.h b/include/SDL_system.h
+index db3cb881..840376fa 100644
+--- a/include/SDL_system.h
++++ b/include/SDL_system.h
+@@ -657,6 +657,12 @@ extern DECLSPEC SDL_bool SDLCALL SDL_webOSExportedSetProperty(const char *window
+ 
+ extern DECLSPEC void SDLCALL SDL_webOSDestroyExportedWindow(const char *windowId);
+ 
++/* webos-native-app-kit addition (not in webosbrew/SDL-webOS): the lifecycle message of the latest
++   relaunch (the app launched again while running, e.g. with new parameters), as the JSON text the
++   application manager sent, or NULL if there was none since the last call. Free it with SDL_free.
++   SDL still raises the window on relaunch. */
++extern DECLSPEC char *SDLCALL SDL_webOSTakeRelaunchMessage(void);
++
+ #endif /* __WEBOS__ */
+ 
+ /* Ends C function definitions when using C++ */
+diff --git a/src/core/webos/SDL_webos_init.c b/src/core/webos/SDL_webos_init.c
+index b640d927..9ed91782 100644
+--- a/src/core/webos/SDL_webos_init.c
++++ b/src/core/webos/SDL_webos_init.c
+@@ -3,6 +3,7 @@
+ #ifdef __WEBOS__
+ #include "../../events/SDL_events_c.h"
+ #include "../../video/SDL_sysvideo.h"
++#include "SDL_atomic.h"
+ #include "SDL_error.h"
+ #include "SDL_hints.h"
+ #include "SDL_system.h"
+@@ -190,6 +191,29 @@ static SDL_bool registerApp(const char *appId, int interfaceVersion)
+     return SDL_TRUE;
+ }
+ 
++/* webos-native-app-kit addition: keep the latest relaunch message for SDL_webOSTakeRelaunchMessage. */
++static SDL_SpinLock s_relaunchLock = 0;
++static char *s_relaunchMessage = NULL;
++
++static void keepRelaunchMessage(const char *message)
++{
++    char *copy = message ? SDL_strdup(message) : NULL;
++    SDL_AtomicLock(&s_relaunchLock);
++    SDL_free(s_relaunchMessage); /* a newer relaunch replaces one the app has not taken yet */
++    s_relaunchMessage = copy;
++    SDL_AtomicUnlock(&s_relaunchLock);
++}
++
++char *SDL_webOSTakeRelaunchMessage(void)
++{
++    char *message;
++    SDL_AtomicLock(&s_relaunchLock);
++    message = s_relaunchMessage;
++    s_relaunchMessage = NULL;
++    SDL_AtomicUnlock(&s_relaunchLock);
++    return message;
++}
++
+ static int lifecycleCallbackVersion1(LSHandle *sh, LSMessage *reply, HContext *ctx)
+ {
+     jdomparser_ref parser = NULL;
+@@ -204,6 +228,7 @@ static int lifecycleCallbackVersion1(LSHandle *sh, LSMessage *reply, HContext *c
+         if (message_buf.m_str) {
+             if (SDL_strncmp(message_buf.m_str, "relaunch", message_buf.m_len) == 0) {
+                 SDL_VideoDevice *device = SDL_GetVideoDevice();
++                keepRelaunchMessage(HELPERS_HLunaServiceMessage(reply));
+                 if (device->windows) {
+                     SDL_RaiseWindow(device->windows);
+                 }
+@@ -227,6 +252,7 @@ static int lifecycleCallbackVersion2(LSHandle *sh, LSMessage *reply, HContext *c
+         if (message_buf.m_str) {
+             if (SDL_strncmp(message_buf.m_str, "relaunch", message_buf.m_len) == 0) {
+                 SDL_VideoDevice *device = SDL_GetVideoDevice();
++                keepRelaunchMessage(HELPERS_HLunaServiceMessage(reply));
+                 if (device->windows) {
+                     SDL_RaiseWindow(device->windows);
+                 }

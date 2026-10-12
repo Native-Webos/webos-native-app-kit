@@ -6,6 +6,9 @@
 //   process env, logs → SDL_Init(0) (SAM registration) → webOS hints → video, window, GLES2 context →
 //   renderer, fonts → worker pool, dispatcher, storage, images → Ui → delegate.on_start → main loop
 //
+// A relaunch (the app launched again while running) reaches the delegate as on_relaunch with the new
+// parameters. SDL-webOS drops them, so the kit's SDL build keeps them (cmake/patches/).
+//
 // The main loop polls SDL, maps keys to actions and pointer events to the Ui, drives the lifecycle
 // state machine (Running ⇄ Suspended), stops drawing while backgrounded, and records frame timing.
 // Shutdown is a fixed sequence of timed steps under a watchdog, because how long SAM waits between
@@ -106,6 +109,10 @@ class Delegate {
     virtual bool on_action(Context &ctx, const input::ActionEvent &e);
     // After every lifecycle transition (Suspended: pause media and timers; Resuming: refresh).
     virtual void on_lifecycle(Context &ctx, const Lifecycle::Transition &t);
+    // The app was launched again while it runs (a deep link, a launcher shortcut, voice search, a
+    // second `ares-launch` with parameters). `params_json` is the new parameters object ("{}" when
+    // there were none); Context::launch() already holds it. The window has been brought to the front.
+    virtual void on_relaunch(Context &ctx, const std::string &params_json);
     // Once per drawn frame, after the Ui has been updated.
     virtual void on_frame(Context &ctx, float dt);
     // Shutdown has begun: save state. Workers and the dispatcher still run; the UI still exists.

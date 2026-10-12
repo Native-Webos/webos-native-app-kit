@@ -293,6 +293,17 @@ if (TARGET wnk-player)
     # The screensaver is allowed by default, blocked while the video plays, allowed again on pause.
     wnk_player_e2e(screensaver_follows_playback "{\"autoplay\":0}" "Z,Z,Space,Z,Z"
             "screensaver\\] \\([0-9]+\\) allowed \\(default\\).*blocked \\(video playing\\).*Playing -> Paused.*allowed \\(video playing\\)")
+    # Relaunch with new parameters (what the kit's SDL patch hands over on the TV): the playing clip
+    # stops and the requested one opens. A relaunch without a request changes nothing.
+    wnk_player_e2e(relaunch_opens_new_request "{\"autoplay\":0}" "Z,Z,Z,relaunch,Z,Z,Z,Z,Z"
+            "relaunch: message fields \\[event,parameters,returnValue\\], parameters \\[autoplay\\].*stopping at.*relaunch: opening the new request.*opening file://.*h264-aac-subs.mkv")
+    set_tests_properties(e2e.player.relaunch_opens_new_request PROPERTIES ENVIRONMENT
+            "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_PLAYER_KEYS=Z,Z,Z,relaunch,Z,Z,Z,Z,Z;WNK_PLAYER_RELAUNCH={\"event\":\"relaunch\",\"parameters\":{\"autoplay\":3},\"returnValue\":true}")
+    wnk_player_e2e(relaunch_without_request "{\"autoplay\":0}" "Z,Z,Z,relaunch,Z,Z"
+            "relaunch: message fields \\[event,returnValue\\], parameters \\[\\].*relaunch: nothing to open, carrying on")
+    set_tests_properties(e2e.player.relaunch_without_request PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_PLAYER_KEYS=Z,Z,Z,relaunch,Z,Z;WNK_PLAYER_RELAUNCH={\"event\":\"relaunch\",\"returnValue\":true}"
+            FAIL_REGULAR_EXPRESSION "relaunch: opening|-> Error|${WNK_SANITIZER_FAIL}")
     wnk_player_e2e(back_stops_playback "{\"autoplay\":0}" "Z,Z,Escape" "stopping at .*-> Stopped")
     wnk_player_e2e(plays_to_the_end "{\"autoplay\":1}"
             "Right,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z"

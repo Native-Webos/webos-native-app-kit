@@ -745,6 +745,32 @@ class HomeScreen : public Screen {
     Settings settings_;
 };
 
+// What launch parameters ask the player to open: a URI, a bundled clip or stream by index, or the
+// DRM experiment. Read at launch and again on every relaunch.
+struct OpenRequest {
+    std::string uri;
+    int autoplay = -1;
+    std::optional<DrmTest> drm_test;
+    bool any() const { return !uri.empty() || autoplay >= 0 || drm_test.has_value(); }
+};
+
+OpenRequest open_request(const nlohmann::json &params) {
+    OpenRequest r;
+    if (!params.is_object()) return r;
+    if (params.contains("uri") && params["uri"].is_string()) r.uri = params["uri"];
+    if (params.contains("drmTest") && params["drmTest"].is_object()) {
+        const auto &d = params["drmTest"];
+        r.drm_test = DrmTest{};
+        r.drm_test->uri = d.value("uri", r.drm_test->uri);
+        r.drm_test->drm = d.value("drm", r.drm_test->drm);
+        r.drm_test->license_url = d.value("la", r.drm_test->license_url);
+        r.drm_test->transport = d.value("transport", r.drm_test->transport);
+        r.drm_test->media_type = d.value("type", r.drm_test->media_type);
+    }
+    if (params.contains("autoplay") && params["autoplay"].is_number_integer()) r.autoplay = params["autoplay"];
+    return r;
+}
+
 class Player : public wnk::app::Delegate {
  public:
     void on_start(wnk::app::Context &ctx) override {
@@ -753,9 +779,6 @@ class Player : public wnk::app::Delegate {
         std::string curl_error;
         s.http = wnk::net::make_curl_transport({}, &curl_error);
         if (!s.http) WNK_LOGW(kCat, "no HTTP streaming: %s", curl_error.c_str());
-        std::string direct_uri;
-        int autoplay = -1;
-        std::optional<DrmTest> drm_test;
         const auto params = nlohmann::json::parse(ctx.launch().params_json.empty() ? "{}" : ctx.launch().params_json, nullptr, false);
         if (params.is_object()) {
             if (params.contains("ptsUnit") && params["ptsUnit"] == "ms") s.pts_unit = PtsUnit::Milliseconds;
@@ -786,17 +809,6 @@ class Player : public wnk::app::Delegate {
             };
             timed("seeks", &s.seeks);
             timed("audio", &s.audio_switches);
-            if (params.contains("uri") && params["uri"].is_string()) direct_uri = params["uri"];
-            if (params.contains("drmTest") && params["drmTest"].is_object()) {
-                const auto &d = params["drmTest"];
-                drm_test = DrmTest{};
-                drm_test->uri = d.value("uri", drm_test->uri);
-                drm_test->drm = d.value("drm", drm_test->drm);
-                drm_test->license_url = d.value("la", drm_test->license_url);
-                drm_test->transport = d.value("transport", drm_test->transport);
-                drm_test->media_type = d.value("type", drm_test->media_type);
-            }
-            if (params.contains("autoplay") && params["autoplay"].is_number_integer()) autoplay = params["autoplay"];
         }
         if (wnk::platform::kIsWebOS) {
             s.device = DeviceMediaCaps::detect();
@@ -804,7 +816,7 @@ class Player : public wnk::app::Delegate {
         }
         WNK_LOGI(kCat, "%s; PTS unit %s; NDL pause/seek by %s; lead %d ms", FfmpegSource::version().c_str(),
                  s.pts_unit == PtsUnit::Milliseconds ? "ms" : "us", s.ndl_reload ? "reload" : "hold/splice", s.lead_ms);
-        const std::vector<Clip> clips = {
+        clips_ = {
             {"H.264 + AAC", "MP4 · 1080p25 · AAC as is (Starfish) or decoded to PCM (NDL)", "h264-aac.mp4"},
             {"HEVC + AC-3 5.1", "MKV · 1080p25 · AC-3 as is (Starfish) or downmixed to PCM stereo (NDL)", "hevc-ac3-5.1.mkv"},
             {"H.264 + MP3", "MPEG-TS · 1080p25 · MP3 re-encoded to AC-3 (Starfish) or decoded to PCM (NDL)", "h264-mp3.ts"},
@@ -813,7 +825,7 @@ class Player : public wnk::app::Delegate {
             {"H.264 + FLAC 7.1", "MKV · 1080p25 · 96 kHz 7.1 FLAC re-encoded to AC-3 5.1 48 kHz (Starfish)", "h264-flac-7.1.mkv"},
             {"H.264 + Opus", "MKV · 1080p25 · Opus re-encoded to AC-3 (Starfish) or as is (NDL)", "h264-opus.mkv"},
         };
-        const std::vector<Stream> streams = {
+        streams_ = {
             {"Dolby Vision + Atmos", "DASH · Dolby test stream · HEVC up to 2160p59.94 · E-AC-3 JOC",
              "https://media.developer.dolby.com/DolbyVision_Atmos/profile8.1_DASH/p8.1.mpd"},
             {"Apple bipbop", "HLS · fMP4 byte ranges · H.264/HEVC · separate AAC, AC-3, E-AC-3",
@@ -839,20 +851,29 @@ class Player : public wnk::app::Delegate {
             {"AES-128: Mux key rotation", "HLS · a new key and IV for every segment",
              "https://test-streams.mux.dev/dai-discontinuity-deltatre/manifest.m3u8"},
         };
+        clips_dir_ = s.clips_dir;
         Ui &ui = ctx.ui();
         nav_ = &ui.root().add<Navigator>();
-        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(ctx, *nav_, s, clips, streams)));
-        const int n_clips = static_cast<int>(clips.size());
-        if (drm_test) {
-            home_->drm_test(ui, *drm_test);
-        } else if (!direct_uri.empty()) {
-            home_->play(ui, direct_uri, direct_uri.substr(direct_uri.find_last_of('/') + 1));
-        } else if (autoplay >= 0 && autoplay < n_clips) {
-            home_->play(ui, "file://" + s.clips_dir + "/" + clips[autoplay].file, clips[autoplay].title);
-        } else if (autoplay >= n_clips && autoplay < n_clips + static_cast<int>(streams.size())) {
-            const Stream &st = streams[static_cast<size_t>(autoplay - n_clips)];
-            home_->play(ui, st.url, st.title, st.keys);
+        home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(ctx, *nav_, s, clips_, streams_)));
+        open(ui, open_request(params));
+    }
+
+    // Launched again while running (a deep link, a second ares-launch): whatever plays stops and the
+    // new request opens from the home list. Playback settings (backend, lead, seeks) keep their
+    // launch values. A relaunch without a request leaves everything as it is.
+    void on_relaunch(wnk::app::Context &ctx, const std::string &params_json) override {
+        const OpenRequest r = open_request(nlohmann::json::parse(params_json, nullptr, false));
+        if (!r.any()) {
+            WNK_LOGI(kCat, "relaunch: nothing to open, carrying on");
+            return;
         }
+        Ui &ui = ctx.ui();
+        while (Dialog *d = ui.top_dialog()) ui.dismiss_dialog(d);  // the track menu points at the player
+        if (auto *p = dynamic_cast<PlayerScreen *>(nav_->top())) p->stop();
+        if (auto *d = dynamic_cast<DrmTestScreen *>(nav_->top())) d->stop();
+        nav_->pop_to_root(ui);
+        WNK_LOGI(kCat, "relaunch: opening the new request");
+        open(ui, r);
     }
 
     void on_lifecycle(wnk::app::Context &, const wnk::app::Lifecycle::Transition &t) override {
@@ -874,8 +895,25 @@ class Player : public wnk::app::Delegate {
     }
 
  private:
+    void open(Ui &ui, const OpenRequest &r) {
+        const int n_clips = static_cast<int>(clips_.size());
+        if (r.drm_test) {
+            home_->drm_test(ui, *r.drm_test);
+        } else if (!r.uri.empty()) {
+            home_->play(ui, r.uri, r.uri.substr(r.uri.find_last_of('/') + 1));
+        } else if (r.autoplay >= 0 && r.autoplay < n_clips) {
+            home_->play(ui, "file://" + clips_dir_ + "/" + clips_[r.autoplay].file, clips_[r.autoplay].title);
+        } else if (r.autoplay >= n_clips && r.autoplay < n_clips + static_cast<int>(streams_.size())) {
+            const Stream &st = streams_[static_cast<size_t>(r.autoplay - n_clips)];
+            home_->play(ui, st.url, st.title, st.keys);
+        }
+    }
+
     Navigator *nav_ = nullptr;
     HomeScreen *home_ = nullptr;
+    std::vector<Clip> clips_;
+    std::vector<Stream> streams_;
+    std::string clips_dir_;
 };
 
 }  // namespace

@@ -1017,6 +1017,11 @@ class Shell final : public Context {
     }
 
     void set_speech(bool on, const char *why) {
+        if (!speech_known_) {
+            speech_known_ = true;
+            WNK_LOGI("speech", "%s: %s", why, on ? "on" : "off");
+            note_capability("accessibility.audio_guidance", diagnostics::Support::Supported, on ? "on" : "off");
+        }
         if (on == speech_) return;
         speech_ = on;
         WNK_LOGI("speech", "focus is %s (%s)", on ? "spoken" : "not spoken", why);
@@ -1037,7 +1042,13 @@ class Shell final : public Context {
             if (latest->load() != seq) return;
             const auto r = platform::speak(text, language, true);
             std::string why;
-            if (r.status == platform::LunaStatus::Ok && !platform::reply_ok(r.payload, &why)) WNK_LOGW("speech", "tts: %s", why.c_str());
+            if (r.status != platform::LunaStatus::Ok) {
+                WNK_LOGW("speech", "tts: %s: %s", platform::luna_status_name(r.status), r.detail.c_str());
+            } else if (!platform::reply_ok(r.payload, &why)) {
+                WNK_LOGW("speech", "tts refused: %s", why.c_str());
+            } else {
+                WNK_LOGD("speech", "tts accepted");
+            }
         });
     }
 
@@ -1296,6 +1307,7 @@ class Shell final : public Context {
     platform::NetworkStatus network_;
     std::unique_ptr<platform::LunaSubscription> guidance_sub_;
     bool speech_ = false;
+    bool speech_known_ = false;
     uint64_t speech_seq_ = 0;
     std::shared_ptr<std::atomic<uint64_t>> speech_latest_ = std::make_shared<std::atomic<uint64_t>>(0);
     std::unique_ptr<platform::LunaSubscription> network_sub_;

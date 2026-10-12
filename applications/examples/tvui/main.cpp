@@ -256,6 +256,25 @@ class HomeScreen : public Screen {
 
     View &first_rail() { return *rails_[0]; }
 
+    // Launch-parameter shortcuts for checks on a TV without the remote ({"section":2,"run":[...]}).
+    void open_section(Ui &ui, int i) {
+        if (i >= 0 && i < static_cast<int>(nav_items_.size())) ui.focus(nav_items_[static_cast<size_t>(i)]);
+    }
+    void run_action(Ui &ui, const std::string &what) {
+        WNK_LOGI(kCat, "run: %s", what.c_str());
+        if (what == "toast") {
+            ctx_.system_toast("Hello from WNK TV", [](bool ok) { WNK_LOGI(kCat, "run: toast %s", ok ? "accepted" : "refused"); });
+        } else if (what == "url") {
+            ctx_.open_url("https://www.webosbrew.org/", [](bool ok) { WNK_LOGI(kCat, "run: url %s", ok ? "accepted" : "refused"); });
+        } else if (what == "devices") {
+            find_devices(ui);
+        } else if (what == "chord") {
+            sounds_.play(sounds_.chord);
+        } else {
+            WNK_LOGW(kCat, "run: unknown action %s", what.c_str());
+        }
+    }
+
     void show_network(const wnk::platform::NetworkStatus &s) {
         if (network_row_ != nullptr) network_row_->set_value(s.summary());
     }
@@ -545,6 +564,14 @@ class TvUi : public wnk::app::Delegate {
         if (sounds_.on) WNK_LOGI(kCat, "interface sounds on");
         home_ = &static_cast<HomeScreen &>(nav_->push(ui, std::make_unique<HomeScreen>(ctx, cat_, *nav_, sounds_)));
         ui.focus_within(&home_->first_rail());
+        if (params.is_object() && params.contains("section") && params["section"].is_number_integer()) {
+            home_->open_section(ui, params["section"].get<int>());
+        }
+        if (params.is_object() && params.contains("run") && params["run"].is_array()) {
+            for (const auto &a : params["run"]) {
+                if (a.is_string()) pending_runs_.push_back(a.get<std::string>());
+            }
+        }
     }
 
     // Raw pad input before the UI sees it: X has no UI meaning, so this app takes it (a game would
@@ -563,6 +590,16 @@ class TvUi : public wnk::app::Delegate {
     }
 
     void on_frame(wnk::app::Context &ctx, float) override {
+        // Scripted actions: the first after 3 s, then one every 2 s.
+        if (!pending_runs_.empty() && ctx.ui().now_ms() >= next_run_ms_) {
+            if (next_run_ms_ == 0) {
+                next_run_ms_ = ctx.ui().now_ms() + 3000;
+            } else {
+                home_->run_action(ctx.ui(), pending_runs_.front());
+                pending_runs_.erase(pending_runs_.begin());
+                next_run_ms_ = ctx.ui().now_ms() + 2000;
+            }
+        }
         View *f = ctx.ui().focused();
         if (f != last_focus_ && last_focus_ != nullptr && sounds_.on) sounds_.play(sounds_.tick);
         last_focus_ = f;
@@ -579,6 +616,8 @@ class TvUi : public wnk::app::Delegate {
     Catalogue cat_;
     Sounds sounds_;
     View *last_focus_ = nullptr;
+    std::vector<std::string> pending_runs_;
+    double next_run_ms_ = 0;
     Navigator *nav_ = nullptr;
     HomeScreen *home_ = nullptr;
     size_t depth_ = 0;

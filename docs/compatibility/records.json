@@ -782,6 +782,105 @@
       "method": "Example D 0.17.0 {\"drmTest\": ...}: SDL exported window, luna drm/load playready, drm/sendDrmMessage (PlayReady initiator, LA_URL Microsoft test server), com.webos.media/load {uri, type media, option {appId, windowId, drm {type, clientId}, mediaTransportType}}, subscribe, play",
       "evidence": "Smooth Streaming SuperSpeedway_720 (MSIIS): DRM_RESULT 0, loadCompleted, playing, videoInfo 1280x720 H.264 23.976 fps on VDEC, no rights or pipeline errors. Clear DASH (Shaka angel-one, drm none, MPEG-DASH): playing. Tears of Steel 4K PlayReady DASH (MPEG-DASH): DRM_RESULT 0, then 'pipeline died abnormally' after 3.8 s with nothing buffered; owner saw the SuperSpeedway picture. BBB 1080p PlayReady DASH died with every transport name and also with no DRM option (encrypted DASH kills the by-URL pipeline). Clear and PlayReady Smooth both stutter once the 2-minute title is fully downloaded (buffer report drops to 0); a 24 fps MP4 is smooth on this pipeline and on the kit's Starfish path",
       "limitations": "PlayReady over Smooth Streaming only: encrypted DASH does not play through the by-URL pipeline; Widevine not tried; LG's Smooth pipeline stutters near the end of short titles; the platform pipeline replaces the kit's player"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "lifecycle.relaunch_params",
+      "result": "supported",
+      "method": "tools/lifecycle-check.sh org.wnk.examples.tvui (Example B 0.6.0); Example D 0.18.0 relaunched with {\"autoplay\":3}",
+      "evidence": "Kit SDL patch exported SDL_webOSTakeRelaunchMessage; relaunch message arrives as {message, parameters, returnValue} (registerNativeApp interface); Delegate::on_relaunch got the parameters; Example D stopped clip 0 and played clip 3. Lifecycle check 10/10: first frame 773 ms, resume 6 ms, shutdown 74.9 ms",
+      "limitations": "The TV uses the v1 lifecycle interface ('message' field), not 'event'"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "i18n.system_locale",
+      "result": "supported",
+      "method": "Example B start log",
+      "evidence": "settingsservice getSystemSettings localeInfo answered: UI en-AU, formats en-US",
+      "limitations": "None found"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "text.system_fallback_fonts",
+      "result": "supported",
+      "method": "Example C 0.3.0 {\"wnkLocale\":\"ja-JP\"}",
+      "evidence": "The app jail lists 90 font files under /usr/share/fonts; FontFinder picked /usr/share/fonts/LG_Display_GP3_JP.ttf for the Japanese catalogue's kana and kanji",
+      "limitations": "The first search took 2.4 s, so Japanese text appears that long after the screen; not yet checked by eye"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "audio.output",
+      "result": "supported",
+      "method": "Example B 0.6.1 {\"run\":[\"chord\"]}",
+      "evidence": "SDL audio opened pulseaudio, 48000 Hz, f32, 2 ch, 1024 frames; the chord reached the device callback at peak 0.45",
+      "limitations": "Not yet confirmed by ear"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "network.status",
+      "result": "supported",
+      "method": "Example B start log",
+      "evidence": "connectionmanager getStatus subscription from the app: 'online (Wi-Fi)'",
+      "limitations": "None found"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "system.toast",
+      "result": "supported",
+      "method": "Example B 0.6.1 {\"run\":[\"toast\"]}",
+      "evidence": "createToast with sourceId = app id, noaction: returnValue true",
+      "limitations": "Card on screen not yet confirmed by eye"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "system.open_url",
+      "result": "supported",
+      "method": "Example B 0.6.1 {\"run\":[\"url\"]}",
+      "evidence": "applicationManager/launch com.webos.app.browser {target}: accepted; the app went to the background as the browser opened",
+      "limitations": "ares-launch cannot close the browser (only dev apps)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "net.mdns_browse",
+      "result": "supported",
+      "method": "Example B 0.6.1 {\"run\":[\"devices\"]}",
+      "evidence": "Legacy-unicast DNS-SD query from inside the app jail: 10 service types answered on the LAN",
+      "limitations": "None found"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "screensaver.wake_lock",
+      "result": "supported",
+      "method": "Example D 0.18.0 playback",
+      "evidence": "Screensaver allowed at start, 'blocked (video playing)' once playback opened",
+      "limitations": "Whether the TV's screensaver now starts on an idle kit screen is not yet observed"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "accessibility.tts",
+      "result": "unknown",
+      "method": "Example B 0.6.1 {\"wnkSpeak\":true}",
+      "evidence": "com.webos.service.tts/speak answered 'Audio Guidance is off': the service exists and is reachable from the app, and speaks only with Audio Guidance on; the audioGuidance setting subscription reports 'off' (Example B 0.6.2)",
+      "limitations": "Not yet tried with Audio Guidance on"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "images.webp_svg_gif_bmp",
+      "result": "supported",
+      "method": "Example B 0.6.0 Widgets page",
+      "evidence": "SVG (3 sizes) and WebP image views loaded with no image failure logged (libwebp 1.4.0 static, NEON)",
+      "limitations": "Not yet checked by eye"
     }
   ]
 }

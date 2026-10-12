@@ -816,8 +816,8 @@
       "feature": "audio.output",
       "result": "supported",
       "method": "Example B 0.6.1 {\"run\":[\"chord\"]}",
-      "evidence": "SDL audio opened pulseaudio, 48000 Hz, f32, 2 ch, 1024 frames; the chord reached the device callback at peak 0.45",
-      "limitations": "Not yet confirmed by ear"
+      "evidence": "SDL audio opened pulseaudio, 48000 Hz, f32, 2 ch, 1024 frames; the chord reached the device callback at peak 0.45; owner heard the chord and the interface ticks (Example B 0.6.2)",
+      "limitations": "None found"
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",
@@ -834,8 +834,8 @@
       "feature": "system.toast",
       "result": "supported",
       "method": "Example B 0.6.1 {\"run\":[\"toast\"]}",
-      "evidence": "createToast with sourceId = app id, noaction: returnValue true",
-      "limitations": "Card on screen not yet confirmed by eye"
+      "evidence": "createToast with sourceId = app id, noaction: returnValue true; owner saw the notification card",
+      "limitations": "None found"
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",
@@ -861,8 +861,8 @@
       "feature": "screensaver.wake_lock",
       "result": "supported",
       "method": "Example D 0.18.0 playback",
-      "evidence": "Screensaver allowed at start, 'blocked (video playing)' once playback opened",
-      "limitations": "Whether the TV's screensaver now starts on an idle kit screen is not yet observed"
+      "evidence": "Screensaver allowed at start, 'blocked (video playing)' once playback opened; owner: an idle Example B screen went to the TV's screensaver",
+      "limitations": "None found"
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",
@@ -871,7 +871,7 @@
       "result": "unknown",
       "method": "Example B 0.6.1 {\"wnkSpeak\":true}",
       "evidence": "com.webos.service.tts/speak answered 'Audio Guidance is off': the service exists and is reachable from the app, and speaks only with Audio Guidance on; the audioGuidance setting subscription reports 'off' (Example B 0.6.2)",
-      "limitations": "Not yet tried with Audio Guidance on"
+      "limitations": "Owner turned Audio Guidance on but nothing was spoken: the app read option/audioGuidance as 'off' at start and no change arrived; luna-send-pub from the dev shell also reads 'off' afterwards. Unresolved"
     },
     {
       "device": "lg-oled65c1ptb-6.5.3",
@@ -879,8 +879,17 @@
       "feature": "images.webp_svg_gif_bmp",
       "result": "supported",
       "method": "Example B 0.6.0 Widgets page",
-      "evidence": "SVG (3 sizes) and WebP image views loaded with no image failure logged (libwebp 1.4.0 static, NEON)",
-      "limitations": "Not yet checked by eye"
+      "evidence": "SVG (3 sizes) and WebP image views loaded with no image failure logged (libwebp 1.4.0 static, NEON); owner saw the three SVG icons, the WebP poster and the GL triangle",
+      "limitations": "GIF and animated WebP show their first frame; BMP and GIF not shown on the TV"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "input.text_field_vkb",
+      "result": "supported",
+      "method": "Example C 0.3.0 Browse search: OK on the field, typing with LG's on-screen keyboard and the remote",
+      "evidence": "SDL_StartTextInput opened LG's keyboard ('screen keyboard supported'); typed text reached the field and filtered the grid; Backspace (sc 42) and OK (sc 40) arrive as keys; closing the keyboard ends editing ('keyboard closed by the system')",
+      "limitations": "In 0.3.0 moving the Magic Remote pointer towards the keyboard hovered grid cards, which moved focus and closed the keyboard; fixed in 0.3.1 (hover does not move focus while a field edits), not yet re-checked"
     }
   ]
 }

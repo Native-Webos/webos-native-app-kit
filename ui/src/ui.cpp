@@ -384,6 +384,9 @@ View *Ui::hit_focusable(Point p) {
 }
 
 void Ui::hover() {
+    // While a view edits text, sweeping the pointer towards the on-screen keyboard (which sits over the
+    // app) must not move focus away and end the editing; a click elsewhere still does.
+    if (text_view_ != 0 && find(text_view_) != nullptr) return;
     View *v = hit_focusable(pointer_);
     if (v == nullptr || v == focused()) return;
     SourceScope source(focus_source_, FocusSource::Pointer);

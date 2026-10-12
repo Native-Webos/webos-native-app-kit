@@ -1188,3 +1188,27 @@ TEST("accessibility: widgets describe themselves; password fields never say thei
     View plain;
     CHECK(plain.accessible_text().empty());
 }
+
+TEST("text field: pointer hover does not end editing; a click elsewhere does") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(10);
+    auto &field = col.add<TextField>("Search");
+    auto &below = col.add<Button>("Below", [](Ui &) {});
+    env.ui.focus(&field);
+    env.press(Action::Confirm);
+    REQUIRE(field.editing());
+    env.frame();
+    const Rect r = below.screen_rect();
+    input::PointerEvent move;
+    move.type = input::PointerEvent::Type::Move;
+    env.ui.handle_pointer_logical(move, {r.cx(), r.cy()});  // on the way to LG's keyboard
+    CHECK(field.editing());
+    CHECK(env.ui.is_focused(&field));
+    input::PointerEvent press = move, release = move;
+    press.type = input::PointerEvent::Type::Press;
+    release.type = input::PointerEvent::Type::Release;
+    env.ui.handle_pointer_logical(press, {r.cx(), r.cy()});
+    env.ui.handle_pointer_logical(release, {r.cx(), r.cy()});
+    CHECK(!field.editing());
+    CHECK(env.ui.is_focused(&below));
+}

@@ -34,6 +34,9 @@ Sources:
 3. **The UI redraws at 60 fps when nothing changes.** Every perf log shows 300 frames per 5 s on idle
    screens `[KIT]`. That is CPU, GPU and heat for no picture change. PlxNative measured its
    options for not redrawing (`docs/perf-damage-tracking-verdict.md` `[SRC]`).
+   **Done:** the GLES2 renderer fingerprints each frame and the shell presents only frames that
+   differ (`AppConfig::redraw_on_change`), with a 100 ms probe and a 2 s keepalive as PlxNative uses.
+   Host: Example B idle for 7 s presents 7 frames, not ~400. Not yet measured on a TV.
 
 ## Gaps by kind of app
 

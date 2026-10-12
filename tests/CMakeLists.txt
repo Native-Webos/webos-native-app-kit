@@ -111,6 +111,9 @@ if (TARGET wnk-tvui)
             "focus grid.item40")
     wnk_tvui_e2e(dialog_focus_restore "Left,Down,Down,Right,Return,Right,Escape" "dialog closed focus=widgets.dialog")
     wnk_tvui_e2e(double_back_exits "Escape,Escape" "Back twice at root: quitting")
+    # A still screen is drawn but not presented: about 7 presents in ~7 s of waiting, not 400.
+    string(REPEAT "Z," 60 WNK_TVUI_IDLE)
+    wnk_tvui_e2e(still_screen_is_not_presented "${WNK_TVUI_IDLE}Z" "main loop ended after [0-9] frames presented, [0-9][0-9][0-9] drawn")
 endif ()
 if (TARGET wnk-tvui)
     # Pointer: clicking the second card of the first rail, and the wheel over the browse grid (4 columns,

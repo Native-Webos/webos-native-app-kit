@@ -252,3 +252,38 @@ TEST("glyph atlas resets when full and text still renders") {
     for (size_t i = 0; i < px.size(); i += 4) lit += px[i] > 200;
     CHECK(lit > 50);
 }
+
+TEST("frame fingerprint: equal for identical frames, different for any visible change") {
+    SKIP_WITHOUT_GL();
+    auto &r = *env().r;
+    FontId font = r.load_font_file(kFontDir + "/AtkinsonHyperlegible-Regular.ttf");
+    auto draw = [&](Color fill, float x, const char *text, Rect clip, TextureId tex) {
+        frame();
+        r.clear(Color::hex(0x101010FF));
+        r.push_clip(clip);
+        r.fill_rect({x, 4, 20, 10}, fill, 3);
+        r.pop_clip();
+        r.draw_text({font, 14, kWhite}, {4, 40}, text);
+        if (tex != kNoTexture) r.draw_image(tex, {30, 30, 8, 8});
+        r.end_frame();
+        return r.frame_fingerprint();
+    };
+    const Rect clip{0, 0, 60, 30};
+    draw(kWhite, 2, "Hello", clip, kNoTexture);  // rasterises the glyphs once
+    const uint64_t a = draw(kWhite, 2, "Hello", clip, kNoTexture);
+    CHECK_EQ(draw(kWhite, 2, "Hello", clip, kNoTexture), a);
+    CHECK(draw(Color::hex(0xFF0000FF), 2, "Hello", clip, kNoTexture) != a);  // colour
+    CHECK(draw(kWhite, 3, "Hello", clip, kNoTexture) != a);                   // one pixel to the right
+    CHECK(draw(kWhite, 2, "Hellp", clip, kNoTexture) != a);                   // text
+    draw(kWhite, 2, "Hello", clip, kNoTexture);
+    CHECK(draw(kWhite, 2, "Hello", {0, 0, 61, 30}, kNoTexture) != a);         // clip
+    // A texture deleted and another created may reuse the GL name with other pixels: still a change.
+    const uint8_t red[4] = {255, 0, 0, 255}, blue[4] = {0, 0, 255, 255};
+    TextureId t1 = r.create_texture(1, 1, red);
+    const uint64_t with_red = draw(kWhite, 2, "Hello", clip, t1);
+    CHECK_EQ(draw(kWhite, 2, "Hello", clip, t1), with_red);
+    r.destroy_texture(t1);
+    TextureId t2 = r.create_texture(1, 1, blue);
+    CHECK(draw(kWhite, 2, "Hello", clip, t2) != with_red);
+    r.destroy_texture(t2);
+}

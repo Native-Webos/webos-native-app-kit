@@ -55,6 +55,10 @@ class Gles2Renderer final : public Renderer {
     RenderStats stats() const override;
     GpuInfo gpu_info() const override;
 
+    // A hash of everything the last frame drew (valid after end_frame): drawable size, clears, scissor
+    // rectangles, every batch's texture and vertices, and the texture and glyph uploads since the
+    // previous frame. Equal fingerprints mean the frames look the same, so the shell need not present.
+    uint64_t frame_fingerprint() const { return last_fingerprint_; }
     // Read back drawable pixels as RGBA, top row first (tests and diagnostics; flushes first).
     std::vector<uint8_t> read_pixels(int x, int y, int w, int h);
 
@@ -101,6 +105,7 @@ class Gles2Renderer final : public Renderer {
     void quad(const Rect &px, float u0, float v0, float u1, float v1, Color c, float radius, float border, Mode mode,
               unsigned texture);
     void flush();
+    void mix(uint64_t v) { fingerprint_ = (fingerprint_ ^ v) * 0x100000001B3ull; }
     void apply_scissor();
     Rect to_pixels(const Rect &logical) const;
     const GlyphEntry *glyph(FontId font, int glyph_index, int pixel_size);
@@ -128,6 +133,8 @@ class Gles2Renderer final : public Renderer {
     RenderStats frame_stats_;
     RenderStats last_stats_;
     uint32_t atlas_resets_ = 0;
+    uint64_t fingerprint_ = 0, last_fingerprint_ = 0;
+    uint64_t uploads_ = 0;  // texture creations, deletions and glyph uploads, ever
     bool highp_ = false;
 };
 

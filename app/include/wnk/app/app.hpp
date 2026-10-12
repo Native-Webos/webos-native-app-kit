@@ -52,6 +52,13 @@ struct AppConfig {
     // Context::keep_screen_on() lock while video plays. false blocks it for the whole run.
     bool allow_screensaver = true;
     int shutdown_deadline_ms = 3000;  // the watchdog ends the process if teardown takes longer
+    // Present a frame only when it differs from the one on screen: on the TV the compositor's work is
+    // most of a frame's cost, and a still screen needs none of it. A still screen is drawn again every
+    // idle_probe_ms to notice what changes with time alone (a caret, a playback clock) and presented
+    // every keepalive_ms regardless. Input and worker results wake it at once. false: 60 fps always.
+    bool redraw_on_change = true;
+    int idle_probe_ms = 100;
+    int keepalive_ms = 2000;
     ui::Theme theme;          // fonts are filled in by the shell
     std::string font_regular = "fonts/AtkinsonHyperlegible-Regular.ttf";  // relative to the app dir
     std::string font_bold = "fonts/AtkinsonHyperlegible-Bold.ttf";

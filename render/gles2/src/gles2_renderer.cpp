@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstddef>
 
 namespace wnk::render {
@@ -195,6 +196,8 @@ void Gles2Renderer::begin_frame(int drawable_w, int drawable_h) {
     translates_.clear();
     translate_ = {0, 0};
     frame_stats_ = {};
+    fingerprint_ = 0xCBF29CE484222325ull;
+    mix(static_cast<uint64_t>(drawable_w) << 32 | static_cast<uint32_t>(drawable_h));
 
     glViewport(0, 0, drawable_w, drawable_h);
     glDisable(GL_DEPTH_TEST);
@@ -229,6 +232,8 @@ void Gles2Renderer::begin_frame(int drawable_w, int drawable_h) {
 
 void Gles2Renderer::clear(Color color) {
     flush();
+    mix(0xC1EA2ull);
+    mix(static_cast<uint64_t>(to_u8(color.r)) << 24 | to_u8(color.g) << 16 | to_u8(color.b) << 8 | to_u8(color.a));
     glDisable(GL_SCISSOR_TEST);
     glClearColor(color.r, color.g, color.b, color.a);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -304,6 +309,21 @@ void Gles2Renderer::quad(const Rect &px, float u0, float v0, float u1, float v1,
 
 void Gles2Renderer::flush() {
     if (vertices_.empty()) return;
+    // The batch's state and vertices, eight bytes at a time (a Vertex is 64 bytes, no padding).
+    static_assert(sizeof(Vertex) % 8 == 0, "fingerprint reads whole words");
+    mix(batch_texture_);
+    if (!clips_.empty()) {
+        const PixelRect &c = clips_.back();
+        mix(static_cast<uint64_t>(static_cast<uint32_t>(c.x)) << 32 | static_cast<uint32_t>(c.y));
+        mix(static_cast<uint64_t>(static_cast<uint32_t>(c.w)) << 32 | static_cast<uint32_t>(c.h));
+    }
+    const auto *bytes = reinterpret_cast<const unsigned char *>(vertices_.data());
+    const size_t words = vertices_.size() * sizeof(Vertex) / 8;
+    for (size_t i = 0; i < words; ++i) {
+        uint64_t w;
+        std::memcpy(&w, bytes + i * 8, 8);
+        mix(w);
+    }
     glBindTexture(GL_TEXTURE_2D, batch_texture_ != 0 ? batch_texture_ : white_);
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices_.size() * sizeof(Vertex)), vertices_.data(),
                  GL_STREAM_DRAW);
@@ -354,6 +374,7 @@ const Gles2Renderer::GlyphEntry *Gles2Renderer::glyph(FontId font, int glyph_ind
             slot = packer_.insert(bmp.width, bmp.height);
             if (!slot.ok) return nullptr;  // glyph larger than the atlas
         }
+        ++uploads_;
         glBindTexture(GL_TEXTURE_2D, atlas_);
         glTexSubImage2D(GL_TEXTURE_2D, 0, slot.x, slot.y, bmp.width, bmp.height, GL_ALPHA, GL_UNSIGNED_BYTE,
                         bmp.alpha.data());
@@ -410,6 +431,8 @@ float Gles2Renderer::ascent(const TextStyle &style) const {
 void Gles2Renderer::end_frame() {
     flush();
     last_stats_ = frame_stats_;
+    mix(uploads_);
+    last_fingerprint_ = fingerprint_;
 }
 
 TextureId Gles2Renderer::create_texture(int width, int height, const uint8_t *rgba) {
@@ -431,6 +454,7 @@ TextureId Gles2Renderer::create_texture(int width, int height, const uint8_t *rg
     }
     const TextureId id = next_texture_++;
     textures_[id] = t;
+    ++uploads_;  // a recycled GL name may now hold other pixels
     return id;
 }
 
@@ -440,6 +464,7 @@ bool Gles2Renderer::destroy_texture(TextureId id) {
     flush();  // queued quads may still reference it
     glDeleteTextures(1, &it->second.gl);
     textures_.erase(it);
+    ++uploads_;
     return true;
 }
 

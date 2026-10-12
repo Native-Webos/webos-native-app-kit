@@ -243,6 +243,7 @@ int main(int argc, char **argv) {
 | `images` | true | Posters and thumbnails. Set false for a player with no images. |
 | `storage` | false | Settings or session that must survive relaunch. Needs `database.operation`. |
 | `double_back_exit` | true | Root Back shows "Press Back again to exit", second Back quits. |
+| `redraw_on_change` | true | Leave it. A frame is presented only when it differs from the one on screen (on the TV the compositor's work is most of a frame's cost); input and worker results wake the loop at once, anything that changes with time alone shows within `idle_probe_ms` (100 ms). Animations still run at the display rate. |
 | `allow_screensaver` | true | Leave it. The screensaver may start on idle screens (OLED burn-in); hold `ctx.keep_screen_on()` while video plays or a game runs. false blocks it for the whole run. |
 | `metrics_toggle` | `Action::Unknown` | e.g. `Action::Blue` to show the frame-time overlay. |
 | `script_env_prefix` | `"WNK"` | Unique per app so host tests do not collide. |
@@ -267,7 +268,7 @@ Reject a non-object. Do not trust strings as paths outside `app_dir` and URLs yo
 | `on_start` | Build the tree, open the store, kick off the first fetch. The first frame is drawn after it returns, so do not block. |
 | `on_action` | Actions the `Ui` did not consume. Return true to swallow the shell default (Exit quits; Back at the root asks for a second Back). |
 | `on_lifecycle` | `Suspended`: pause media and timers. `Resuming` then `Running`: resume. While suspended the shell draws nothing and drops input. |
-| `on_frame` | Once per drawn frame, after `Ui::update`. Drive a progress label from `PlaybackController::snapshot()`. |
+| `on_frame` | Once per drawn frame, after `Ui::update`. Drive a progress label from `PlaybackController::snapshot()`. A still screen is drawn only every `idle_probe_ms` (100 ms), so do not count frames as time: use the `dt` argument or `ui.now_ms()`. |
 | `on_stop` | Save state. The pool and dispatcher still run; the UI still exists. Keep it short; a watchdog (default 3 s) ends the process if teardown overruns. |
 
 ## Map a feature request onto the kit

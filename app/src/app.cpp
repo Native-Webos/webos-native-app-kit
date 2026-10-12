@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -403,6 +404,16 @@ class Shell final : public Context {
         if (theme.regular == render::kNoFont || theme.bold == render::kNoFont) return fail(("fonts: " + err).c_str());
 
         dispatcher_ = std::make_unique<async::MainDispatcher>();
+        // A result posted from a worker wakes an idle loop at once (one pending wake event at a time).
+        wake_event_ = SDL_RegisterEvents(1);
+        if (wake_event_ != static_cast<Uint32>(-1)) {
+            dispatcher_->set_wake([this] {
+                if (wake_pending_.exchange(true)) return;
+                SDL_Event e{};
+                e.type = wake_event_;
+                SDL_PushEvent(&e);
+            });
+        }
         pool_ = std::make_unique<async::WorkerPool>(config_.worker_threads);
         if (config_.http) {
             http_ = net::make_curl_transport({}, &err);
@@ -500,18 +511,36 @@ class Shell final : public Context {
         Script script(config_.script_env_prefix);
         const double freq = static_cast<double>(SDL_GetPerformanceFrequency());
         Uint64 prev = SDL_GetPerformanceCounter();
-        uint64_t iteration = 0, frames = 0;
+        uint64_t iteration = 0, frames = 0, drawn = 0;
         int dw = 0, dh = 0;
+        uint64_t presented_fp = 0;
+        Uint32 last_present_ms = 0, last_change_ms = 0;
+        bool idle = false;           // the last drawn frame looked like the one on screen: not presented
+        bool prev_presented = false;  // for frame metrics: intervals only between consecutive presents
         while (!quit_requested_) {
             const Uint64 t_events = SDL_GetPerformanceCounter();
             SDL_Event ev;
+            size_t work = 0;
             // Backgrounded: draw nothing, wake for events (and worker results) a few times a second.
-            if (!lifecycle_.renders() && SDL_WaitEventTimeout(&ev, script.active() ? 16 : 250)) on_event(ev);
-            while (!quit_requested_ && SDL_PollEvent(&ev)) on_event(ev);
+            // Idle: wait for input or a worker result, drawing again every idle_probe_ms to notice what
+            // changes with time alone; for half a second after the last change, every frame.
+            if (!lifecycle_.renders()) {
+                if (SDL_WaitEventTimeout(&ev, script.active() ? 16 : 250)) on_event(ev);
+            } else if (idle) {
+                const bool settling = SDL_GetTicks() - last_change_ms < 500;
+                if (SDL_WaitEventTimeout(&ev, script.active() || settling ? 16 : config_.idle_probe_ms)) {
+                    on_event(ev);
+                    ++work;
+                }
+            }
+            while (!quit_requested_ && SDL_PollEvent(&ev)) {
+                on_event(ev);
+                ++work;
+            }
             if (quit_requested_) break;
             const float events_ms = static_cast<float>(ms_since(t_events));
 
-            dispatcher_->drain(32, std::chrono::milliseconds(4));
+            work += dispatcher_->drain(32, std::chrono::milliseconds(4));
             sync_text_input();
             const bool script_done = script.tick(iteration++, *renderer_, window_);
             if (script_done && !lifecycle_.renders()) {
@@ -524,8 +553,10 @@ class Shell final : public Context {
             }
 
             const Uint64 now = SDL_GetPerformanceCounter();
-            const float dt = static_cast<float>((now - prev) / freq);
+            float dt = static_cast<float>((now - prev) / freq);
             prev = now;
+            // Woken from idle by input or a result: animations it starts begin with one frame's step.
+            if (idle && work > 0) dt = std::min(dt, 1.0f / 60.0f);
             ui_->update(std::min(dt, 0.1f));
             delegate_->on_frame(*this, std::min(dt, 0.1f));
             log_focus_change();
@@ -545,25 +576,40 @@ class Shell final : public Context {
                 script.save(*renderer_, dw, dh);  // before the swap, while the frame is still readable
                 quit("script finished");
             }
+            if (++drawn == 180 && !crash_test_.empty()) {
+                WNK_LOGW("crash", "crash test: triggering %s", crash_test_.c_str());
+                if (auto *l = log::default_logger()) l->flush();
+                crash_now(crash_test_);
+            }
+            const uint64_t fp = renderer_->frame_fingerprint();
+            const Uint32 ticks = SDL_GetTicks();
+            const bool changed = fp != presented_fp;
+            const bool present = !config_.redraw_on_change || frames == 0 || changed ||
+                                 lifecycle_.state() == State::Resuming || ticks - last_present_ms >= static_cast<Uint32>(config_.keepalive_ms);
+            idle = !present;
+            if (!present) {
+                prev_presented = false;
+                continue;
+            }
+            if (changed) last_change_ms = ticks;
+            presented_fp = fp;
+            last_present_ms = ticks;
             const Uint64 t_swap = SDL_GetPerformanceCounter();
             SDL_GL_SwapWindow(window_);
             const float swap_ms = static_cast<float>(ms_since(t_swap));
             if (++frames == 1) WNK_LOGI(kCat, "first frame: drawable %dx%d", dw, dh);
             if (lifecycle_.state() == State::Resuming) lifecycle_.dispatch(Event::FramePresented, SDL_GetTicks());
 
-            if (frames > 1) metrics_.add({dt * 1000.0f, events_ms, update_ms, draw_ms, finish_ms, swap_ms});
-            if (!crash_test_.empty() && frames == 180) {
-                WNK_LOGW("crash", "crash test: triggering %s", crash_test_.c_str());
-                if (auto *l = log::default_logger()) l->flush();
-                crash_now(crash_test_);
-            }
-            if (frames % 300 == 0) log_perf(frames);
+            if (frames > 1 && prev_presented) metrics_.add({dt * 1000.0f, events_ms, update_ms, draw_ms, finish_ms, swap_ms});
+            prev_presented = true;
+            if (frames % 300 == 0) log_perf(frames, drawn);
 
             // If the swap did not block on vsync, sleep out the rest of a 60 Hz frame.
             const double frame_ms = ms_since(now);
             if (frame_ms < 4.0) SDL_Delay(static_cast<Uint32>(1000.0 / 60.0 - frame_ms));
         }
-        WNK_LOGI(kCat, "main loop ended after %llu frames", static_cast<unsigned long long>(frames));
+        WNK_LOGI(kCat, "main loop ended after %llu frames presented, %llu drawn", static_cast<unsigned long long>(frames),
+                 static_cast<unsigned long long>(drawn));
     }
 
     void on_event(const SDL_Event &ev) {
@@ -607,7 +653,9 @@ class Shell final : public Context {
                 WNK_LOGW("lifecycle", "SDL_APP_LOWMEMORY: trimming the image memory cache");
                 if (images_) images_->memory().trim(config_.image_memory_bytes / 4);
                 break;
-            default: break;
+            default:
+                if (ev.type == wake_event_) wake_pending_ = false;  // the loop drains the dispatcher next
+                break;
         }
     }
 
@@ -766,15 +814,15 @@ class Shell final : public Context {
         }
     }
 
-    void log_perf(uint64_t frames) {
+    void log_perf(uint64_t frames, uint64_t drawn) {
         const auto s = metrics_.summary(300);
         const auto rs = renderer_->stats();
         const auto us = ui_->stats();
         const auto mem = diagnostics::process_memory();
-        WNK_LOGI("perf", "frames %llu: interval avg %.2f median %.2f p95 %.2f max %.2f ms, late %zu; max ms events %.2f "
+        WNK_LOGI("perf", "frames %llu presented of %llu drawn: interval avg %.2f median %.2f p95 %.2f max %.2f ms, late %zu; max ms events %.2f "
                  "update %.2f draw %.2f finish %.2f swap %.2f; draw calls %u, quads %u, textures %u, views %zu, "
                  "rss %.1f MB",
-                 static_cast<unsigned long long>(frames), s.interval_avg, s.interval_median, s.interval_p95, s.interval_max, s.late,
+                 static_cast<unsigned long long>(frames), static_cast<unsigned long long>(drawn), s.interval_avg, s.interval_median, s.interval_p95, s.interval_max, s.late,
                  s.events_max, s.update_max, s.draw_max, s.finish_max, s.swap_max, rs.draw_calls, rs.quads,
                  rs.textures, us.views, mem.rss_bytes / 1048576.0);
     }
@@ -794,7 +842,10 @@ class Shell final : public Context {
         };
         if (delegate_ && ui_) run_step("delegate on_stop", [this] { delegate_->on_stop(*this); });
         run_step("write capabilities", [this] { write_capabilities(); });
-        if (dispatcher_) run_step("close dispatcher", [this] { dispatcher_->close(); });
+        if (dispatcher_) run_step("close dispatcher", [this] {
+            dispatcher_->close();
+            dispatcher_->set_wake(nullptr);
+        });
         if (pool_) {
             run_step("join workers", [this] {
                 const int budget = std::max(200, config_.shutdown_deadline_ms - 1000);
@@ -839,6 +890,8 @@ class Shell final : public Context {
     bool sdl_ = false;
     bool quit_requested_ = false;
     bool text_input_on_ = false;  // SDL text input started for a view
+    Uint32 wake_event_ = static_cast<Uint32>(-1);
+    std::atomic<bool> wake_pending_{false};
     SDL_Window *window_ = nullptr;
     SDL_GLContext gl_ = nullptr;
     std::unique_ptr<render::Gles2Renderer> renderer_;

@@ -8,7 +8,8 @@
 
 What a pass means: the archive is shaped the way LG's installer and webosbrew's tools expect,
 metadata agrees everywhere, every ELF matches the target ABI, bundled libraries follow the kit's
-bundling policy, and the executable needs exactly the reviewed set of system libraries.
+bundling policy, the executable needs exactly the reviewed set of system libraries, and licenses/
+carries the GPL text, the notices, the source note and the licence of every bundled library.
 What it does NOT mean: that the app loads on a given firmware (tools/fw-check.py) or works on a TV.
 """
 from __future__ import annotations
@@ -157,6 +158,19 @@ def check_ipk(path: Path, expected_needed: list[str] | None, arch: str) -> list[
                     f"{short}: allowed to be bundled (not a firmware/runtime library)")
         r.check(not any(lib.startswith("libstdc++") for lib in info.needed),
                 f"{short}: does not need libstdc++.so (link it statically)")
+
+    # Licences (cmake/WebOSPackage.cmake stages them): a package must say what it is under and where
+    # its source is, and carry the licence of everything it bundles.
+    lic = app_root + "licenses/"
+    for need in ("LICENSE", "THIRD-PARTY-NOTICES.md", "SOURCE.txt"):
+        r.check(lic + need in files, f"licenses/{need} present")
+    if "libSDL2-2.0.so.0" in bundled:
+        r.check(lic + "SDL2-zlib.txt" in files, "licenses/SDL2-zlib.txt present (SDL is bundled)")
+    if any("-wnk.so" in n for n in bundled):
+        r.check(lic + "FFmpeg-LGPL-2.1.txt" in files, "licenses/FFmpeg-LGPL-2.1.txt present (FFmpeg is bundled)")
+        source = files.get(lic + "SOURCE.txt", b"").decode("utf-8", "replace")
+        r.check("ffmpeg.org/releases/ffmpeg-" in source and "sha256" in source,
+                "licenses/SOURCE.txt names the FFmpeg source tarball and its checksum")
 
     main_info = wnk_elf.parse(main_blob)
     paths = main_info.rpath + main_info.runpath

@@ -14,6 +14,8 @@
 #     [EXTRA_DIRS <dir>...]              copied next to the executable as <basename>/ (e.g. fonts)
 #     [REQUIRED_PERMISSIONS <acg>...]    appinfo.json requiredPermissions (e.g. database.operation)
 #     [BUNDLED_LIBS <so>...]             further libraries for lib/ (e.g. WNK_FFMPEG_RUNTIME_LIBS)
+#     [SOURCE_URL <url>]                 where the app's corresponding source is published (named in
+#                                        licenses/SOURCE.txt; default WNK_SOURCE_URL, else the kit's notice)
 # )
 #
 # Adds, for webOS builds only:
@@ -23,6 +25,11 @@
 #   <target>-launch   tools/launch.sh  (ares-launch)
 # and makes wnk-ipks (every app's ipk) depend on <target>-ipk.
 #
+# Every package carries licenses/: the GPL text, THIRD-PARTY-NOTICES.md, the licences of what is
+# compiled in or bundled (SDL, stb, nlohmann/json, curl headers; FFmpeg's LGPL when its libraries are
+# bundled) and SOURCE.txt, which says where the corresponding source is (and, with FFmpeg, the exact
+# upstream tarball and the build script, as LGPL-2.1 §6 asks).
+#
 # Staging is plain `cmake -E` so it is readable. The bundled SDL (cmake/SdlWebOS.cmake) is copied to
 # lib/libSDL2-2.0.so.0 as a real file. Only the staged copies are stripped; the unstripped executable
 # stays in the build tree, matched by build id, for crash symbolisation (PlxNative's practice).
@@ -31,7 +38,7 @@ set(WNK_PACKAGE_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(WNK_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}/../tools")
 
 function(wnk_add_webos_package)
-    cmake_parse_arguments(P "" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE"
+    cmake_parse_arguments(P "" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE;SOURCE_URL"
             "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS;BUNDLED_LIBS" ${ARGN})
     foreach (req TARGET APPID TITLE VERSION VENDOR ICON LARGE_ICON)
         if (NOT P_${req})
@@ -75,10 +82,55 @@ function(wnk_add_webos_package)
     file(GENERATE OUTPUT "${_appinfo}" INPUT "${_appinfo}.in"
             TARGET ${P_TARGET})
 
+    # licenses/SOURCE.txt
+    if (NOT P_SOURCE_URL)
+        set(P_SOURCE_URL "${WNK_SOURCE_URL}")
+    endif ()
+    if (NOT P_SOURCE_URL)
+        set(P_SOURCE_URL "(not set: whoever distributes this package must publish the source and name it here;\n     see SOURCE_URL in cmake/WebOSPackage.cmake)")
+    endif ()
+    set(SOURCE_URL "${P_SOURCE_URL}")
+    set(FFMPEG_NOTE "")
+    set(_ffmpeg FALSE)
+    foreach (_lib IN LISTS P_BUNDLED_LIBS)
+        if (_lib MATCHES "-wnk\\.so")
+            set(_ffmpeg TRUE)
+        endif ()
+    endforeach ()
+    if (_ffmpeg)
+        file(STRINGS "${WNK_TOOLS_DIR}/build-ffmpeg.sh" _ffv REGEX "^VERSION=")
+        file(STRINGS "${WNK_TOOLS_DIR}/build-ffmpeg.sh" _ffs REGEX "^SHA256=")
+        string(REPLACE "VERSION=" "" _ffv "${_ffv}")
+        string(REPLACE "SHA256=" "" _ffs "${_ffs}")
+        set(FFMPEG_NOTE "
+lib/*-wnk.so.* are FFmpeg ${_ffv} (libavformat, libavcodec, libavutil, libswresample), unmodified,
+under the GNU Lesser General Public License 2.1 or later: licenses/FFmpeg-LGPL-2.1.txt. Built without
+GPL or non-free parts by tools/build-ffmpeg.sh of the kit (configure options listed there), from
+    https://ffmpeg.org/releases/ffmpeg-${_ffv}.tar.xz
+    sha256 ${_ffs}
+They are shared libraries found through RPATH \$ORIGIN/lib: you may replace them with your own build
+of the same version and options.
+")
+    endif ()
+    set(_source_txt "${CMAKE_CURRENT_BINARY_DIR}/${P_TARGET}-SOURCE.txt")
+    configure_file("${WNK_PACKAGE_MODULE_DIR}/package-source.txt.in" "${_source_txt}" @ONLY)
+    set(_kit "${WNK_PACKAGE_MODULE_DIR}/..")
+    set(_licence_files
+            "${_kit}/LICENSE" "${_kit}/THIRD-PARTY-NOTICES.md"
+            "${_kit}/third_party/licenses/SDL2-zlib.txt" "${_kit}/third_party/stb/LICENSE"
+            "${_kit}/third_party/nlohmann/LICENSE.MIT" "${_kit}/third_party/curl/COPYING")
+
     set(_strip "${WNK_NDK_PREFIX}strip")
     set(_cmds
             COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_stage}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_stage}/lib" "${_dist}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_stage}/lib" "${_stage}/licenses" "${_dist}"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/LICENSE" "${_stage}/licenses/LICENSE"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/THIRD-PARTY-NOTICES.md" "${_stage}/licenses/THIRD-PARTY-NOTICES.md"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/SDL2-zlib.txt" "${_stage}/licenses/SDL2-zlib.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/stb/LICENSE" "${_stage}/licenses/stb-MIT-or-public-domain.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/nlohmann/LICENSE.MIT" "${_stage}/licenses/nlohmann-json-MIT.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/curl/COPYING" "${_stage}/licenses/curl-headers.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_source_txt}" "${_stage}/licenses/SOURCE.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_appinfo}" "${_stage}/appinfo.json"
             COMMAND "${CMAKE_COMMAND}" -E copy "${P_ICON}" "${_stage}/icon.png"
             COMMAND "${CMAKE_COMMAND}" -E copy "${P_LARGE_ICON}" "${_stage}/largeIcon.png"
@@ -97,6 +149,11 @@ function(wnk_add_webos_package)
                 COMMAND "${CMAKE_COMMAND}" -E copy "${_lib}" "${_stage}/lib/${_lname}"
                 COMMAND "${_strip}" --strip-unneeded "${_stage}/lib/${_lname}")
     endforeach ()
+    if (_ffmpeg)
+        list(APPEND _cmds COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/LGPL-2.1.txt"
+                "${_stage}/licenses/FFmpeg-LGPL-2.1.txt")
+        list(APPEND _licence_files "${_kit}/third_party/licenses/LGPL-2.1.txt")
+    endif ()
     foreach (_f IN LISTS P_EXTRA_FILES)
         list(APPEND _cmds COMMAND "${CMAKE_COMMAND}" -E copy "${_f}" "${_stage}/")
     endforeach ()
@@ -120,6 +177,7 @@ function(wnk_add_webos_package)
             COMMAND "${Python3_EXECUTABLE}" "${WNK_TOOLS_DIR}/check-package.py" "${_ipk}" ${_check_args}
                 --arch "${WNK_WEBOS_ARCH}"
             DEPENDS ${P_TARGET} "${_appinfo}" "${P_ICON}" "${P_LARGE_ICON}" ${P_EXTRA_FILES} ${_dir_deps}
+                    ${_licence_files} "${_source_txt}"
             BYPRODUCTS "${_ipk}"
             COMMENT "Packaging ${P_APPID} ${P_VERSION}"
             VERBATIM)

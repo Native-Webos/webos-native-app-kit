@@ -1,0 +1,12 @@
+@APPINFO_TITLE@ @APPINFO_VERSION@ (@APPINFO_ID@)
+
+This application is free software under the GNU General Public License, version 3 or (at your option)
+any later version: licenses/LICENSE. It is built on the webOS Native App Kit (GPL-3.0-or-later).
+Third-party components and their licences: licenses/THIRD-PARTY-NOTICES.md and the other files in
+licenses/. Fonts: fonts/OFL.txt.
+
+Corresponding source of this application, including the kit and its build scripts:
+    @SOURCE_URL@
+@FFMPEG_NOTE@
+LG's firmware libraries (media pipeline, NDL, Luna, EGL/GLES, libcurl) are not part of this package;
+they are loaded from the TV at runtime.

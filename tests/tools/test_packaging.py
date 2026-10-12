@@ -42,9 +42,14 @@ fw_check = load_tool("fw-check")
 HOST_ELF = Path(os.path.realpath(sys.executable))
 
 
-def make_stage(root: Path, app_id: str = "org.example.demo", version: str = "1.2.3") -> Path:
+def make_stage(root: Path, app_id: str = "org.example.demo", version: str = "1.2.3",
+               licences: bool = True) -> Path:
     stage = root / "stage"
     (stage / "lib").mkdir(parents=True)
+    if licences:
+        (stage / "licenses").mkdir()
+        for name in ("LICENSE", "THIRD-PARTY-NOTICES.md", "SOURCE.txt"):
+            (stage / "licenses" / name).write_text(name + "\n")
     shutil.copyfile(HOST_ELF, stage / "demo")
     (stage / "demo").chmod(0o755)
     (stage / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
@@ -116,6 +121,19 @@ class CheckPackageTests(unittest.TestCase):
         needed = wnk_elf.parse(HOST_ELF.read_bytes()).needed
         failures, out = self.run_check(ipk, needed)
         self.assertEqual(failures, [], out)
+
+    def test_missing_licences_fail(self):
+        ipk = build(make_stage(self.tmp, licences=False), self.tmp / "out")
+        failures, _ = self.run_check(ipk)
+        for name in ("LICENSE", "THIRD-PARTY-NOTICES.md", "SOURCE.txt"):
+            self.assertTrue(any(f"licenses/{name}" in f for f in failures), name)
+
+    def test_bundled_ffmpeg_needs_lgpl_text_and_source(self):
+        stage = make_stage(self.tmp)
+        shutil.copyfile(HOST_ELF, stage / "lib" / "libavutil-wnk.so.61")
+        failures, _ = self.run_check(build(stage, self.tmp / "out"))
+        self.assertTrue(any("FFmpeg-LGPL-2.1.txt" in f for f in failures))
+        self.assertTrue(any("FFmpeg source tarball" in f for f in failures))
 
     def test_dt_needed_mismatch_fails(self):
         ipk = build(make_stage(self.tmp), self.tmp / "out")

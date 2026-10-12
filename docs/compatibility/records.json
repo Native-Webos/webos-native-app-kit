@@ -780,8 +780,8 @@
       "feature": "drm.playready_platform_pipeline",
       "result": "supported",
       "method": "Example D 0.17.0 {\"drmTest\": ...}: SDL exported window, luna drm/load playready, drm/sendDrmMessage (PlayReady initiator, LA_URL Microsoft test server), com.webos.media/load {uri, type media, option {appId, windowId, drm {type, clientId}, mediaTransportType}}, subscribe, play",
-      "evidence": "Smooth Streaming SuperSpeedway_720 (MSIIS): DRM_RESULT 0, loadCompleted, playing, videoInfo 1280x720 H.264 23.976 fps on VDEC, no rights or pipeline errors. Clear DASH (Shaka angel-one, drm none, MPEG-DASH): playing. Tears of Steel 4K PlayReady DASH (MPEG-DASH): DRM_RESULT 0, then 'pipeline died abnormally' after 3.8 s with nothing buffered",
-      "limitations": "shown for PlayReady Smooth Streaming only: PlayReady DASH (Tears of Steel 4K) died, Widevine not tried; picture not yet confirmed by eye; the platform pipeline replaces the kit's player (no kit sources, controller or subtitles)"
+      "evidence": "Smooth Streaming SuperSpeedway_720 (MSIIS): DRM_RESULT 0, loadCompleted, playing, videoInfo 1280x720 H.264 23.976 fps on VDEC, no rights or pipeline errors. Clear DASH (Shaka angel-one, drm none, MPEG-DASH): playing. Tears of Steel 4K PlayReady DASH (MPEG-DASH): DRM_RESULT 0, then 'pipeline died abnormally' after 3.8 s with nothing buffered; owner saw the SuperSpeedway picture. BBB 1080p PlayReady DASH died with every transport name and also with no DRM option (encrypted DASH kills the by-URL pipeline). Clear and PlayReady Smooth both stutter once the 2-minute title is fully downloaded (buffer report drops to 0); a 24 fps MP4 is smooth on this pipeline and on the kit's Starfish path",
+      "limitations": "PlayReady over Smooth Streaming only: encrypted DASH does not play through the by-URL pipeline; Widevine not tried; LG's Smooth pipeline stutters near the end of short titles; the platform pipeline replaces the kit's player"
     }
   ]
 }

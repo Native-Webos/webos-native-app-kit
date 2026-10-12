@@ -579,8 +579,16 @@ class DrmTestScreen : public Screen {
                     const json e = json::parse(r, nullptr, false);
                     const bool time = e.is_object() && e.contains("currentTime");
                     if (time) {
-                        const int64_t ms = e["currentTime"].is_number() ? e["currentTime"].get<int64_t>() : 0;
-                        if (ms / 2000 != st->last_logged_ms.exchange(ms) / 2000) WNK_LOGI(kCat, "drmtest: currentTime %lld ms", static_cast<long long>(ms));
+                        // {"currentTime": ms} or {"currentTime": {"currentTime": ms, "mediaId": ...}}
+                        const json &c = e["currentTime"];
+                        const int64_t ms = c.is_number() ? c.get<int64_t>()
+                                           : c.is_object() && c.contains("currentTime") && c["currentTime"].is_number()
+                                               ? c["currentTime"].get<int64_t>()
+                                               : -1;
+                        const int64_t prev = st->last_logged_ms.exchange(ms);
+                        if (ms >= 0 && (prev < 0 || ms / 1000 != prev / 1000)) {
+                            WNK_LOGI(kCat, "drmtest: currentTime %lld ms", static_cast<long long>(ms));
+                        }
                         post([ms](State &s) { s.media_text = "Media: playing, " + std::to_string(ms / 1000) + " s"; });
                     } else {
                         WNK_LOGI(kCat, "drmtest: media event %s", r.c_str());

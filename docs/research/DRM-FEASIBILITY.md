@@ -49,6 +49,10 @@ So the DRM service accepts a Developer Mode native app: there is no permission w
 | Shaka angel-one, clear DASH, `drm: none`, `MPEG-DASH` | loadCompleted, playing (LG picked the VP9 rendition) |
 | Microsoft SuperSpeedway 720p, PlayReady Smooth Streaming, `MSIIS` | initiator `DRM_RESULT 0`; loadCompleted, playing, 1280x720 H.264 on a hardware decoder, no rights errors |
 | Microsoft Tears of Steel 4K, PlayReady DASH, `MPEG-DASH` | initiator `DRM_RESULT 0`; "pipeline died abnormally" after 3.8 s, nothing buffered |
+| Microsoft BBB 1080p, PlayReady DASH (cenc), transport `MPEG-DASH`, `DASH`, `MPEG_DASH`, `URI` or none | "pipeline died abnormally" within 2.5 s every time |
+| The same BBB DASH with no DRM option at all | "pipeline died abnormally" after 0.7 s: encrypted DASH kills the by-URL pipeline whatever the option |
+| Microsoft SuperSpeedway clear Smooth (control) and the PlayReady copy, watched by the owner | both play; both stutter once the whole 2-minute title is downloaded (the reported buffer drops from ~45 s ahead to 0 at 60-70 s; the clock never stalls) |
+| 24 fps 1080p MP4 through this pipeline and through the kit's Starfish path, watched | both smooth: the pipeline matches the frame rate |
 
 The sequence that works: SDL exported window → `drm/load` → `drm/sendDrmMessage` (initiator XML,
 `urn:dvb:casystemid:19219`) → `com.webos.media/load` `{"uri","type":"media","payload":{"option":
@@ -57,11 +61,12 @@ The sequence that works: SDL exported window → `drm/load` → `drm/sendDrmMess
 
 ## Not known yet
 
-1. Whether the picture shows under the app's transparent SDL window (the events say it plays).
-2. Why PlayReady DASH (Tears of Steel 4K) kills the pipeline while Smooth Streaming plays: the 4K
-   renditions, the DASH transport name, or something in the DRM option.
-3. Widevine modular through the same service: LG documents PlayReady for this route; Widevine on webOS
-   is otherwise reached through the browser's EME (Chromium CDM), which a native app does not have.
+1. A way to play encrypted DASH: the by-URL pipeline cannot. LG's browser plays such content through
+   MSE/EME, feeding Starfish encrypted samples with DRM details (`setDrmOperation` and the Feed
+   payload); those formats are not documented and would have to be worked out from the firmware.
+2. Widevine through any of these routes (Widevine content is DASH or HLS, not Smooth).
+3. The stutter after the whole title is downloaded: LG's Smooth Streaming pipeline, not the app
+   (the clear copy does it too); not tried on a title long enough to keep it downloading.
 
 Protected playback is therefore a separate backend: the platform plays the URL and the
 kit's controller, sources and subtitles are bypassed.

@@ -890,6 +890,15 @@
       "method": "Example C 0.3.0 Browse search: OK on the field, typing with LG's on-screen keyboard and the remote",
       "evidence": "SDL_StartTextInput opened LG's keyboard ('screen keyboard supported'); typed text reached the field and filtered the grid; Backspace (sc 42) and OK (sc 40) arrive as keys; closing the keyboard ends editing ('keyboard closed by the system'); 0.3.1: with hover no longer moving focus while editing, the owner moved the Magic Remote pointer onto LG's keyboard and typed with it; the keyboard stayed open",
       "limitations": "None found"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-13",
+      "feature": "input.gamepad",
+      "result": "supported",
+      "method": "Example B 0.6.6 with a Nintendo Switch Pro Controller paired over Bluetooth in the TV's settings, used by the owner",
+      "evidence": "App (uid 6067, group 505 compositor) can open all 32 /dev/input event files; SDL lists the pad as a game controller; with SDL_WEBOS_HIDAPI_IGNORE_BLUETOOTH_DEVICES=0x057e/0x0000 it opens through the kernel driver ('pad 0 connected: Nintendo Switch Pro Controller'); focus moved with the pad, OK opened details and Back returned three times, X reached Delegate::on_gamepad, switching the pad off logged 'pad 0 disconnected'",
+      "limitations": "Before the hint, SDL's HIDAPI Switch driver failed with 'Couldn't load stick calibration' and the pad never opened. Only a Nintendo pad tried; Xbox and PlayStation pads untested"
     }
   ]
 }

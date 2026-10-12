@@ -4,8 +4,10 @@ A reusable foundation for **native** (C++/SDL/OpenGL ES) applications on retail 
 build, package, verify, install and launch, with the platform knowledge from PlxNative,
 moonlight-tv and the webosbrew projects turned into tools and checks.
 
-Status: **Milestone 3 (rendering, input, focus)**. See [docs/MILESTONES.md](docs/MILESTONES.md) for what is
-verified and what is not. Nothing here has run on a TV yet.
+Status: the platform layers, the media player and four reference apps (A–D) build, pass their host
+tests and run on an LG OLED65C1PTB (webOS 6.5.3) in Developer Mode. See [docs/MILESTONES.md](docs/MILESTONES.md)
+for what is verified and what is not, [docs/compatibility/records.json](docs/compatibility/records.json) for each
+TV result, and [docs/AGENT-APP-GUIDE.md](docs/AGENT-APP-GUIDE.md) to build an app on the kit.
 
 ## Quick start
 
@@ -47,10 +49,10 @@ Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-
 | `app/` | App shell (`wnk::app::run` + `Delegate`): SDL/GL setup, main loop, input routing, lifecycle state machine (Running ⇄ Suspended), timed shutdown under a watchdog, metrics overlay |
 | `diagnostics/` | Frame timing (per loop phase), process memory, crash record (async-signal-safe; `tools/symbolize-crash.py` resolves it offline), capabilities (Supported/Unsupported/Unknown) and device info without identifiers |
 | `media/` | Media model, playback controller, FFmpeg source (bundled FFmpeg via `tools/build-ffmpeg.sh`), NDL v2 backend, no-output pacing backend |
-| `applications/examples/hello/` | Example A: tile grid with focus ring, modal dialog, key log, device probe |
+| `applications/examples/hello/` | Example A: diagnostics without the app shell: tile grid with focus ring, modal dialog, key log, device and network probes |
 | `applications/examples/tvui/` | Example B: sidebar, poster rails, 1000-item grid, details screen, dialogs; `ui/` on the `app/` shell |
 | `applications/examples/shows/` | Example C: networked app on the TVmaze API: paged grid, details, cancellation, error states, saved copy and favourites in DB8 |
-| `applications/examples/player/` | Example D: native playback of bundled A/V-sync clips (`tools/make-test-clips.sh`) through NDL |
+| `applications/examples/player/` | Example D: playback of bundled A/V-sync clips (`tools/make-test-clips.sh`) and public DASH/HLS streams through Starfish or NDL, with seek, pause, and an audio and subtitle track menu |
 | `cmake/` | Target detection, SDL-webOS build, `wnk_add_webos_package()` |
 | `tools/` | `mkipk.py` (reproducible ipk), `check-package.py`, `fw-check.py`, shell tools |
 | `tests/` | C++ unit tests and Python packaging tests |
@@ -65,6 +67,7 @@ SDL_VIDEODRIVER=offscreen WNK_HELLO_KEYS=Right,Down,Return WNK_HELLO_SHOT=/tmp/s
     build/host-debug/applications/examples/hello/wnk-hello
 build/host-debug/applications/examples/tvui/wnk-tvui        # Example B; WNK_TVUI_KEYS / WNK_TVUI_SHOT likewise
 build/host-debug/applications/examples/shows/wnk-shows      # Example C (needs the network); WNK_SHOWS_KEYS / _SHOT
+build/host-debug/applications/examples/player/wnk-player    # Example D (no picture on the host: pacing backend); WNK_PLAYER_KEYS / _SHOT
 ```
 
 ## Licence

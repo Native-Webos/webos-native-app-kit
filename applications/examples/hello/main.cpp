@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Example A: the smallest complete native app on the kit (Milestones 2-3).
+// Example A: native startup, rendering, remote input, focus, logging and shutdown with the kit's
+// lowest layers and no app shell, plus the device probes used to check each layer on a TV.
 //
-// It demonstrates and records:
-//   * process setup, launch parameters, a safe log file and a device/storage probe;
-//   * the GLES2 renderer on a 1920x1080 logical canvas: rounded tiles, borders, text, clipping;
-//   * remote input through the semantic action layer, and focus navigation through FocusManager:
-//     a tile grid (directional focus with an animated ring), a modal dialog that traps focus and
-//     restores it on close, and "press Back again to exit" at the root;
-//   * an on-screen key log that shows every raw key with its mapped action and the provenance of the
-//     mapping, so the remote's real codes can be captured on a TV (also written to the event log);
-//   * lifecycle events and an orderly shutdown.
+// It is the diagnostics app, not a template: it drives SDL, the GLES2 renderer and FocusManager
+// itself so every step is visible in the log. Apps start from Example B (tvui) on wnk::app::run.
+//
+// On screen:
+//   * a tile grid on a 1920x1080 logical canvas (rounded tiles, borders, text, clipping) with
+//     directional focus and an animated ring, posters through the image service;
+//   * a modal dialog that traps focus and restores it on close, and "press Back again to exit";
+//   * a key log showing every raw key with its mapped action and the provenance of the mapping, so a
+//     remote's real codes can be captured on a TV (also written to the event log).
+//
+// In the log: launch parameters, SDL and display modes, GPU limits, a device/storage probe, a
+// launch counter and the last focused tile kept in the key/value store (DB8 on the TV), a secret
+// store round trip, an HTTPS check (two public sites must load, an expired certificate must be
+// refused), lifecycle events and an orderly shutdown.
+//
+// Launch params: {"imageBase": "http://host:port"} loads the posters over HTTP instead of from the
+// package; {"wsUrl": "ws://host:port/ws/echo"} runs a WebSocket echo probe
+// (tests/integration/http_server.py --serve provides both).
 //
 // Keys: arrows / OK to navigate and select; Back closes the dialog or (twice) quits; Exit quits.
 // On the host: Escape/Backspace = Back, F12 = Exit, F1-F4 = colour keys.

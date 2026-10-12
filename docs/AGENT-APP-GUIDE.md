@@ -305,6 +305,7 @@ stubbing a lookalike.
 | Offline state | `ctx.network()` and `Delegate::on_network`. |
 | Find a server, a Cast device, a PC on the LAN | `net::mdns_browse("_myservice._tcp", 1500ms, token)` on a worker (`wnk/net/lan.hpp`); results have name, host, IPv4, port and TXT. |
 | Wake a PC before connecting to it | `net::wake_on_lan("aa:bb:cc:dd:ee:ff")` on a worker. |
+| A game world, a visualiser, a map drawn with OpenGL | `GlView` with a callback that issues GLES2 calls (viewport and scissor are set; the kit restores its own state). Animated by default; `set_animated(false)` + `invalidate_content()` for still pictures. See Example B's Widgets triangle. |
 | Interface sounds, game effects, music | `AppConfig::audio = true`; `audio::load_sound(app_dir + "/sounds/x.ogg")` once, then `ctx.audio()->play(sound, {gain, pan, loop})` from any thread; `play_stream(fn)` for generated or streamed audio. Paused in the background. See Example B (Settings, Widgets). |
 | Keep the screen on during video, a slideshow or a game | Hold `ctx.keep_screen_on("video playing")` while it moves; `release()` on pause, end or error. See Example D. |
 | Busy and determinate progress | `Spinner`, `ProgressBar` (`set_value` / `set_indeterminate`). |

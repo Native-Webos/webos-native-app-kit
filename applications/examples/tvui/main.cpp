@@ -31,7 +31,10 @@
 #include "wnk/ui/ui.hpp"
 #include "wnk/ui/widgets.hpp"
 
+#include <GLES2/gl2.h>
 #include <nlohmann/json.hpp>
+
+#include <cmath>
 
 #include <cstdio>
 #include <memory>
@@ -137,6 +140,69 @@ class NavItem : public Button {
 
  private:
     std::function<void(Ui &)> on_select_;
+};
+
+// The app's own GLES2 drawing inside the UI (Widgets): a spinning colour triangle with its own shader.
+class Triangle {
+ public:
+    ~Triangle() {
+        if (program_ != 0) glDeleteProgram(program_);
+    }
+    void draw(const wnk::render::CustomTarget &, double now_ms) {
+        if (program_ == 0 && !build()) return;
+        glClearColor(0.05f, 0.07f, 0.12f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        const float a = static_cast<float>(now_ms / 1000.0);
+        GLfloat v[15];
+        for (int i = 0; i < 3; ++i) {
+            const float t = a + static_cast<float>(i) * 2.0944f;
+            v[i * 5] = 0.8f * std::cos(t);
+            v[i * 5 + 1] = 0.8f * std::sin(t);
+            v[i * 5 + 2] = i == 0 ? 1.0f : 0.1f;
+            v[i * 5 + 3] = i == 1 ? 1.0f : 0.3f;
+            v[i * 5 + 4] = i == 2 ? 1.0f : 0.2f;
+        }
+        glUseProgram(program_);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), v);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), v + 2);
+        glDisable(GL_BLEND);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (++frames_ == 1) WNK_LOGI(kCat, "gl view: first frame drawn by the app");
+    }
+
+ private:
+    bool build() {
+        const char *vs = "attribute vec2 p; attribute vec3 c; varying vec3 vc; void main() { vc = c; gl_Position = vec4(p, 0.0, 1.0); }";
+        const char *fs = "precision mediump float; varying vec3 vc; void main() { gl_FragColor = vec4(vc, 1.0); }";
+        auto shader = [](GLenum type, const char *src) {
+            const GLuint s = glCreateShader(type);
+            glShaderSource(s, 1, &src, nullptr);
+            glCompileShader(s);
+            return s;
+        };
+        program_ = glCreateProgram();
+        const GLuint v = shader(GL_VERTEX_SHADER, vs), f = shader(GL_FRAGMENT_SHADER, fs);
+        glAttachShader(program_, v);
+        glAttachShader(program_, f);
+        glBindAttribLocation(program_, 0, "p");
+        glBindAttribLocation(program_, 1, "c");
+        glLinkProgram(program_);
+        glDeleteShader(v);
+        glDeleteShader(f);
+        GLint ok = 0;
+        glGetProgramiv(program_, GL_LINK_STATUS, &ok);
+        if (ok == 0) {
+            WNK_LOGE(kCat, "gl view: shader program did not link");
+            glDeleteProgram(program_);
+            program_ = 0;
+        }
+        return ok != 0;
+    }
+    GLuint program_ = 0;
+    uint64_t frames_ = 0;
 };
 
 // Interface sounds, generated rather than bundled: a short tick when focus moves and a chord on demand.
@@ -302,6 +368,9 @@ class HomeScreen : public Screen {
             progress_->set_value(v > 1.01f ? 0.0f : v);
         }).name = "widgets.progress";
         auto &busy = col.add<Row>(30);
+        auto &gl = busy.add<GlView>([this](const wnk::render::CustomTarget &t, double now) { triangle_.draw(t, now); });
+        gl.set_size(220, 140);
+        gl.name = "widgets.gl";
         busy.add<Spinner>(72);
         auto &ind = busy.add<ProgressBar>();
         ind.set_indeterminate(true);
@@ -430,6 +499,7 @@ class HomeScreen : public Screen {
     Navigator &nav_;
     Sounds &sounds_;
     ValueRow *network_row_ = nullptr;
+    Triangle triangle_;
     wnk::async::Lifetime life_;
     std::vector<View *> settings_pages_;
     View *content_ = nullptr;

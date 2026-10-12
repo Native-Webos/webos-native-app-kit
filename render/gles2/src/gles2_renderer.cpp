@@ -200,7 +200,15 @@ void Gles2Renderer::begin_frame(int drawable_w, int drawable_h) {
     fingerprint_ = 0xCBF29CE484222325ull;
     mix(static_cast<uint64_t>(drawable_w) << 32 | static_cast<uint32_t>(drawable_h));
 
-    glViewport(0, 0, drawable_w, drawable_h);
+    apply_state();
+}
+
+void Gles2Renderer::apply_state() {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);  // a custom draw may have rendered to a texture
+    GLint attribs = 0;
+    glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &attribs);
+    for (GLint i = 6; i < attribs; ++i) glDisableVertexAttribArray(static_cast<GLuint>(i));
+    glViewport(0, 0, mapping_.drawable_w, mapping_.drawable_h);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
@@ -208,7 +216,7 @@ void Gles2Renderer::begin_frame(int drawable_w, int drawable_h) {
     // the video plane show through exactly where nothing opaque was drawn.
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(program_);
-    glUniform2f(u_viewport_, static_cast<float>(drawable_w), static_cast<float>(drawable_h));
+    glUniform2f(u_viewport_, static_cast<float>(mapping_.drawable_w), static_cast<float>(mapping_.drawable_h));
     glUniform1i(u_tex_, 0);
     glActiveTexture(GL_TEXTURE0);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
@@ -228,7 +236,35 @@ void Gles2Renderer::begin_frame(int drawable_w, int drawable_h) {
     glVertexAttribPointer(5, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, reinterpret_cast<void *>(offsetof(Vertex, r)));
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glBindTexture(GL_TEXTURE_2D, white_);
     apply_scissor();
+}
+
+void Gles2Renderer::draw_custom(const Rect &logical, uint64_t version, const CustomDraw &draw) {
+    flush();
+    mix(0xC057ull);
+    mix(version);
+    const Rect px = to_pixels(logical);
+    int x0 = static_cast<int>(std::floor(px.x)), y0 = static_cast<int>(std::floor(px.y));
+    int x1 = static_cast<int>(std::ceil(px.right())), y1 = static_cast<int>(std::ceil(px.bottom()));
+    const PixelRect clip = clips_.empty() ? PixelRect{0, 0, mapping_.drawable_w, mapping_.drawable_h} : clips_.back();
+    x0 = std::max(x0, clip.x);
+    y0 = std::max(y0, clip.y);
+    x1 = std::min(x1, clip.x + clip.w);
+    y1 = std::min(y1, clip.y + clip.h);
+    if (x1 <= x0 || y1 <= y0 || !draw) return;
+    CustomTarget t;
+    t.x = x0;
+    t.y = mapping_.drawable_h - y1;  // GL counts rows from the bottom
+    t.width = x1 - x0;
+    t.height = y1 - y0;
+    t.drawable_width = mapping_.drawable_w;
+    t.drawable_height = mapping_.drawable_h;
+    glViewport(t.x, t.y, t.width, t.height);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(t.x, t.y, t.width, t.height);
+    draw(t);
+    apply_state();
 }
 
 void Gles2Renderer::clear(Color color) {

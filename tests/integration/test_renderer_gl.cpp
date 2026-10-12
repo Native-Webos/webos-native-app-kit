@@ -9,6 +9,7 @@
 
 #include "wnk/render/gles2_renderer.hpp"
 
+#include <GLES2/gl2.h>
 #include <SDL.h>
 
 #include <cstdio>
@@ -330,4 +331,40 @@ TEST("fallback fonts: a character the font lacks comes from the chain, else it i
     }
     CHECK(lit > 10);
     r.set_fallback_fonts({});
+}
+
+TEST("custom GL draw: only inside its rectangle, renderer state restored, version drives the fingerprint") {
+    SKIP_WITHOUT_GL();
+    auto &r = *env().r;
+    auto frame_with = [&](uint64_t version, bool fill_after) {
+        frame();
+        r.clear(Color::hex(0x000000FF));
+        r.draw_custom({10, 10, 20, 20}, version, [](const CustomTarget &t) {
+            // What an app might do: its own clear colour, blending off, a texture unit changed.
+            glDisable(GL_BLEND);
+            glActiveTexture(GL_TEXTURE1);
+            glClearColor(1, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);  // the scissor keeps it inside the view
+            (void)t;
+        });
+        if (fill_after) r.fill_rect({40, 10, 10, 10}, Color::hex(0x00FF0080));  // half-transparent green over black
+        r.end_frame();
+        return r.frame_fingerprint();
+    };
+    const uint64_t a = frame_with(1, true);
+    CHECK(near(pixel(15, 15), 255, 0, 0, 255));  // inside the custom rectangle
+    CHECK(near(pixel(5, 5), 0, 0, 0, 255));      // outside: untouched
+    CHECK(near(pixel(32, 15), 0, 0, 0, 255));
+    CHECK(near(pixel(45, 15), 0, 128, 0, 255, 3));  // blending and texture unit restored for the UI after it
+    CHECK_EQ(frame_with(1, true), a);
+    CHECK(frame_with(2, true) != a);
+    // The rectangle in GL's bottom-left coordinates.
+    frame();
+    CustomTarget seen;
+    r.draw_custom({10, 5, 20, 8}, 1, [&seen](const CustomTarget &t) { seen = t; });
+    r.end_frame();
+    CHECK_EQ(seen.x, 10);
+    CHECK_EQ(seen.width, 20);
+    CHECK_EQ(seen.height, 8);
+    CHECK_EQ(seen.y, seen.drawable_height - 13);
 }

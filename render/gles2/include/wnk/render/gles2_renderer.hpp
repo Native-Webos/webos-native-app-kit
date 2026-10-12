@@ -46,6 +46,7 @@ class Gles2Renderer final : public Renderer {
     float measure_text(const TextStyle &style, std::string_view utf8) const override;
     float line_height(const TextStyle &style) const override;
     float ascent(const TextStyle &style) const override;
+    void draw_custom(const Rect &logical, uint64_t version, const CustomDraw &draw) override;
     void end_frame() override;
 
     TextureId create_texture(int width, int height, const uint8_t *rgba) override;
@@ -117,6 +118,7 @@ class Gles2Renderer final : public Renderer {
     void flush();
     void mix(uint64_t v) { fingerprint_ = (fingerprint_ ^ v) * 0x100000001B3ull; }
     void apply_scissor();
+    void apply_state();  // everything begin_frame sets up, after a custom draw
     Rect to_pixels(const Rect &logical) const;
     const GlyphEntry *glyph(FontId font, int glyph_index, int pixel_size);
     void reset_atlas();

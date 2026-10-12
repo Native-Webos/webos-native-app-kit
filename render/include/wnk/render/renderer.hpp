@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -50,6 +51,13 @@ struct RenderStats {
     uint32_t atlas_resets = 0;   // since creation
 };
 
+// Where a custom draw may render, in drawable pixels with GL's bottom-left origin (glViewport order).
+struct CustomTarget {
+    int x = 0, y = 0, width = 0, height = 0;  // the view's rectangle, clipped to the current clip
+    int drawable_width = 0, drawable_height = 0;
+};
+using CustomDraw = std::function<void(const CustomTarget &)>;
+
 struct GpuInfo {
     std::string vendor, renderer, version, shading_language, extensions;
     int max_texture_size = 0;
@@ -81,6 +89,13 @@ class Renderer {
     // Ascent/descent/line height of a style, in logical units.
     virtual float line_height(const TextStyle &style) const = 0;
     virtual float ascent(const TextStyle &style) const = 0;
+
+    // Lets the app draw with GLES2 itself inside `logical`: everything queued so far is drawn first,
+    // the viewport and scissor are set to the rectangle, `draw` runs, and the renderer's own GL state
+    // is restored afterwards (any program, buffers, textures, blending the callback changed).
+    // `version` stands for the content: the same version on two frames means the same picture, so a
+    // still frame need not be presented; change it whenever the content may have changed.
+    virtual void draw_custom(const Rect &logical, uint64_t version, const CustomDraw &draw);
 
     virtual void end_frame() = 0;  // flushes pending geometry; the caller swaps buffers
 

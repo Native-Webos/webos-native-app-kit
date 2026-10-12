@@ -260,6 +260,32 @@ class TextField : public View {
     TextHandler on_change_, on_submit_;
 };
 
+// A rectangle the app draws into with OpenGL ES 2 itself: a game's world, a visualiser, a map. Views
+// may sit around or over it as usual. The callback runs inside Ui::draw with the GL context current,
+// the viewport and scissor set to the view (Renderer::draw_custom); the renderer restores its own
+// state afterwards. Animated by default (redrawn and presented every frame while visible); a static
+// view is presented again only after invalidate_content().
+class GlView : public View {
+ public:
+    using DrawFn = std::function<void(const render::CustomTarget &target, double now_ms)>;
+    explicit GlView(DrawFn on_draw = {});
+    GlView &set_on_draw(DrawFn fn);
+    GlView &set_animated(bool animated);
+    void invalidate_content() { ++version_; }
+    bool animated() const { return animated_; }
+
+ protected:
+    void draw(Ui &ui) override;
+    // Subclasses may draw here instead of passing a callback.
+    virtual void render_gl(const render::CustomTarget &target, double now_ms);
+
+ private:
+    DrawFn on_draw_;
+    bool animated_ = true;
+    uint64_t version_ = 1;
+    uint64_t frames_ = 0;
+};
+
 class Spinner : public View {
  public:
     explicit Spinner(float size = 64);

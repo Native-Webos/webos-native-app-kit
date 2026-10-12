@@ -18,4 +18,6 @@ CanvasMapping CanvasMapping::fit(Size logical, int drawable_w, int drawable_h) {
     return m;
 }
 
+void Renderer::draw_custom(const Rect &, uint64_t, const CustomDraw &) {}  // renderers without GL draw nothing
+
 }  // namespace wnk::render

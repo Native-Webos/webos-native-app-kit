@@ -149,6 +149,8 @@ if (TARGET wnk-tvui)
     # are refused (no Luna bus) and reported; device discovery answers with whatever the LAN has (0 or more).
     wnk_tvui_e2e(system_requests "Left,Down,Down,Right,Up,Return,Right,Return,Right,Return,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z"
             "network\\] \\([0-9]+\\) (online|offline).*focus widgets.url.*open url: unsupported: not a webOS build.*toast: unsupported: not a webOS build.*find devices: [0-9]+ service types")
+    # The app's own GLES2 drawing inside the UI (Widgets): presented every frame while it is visible.
+    wnk_tvui_e2e(gl_view_draws "Left,Down,Down,Z,Z" "gl view: first frame drawn by the app")
     # A still screen is drawn but not presented: under 100 presents (about 7; 13 under ASan) in ~7 s of
     # waiting, not 400.
     string(REPEAT "Z," 60 WNK_TVUI_IDLE)

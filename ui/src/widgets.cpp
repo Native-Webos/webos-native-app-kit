@@ -649,4 +649,31 @@ void ProgressBar::draw(Ui &ui) {
     }
 }
 
+// ---- GlView ---------------------------------------------------------------------------------------
+
+GlView::GlView(DrawFn on_draw) : on_draw_(std::move(on_draw)) {}
+
+GlView &GlView::set_on_draw(DrawFn fn) {
+    on_draw_ = std::move(fn);
+    ++version_;
+    return *this;
+}
+
+GlView &GlView::set_animated(bool animated) {
+    animated_ = animated;
+    ++version_;
+    return *this;
+}
+
+void GlView::render_gl(const render::CustomTarget &target, double now_ms) {
+    if (on_draw_) on_draw_(target, now_ms);
+}
+
+void GlView::draw(Ui &ui) {
+    // An animated view differs on every frame; a static one only when its version moves.
+    const uint64_t version = animated_ ? (version_ << 32) + ++frames_ : version_;
+    const double now = ui.now_ms();
+    ui.renderer().draw_custom(frame(), version, [this, now](const render::CustomTarget &t) { render_gl(t, now); });
+}
+
 }  // namespace wnk::ui

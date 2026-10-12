@@ -231,6 +231,7 @@ int main(int argc, char **argv) {
 | `runtime_dir()` | Logs and other volatile files. Empty if it could not be created. On webOS this is `/tmp/<app id>` (tmpfs). |
 | `capabilities()`, `device()` | Always. `device()` never contains a serial, nduid, or MAC. |
 | `quit(reason)` | Ends the loop; the shell then runs shutdown. |
+| `keep_screen_on(reason)` | Always. Returns a `WakeLock`; the TV's screensaver cannot start while any lock is held. |
 
 `AppConfig` fields an app actually sets:
 
@@ -242,6 +243,7 @@ int main(int argc, char **argv) {
 | `images` | true | Posters and thumbnails. Set false for a player with no images. |
 | `storage` | false | Settings or session that must survive relaunch. Needs `database.operation`. |
 | `double_back_exit` | true | Root Back shows "Press Back again to exit", second Back quits. |
+| `allow_screensaver` | true | Leave it. The screensaver may start on idle screens (OLED burn-in); hold `ctx.keep_screen_on()` while video plays or a game runs. false blocks it for the whole run. |
 | `metrics_toggle` | `Action::Unknown` | e.g. `Action::Blue` to show the frame-time overlay. |
 | `script_env_prefix` | `"WNK"` | Unique per app so host tests do not collide. |
 | `worker_threads` | 2 | Raise only for a measured reason. |
@@ -285,6 +287,7 @@ stubbing a lookalike.
 | Button, disabled control | `Button`, `set_enabled(false)`. |
 | Modal confirm | `ui.show_dialog`. Focus is trapped; Back dismisses when `back_dismisses` is true; focus returns to the opener. |
 | Transient message | `ui.toast(text)`. |
+| Keep the screen on during video, a slideshow or a game | Hold `ctx.keep_screen_on("video playing")` while it moves; `release()` on pause, end or error. See Example D. |
 | Busy and determinate progress | `Spinner`, `ProgressBar` (`set_value` / `set_indeterminate`). |
 | Section that changes with the D-pad but not with pointer hover | Example B `NavItem`: select on focus only when `ui.focus_source() != FocusSource::Pointer`; pointer selects on click. |
 | Settings that survive relaunch and reboot | `AppConfig::storage = true`, `database.operation`, `ctx.store()` (DB8 on the TV). |

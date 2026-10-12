@@ -257,6 +257,7 @@ class Shell final : public Context {
     const diagnostics::FrameMetrics &frame_metrics() const override { return metrics_; }
     diagnostics::Capabilities &capabilities() override { return caps_; }
     const diagnostics::DeviceInfo &device() const override { return device_; }
+    WakeLock keep_screen_on(std::string reason) override { return wake_locks_->acquire(std::move(reason)); }
     void set_metrics_overlay(bool visible) override {
         if (visible != overlay_) WNK_LOGI(kCat, "metrics overlay %s", visible ? "on" : "off");
         overlay_ = visible;
@@ -336,7 +337,18 @@ class Shell final : public Context {
         SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
         SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
         SDL_SetHint("SDL_WEBOS_CURSOR_SLEEP_TIME", std::to_string(config_.cursor_sleep_ms).c_str());
+        // SDL disables the screensaver at video init unless told otherwise; SDL-webOS then refuses every
+        // screensaver request from the TV. The wake locks decide instead.
+        SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
         if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) return fail("SDL video init");
+        wake_locks_ = std::make_unique<WakeLocks>(config_.allow_screensaver, [](bool block, const std::string &why) {
+            if (block) {
+                SDL_DisableScreenSaver();
+            } else {
+                SDL_EnableScreenSaver();
+            }
+            WNK_LOGI("screensaver", "%s (%s)", block ? "blocked" : "allowed", why.c_str());
+        });
         SDL_DisplayMode mode{};
         SDL_GetCurrentDisplayMode(0, &mode);
         WNK_LOGI(kCat, "video driver %s, display mode %dx%d @%d Hz", SDL_GetCurrentVideoDriver(), mode.w, mode.h,
@@ -739,6 +751,7 @@ class Shell final : public Context {
             gl_ = nullptr;
             window_ = nullptr;
         });
+        if (wake_locks_) wake_locks_->detach();  // locks still held elsewhere must not call SDL after this
         if (sdl_) run_step("SDL_Quit", [] { SDL_Quit(); });
         pool_.reset();
         dispatcher_.reset();
@@ -768,6 +781,7 @@ class Shell final : public Context {
     std::unique_ptr<image::ImageTextures> textures_;
     std::unique_ptr<ui::ServiceImageSource> image_source_;
     std::unique_ptr<ui::Ui> ui_;
+    std::unique_ptr<WakeLocks> wake_locks_;
     std::unique_ptr<Delegate> delegate_;
     Uint32 last_back_ = 0;
     Uint32 last_move_log_ = 0;

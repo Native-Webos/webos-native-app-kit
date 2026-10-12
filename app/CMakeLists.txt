@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Lifecycle state machine: SDL-free, unit-tested on the host.
-add_library(wnk_lifecycle STATIC src/lifecycle.cpp)
+# Lifecycle state machine and wake locks: SDL-free, unit-tested on the host.
+add_library(wnk_lifecycle STATIC src/lifecycle.cpp src/wake_lock.cpp)
 target_include_directories(wnk_lifecycle PUBLIC include)
 
 find_package(Threads REQUIRED)

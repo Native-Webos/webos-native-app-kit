@@ -303,6 +303,12 @@ class PlayerScreen : public Screen {
         }
         const PlaybackSnapshot s = controller_->snapshot();
         const bool busy = s.state == PlayState::Opening || s.state == PlayState::Seeking;
+        // The screensaver may start when paused, ended or failed, never while the video moves.
+        if (busy || s.state == PlayState::Playing) {
+            if (!screen_on_.held()) screen_on_ = ctx_.keep_screen_on("video playing");
+        } else if (screen_on_.held()) {
+            screen_on_.release();
+        }
         spinner_->set_visible(busy);
         status_->set_text(s.state == PlayState::Error ? "Error" : play_state_name(s.state));
         // A stream without a duration (live DASH/HLS) shows LIVE instead.
@@ -442,6 +448,7 @@ class PlayerScreen : public Screen {
     std::vector<TrackInfo> tracks_;
     std::string shown_;
     bool resume_on_return_ = false;  // playing when the app went to the background
+    wnk::app::WakeLock screen_on_;   // held while the video moves
     std::string backend_name_;
     std::unique_ptr<PlaybackController> controller_;
     Column *bar_;
@@ -495,6 +502,7 @@ class DrmTestScreen : public Screen {
         ui.set_clear_color(wnk::render::kTransparent);
         if (started_) return;
         started_ = true;
+        screen_on_ = ctx_.keep_screen_on("platform playback");
         // The video window, as the Starfish backend makes it (SDL-webOS exports it to the media stack).
         using CreateFn = const char *(*)(int);
         using SetFn = int (*)(const char *, void *, void *);
@@ -671,6 +679,7 @@ class DrmTestScreen : public Screen {
     std::shared_ptr<State> st_;
     Label *drm_, *media_, *event_;
     bool started_ = false;
+    wnk::app::WakeLock screen_on_;
 };
 
 // ---- clip list -------------------------------------------------------------------------------------

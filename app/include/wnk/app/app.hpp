@@ -19,6 +19,7 @@
 #pragma once
 
 #include "wnk/app/lifecycle.hpp"
+#include "wnk/app/wake_lock.hpp"
 #include "wnk/async/async.hpp"
 #include "wnk/diagnostics/capabilities.hpp"
 #include "wnk/diagnostics/metrics.hpp"
@@ -47,6 +48,9 @@ struct AppConfig {
     bool storage = false;     // open the platform key/value store (DB8 on the TV; needs database.operation)
     bool double_back_exit = true;  // unhandled Back at the root: "Press Back again to exit"
     int cursor_sleep_ms = 5000;
+    // Let the TV's screensaver start while the app is idle in the foreground (wake_lock.hpp). Hold a
+    // Context::keep_screen_on() lock while video plays. false blocks it for the whole run.
+    bool allow_screensaver = true;
     int shutdown_deadline_ms = 3000;  // the watchdog ends the process if teardown takes longer
     ui::Theme theme;          // fonts are filled in by the shell
     std::string font_regular = "fonts/AtkinsonHyperlegible-Regular.ttf";  // relative to the app dir
@@ -77,6 +81,8 @@ class Context {
     // What this device was found to support, and which device it is (no identifiers).
     virtual diagnostics::Capabilities &capabilities() = 0;
     virtual const diagnostics::DeviceInfo &device() const = 0;
+    // Blocks the screensaver until the returned lock is released or destroyed (main thread).
+    virtual WakeLock keep_screen_on(std::string reason) = 0;
     virtual void set_metrics_overlay(bool visible) = 0;
     virtual bool metrics_overlay() const = 0;
     // Ends the main loop after the current iteration; the shutdown sequence then runs.

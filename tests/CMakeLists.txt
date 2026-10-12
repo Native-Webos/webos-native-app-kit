@@ -277,6 +277,9 @@ if (TARGET wnk-player)
     # the position, with the decoder reloaded.
     wnk_player_e2e(tracks_menu_switches_audio "{\"autoplay\":3}" "Z,Z,Z,Z,Up,Right,Return,Z,Z,Z,Z,Z,Z"
             "audio: track 1, Audio: English.*tracks menu open, focus=tracks.audio.1.*tracks: audio 2 chosen.*Playing -> Seeking.*audio track 2 \\(.*\\) at [0-9.]+ s.*(Seeking -> Playing.*audio: track 2, Audio: Fran|audio: track 2, Audio: Fran.*Seeking -> Playing)")
+    # The screensaver is allowed by default, blocked while the video plays, allowed again on pause.
+    wnk_player_e2e(screensaver_follows_playback "{\"autoplay\":0}" "Z,Z,Space,Z,Z"
+            "screensaver\\] \\([0-9]+\\) allowed \\(default\\).*blocked \\(video playing\\).*Playing -> Paused.*allowed \\(video playing\\)")
     wnk_player_e2e(back_stops_playback "{\"autoplay\":0}" "Z,Z,Escape" "stopping at .*-> Stopped")
     wnk_player_e2e(plays_to_the_end "{\"autoplay\":1}"
             "Right,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z"

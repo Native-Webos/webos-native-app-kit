@@ -23,6 +23,9 @@ Sources:
    is disabled (`src/core/webos/SDL_webos_init.c` `[SRC]`). The kit never sets the hint `[KIT]`.
    A kit app left on a static menu keeps the panel on indefinitely, a burn-in risk on OLED sets.
    moonlight-tv toggles it around streaming (`app_wakelock_common.c` `[SRC]`).
+   **Done:** the shell sets the hint, allows the screensaver by default (`AppConfig::allow_screensaver`)
+   and apps hold `Context::keep_screen_on()` (`app/wake_lock.hpp`); Example D holds it while video moves.
+   Host-tested; not yet seen on a TV.
 2. **Relaunch parameters are dropped.** When a running app is launched again with new
    parameters (a deep link, a launcher shortcut, voice search, a phone casting to it), SDL-webOS
    receives `{"event":"relaunch", ...}` and only raises the window (`lifecycleCallbackVersion2`

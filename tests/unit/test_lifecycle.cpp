@@ -3,6 +3,7 @@
 #include "wnk_test.hpp"
 
 #include "wnk/app/lifecycle.hpp"
+#include "wnk/app/wake_lock.hpp"
 #include "wnk/diagnostics/metrics.hpp"
 
 #include <string>
@@ -127,4 +128,59 @@ TEST("frame metrics: the late threshold follows the display's refresh rate") {
     FrameMetrics fixed(20.0f);
     for (int i = 0; i < 10; ++i) fixed.add({25.0f});
     CHECK_EQ(fixed.summary().late, size_t{10});
+}
+
+TEST("wake locks: the screensaver is allowed by default and blocked while any lock is held") {
+    std::vector<std::string> applied;
+    WakeLocks locks(true, [&applied](bool block, const std::string &why) {
+        applied.push_back(std::string(block ? "block " : "allow ") + why);
+    });
+    CHECK(!locks.blocking());
+    {
+        WakeLock a = locks.acquire("video");
+        WakeLock b = locks.acquire("game");
+        CHECK(a.held() && b.held());
+        CHECK_EQ(locks.held(), 2);
+        CHECK(locks.blocking());
+        a.release();
+        a.release();  // twice is harmless
+        CHECK(!a.held());
+        CHECK_EQ(locks.held(), 1);
+        WakeLock moved = std::move(b);
+        CHECK(!b.held() && moved.held());
+        CHECK_EQ(locks.held(), 1);
+    }
+    CHECK_EQ(locks.held(), 0);
+    CHECK(!locks.blocking());
+    REQUIRE(applied.size() == 3u);
+    CHECK_EQ(applied[0], std::string("allow default"));
+    CHECK_EQ(applied[1], std::string("block video"));
+    CHECK_EQ(applied[2], std::string("allow game"));
+}
+
+TEST("wake locks: move-assigning over a held lock releases it; locks may outlive the owner") {
+    int blocks = 0, allows = 0;
+    WakeLock survivor;
+    {
+        WakeLocks locks(true, [&](bool block, const std::string &) { (block ? blocks : allows)++; });
+        WakeLock a = locks.acquire("one");
+        a = locks.acquire("two");  // count 2 then 1: never reaches zero, no allow in between
+        CHECK_EQ(locks.held(), 1);
+        CHECK_EQ(blocks, 1);
+        CHECK_EQ(allows, 1);  // the initial default
+        survivor = std::move(a);
+        locks.detach();
+    }
+    survivor.release();  // the owner is gone and detached: nothing is applied
+    CHECK_EQ(allows, 1);
+}
+
+TEST("wake locks: with the screensaver disallowed, it stays blocked and locks change nothing") {
+    std::vector<bool> applied;
+    WakeLocks locks(false, [&applied](bool block, const std::string &) { applied.push_back(block); });
+    CHECK(locks.blocking());
+    { WakeLock a = locks.acquire("video"); }
+    CHECK(locks.blocking());
+    REQUIRE(applied.size() == 1u);
+    CHECK(applied[0]);
 }

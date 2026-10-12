@@ -9,6 +9,7 @@ Research for the universal native LG webOS starter kit (Milestones 0 and 1 of
 | [WEBOS-PLATFORM.md](WEBOS-PLATFORM.md) | Process model, jail, paths, Luna, platform libraries |
 | [TOOLCHAIN-AND-BUILD.md](TOOLCHAIN-AND-BUILD.md) | NDK, ABI, libstdc++/glibc, packaging, symbol verification |
 | [NATIVE-RENDERING.md](NATIVE-RENDERING.md) | SDL, EGL/GLES2, video plane, text, images |
+| [DRM-FEASIBILITY.md](DRM-FEASIBILITY.md) | Widevine/PlayReady from a native Developer Mode app: firmware pieces, NDK APIs, what was measured |
 | [REMOTE-INPUT.md](REMOTE-INPUT.md) | Key delivery, access policy, scancodes, pointer, focus |
 | [NATIVE-MEDIA.md](NATIVE-MEDIA.md) | NDL, Starfish/SMP, ACB, exported windows, audio |
 | [NETWORKING-AND-STORAGE.md](NETWORKING-AND-STORAGE.md) | curl/TLS, CA roots, writable paths, persistence |

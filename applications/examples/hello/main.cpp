@@ -20,7 +20,8 @@
 //
 // Launch params: {"imageBase": "http://host:port"} loads the posters over HTTP instead of from the
 // package; {"wsUrl": "ws://host:port/ws/echo"} runs a WebSocket echo probe
-// (tests/integration/http_server.py --serve provides both).
+// (tests/integration/http_server.py --serve provides both); {"drmProbe": true} asks LG's DRM service
+// for Widevine and PlayReady clients (docs/research/DRM-FEASIBILITY.md).
 //
 // Keys: arrows / OK to navigate and select; Back closes the dialog or (twice) quits; Exit quits.
 // On the host: Escape/Backspace = Back, F12 = Exit, F1-F4 = colour keys.
@@ -41,6 +42,7 @@
 #include "wnk/image/textures.hpp"
 
 #include <nlohmann/json.hpp>
+#include "wnk/platform/luna.hpp"
 #include "wnk/platform/probe.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/render/gles2_renderer.hpp"
@@ -275,6 +277,28 @@ std::string network_check(wnk::net::HttpTransport &t, const wnk::async::Cancella
         line += std::string("  ") + p.name + " " + (pass ? "ok" : "FAIL(" + std::string(wnk::net::error_name(r.error)) + ")");
     }
     return line;
+}
+
+void run_drm_probe(const std::string &app_id) {
+    using wnk::platform::luna_call_sync;
+    for (const char *type : {"widevine", "playready"}) {
+        const std::string load = nlohmann::json{{"drmType", type}, {"appId", app_id}}.dump();
+        const auto r = luna_call_sync("luna://com.webos.service.drm/load", load, 5000);
+        WNK_LOGI("drm", "load %s -> %s %s %s", type, wnk::platform::luna_status_name(r.status), r.payload.c_str(), r.detail.c_str());
+        const auto reply = nlohmann::json::parse(r.payload.empty() ? "{}" : r.payload, nullptr, false);
+        if (!reply.is_object() || !reply.contains("clientId") || !reply["clientId"].is_string()) continue;
+        const std::string client = reply["clientId"];
+        const auto info = luna_call_sync("luna://com.webos.service.drm/getRightsError",
+                                         nlohmann::json{{"clientId", client}, {"subscribe", false}}.dump(), 5000);
+        WNK_LOGI("drm", "getRightsError %s -> %s %s", type, wnk::platform::luna_status_name(info.status), info.payload.c_str());
+        const auto un = luna_call_sync("luna://com.webos.service.drm/unload", nlohmann::json{{"clientId", client}}.dump(), 5000);
+        WNK_LOGI("drm", "unload %s -> %s %s", type, wnk::platform::luna_status_name(un.status), un.payload.c_str());
+    }
+    for (const char *method : {"isDrmSystemSupported", "getDrmVersion"}) {
+        const auto r = luna_call_sync(std::string("luna://com.webos.service.drm/") + method,
+                                      R"({"drmSystemId":"urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"})", 5000);
+        WNK_LOGI("drm", "%s -> %s %s %s", method, wnk::platform::luna_status_name(r.status), r.payload.c_str(), r.detail.c_str());
+    }
 }
 
 struct KeyLogLine {
@@ -729,6 +753,13 @@ int main(int argc, char **argv) {
                              wnk::storage::protection_name(prot), wnk::storage::secret_status_name(prev), previous.c_str(),
                              wnk::storage::secret_status_name(put), wnk::storage::secret_status_name(got),
                              back == value ? "ok" : "MISMATCH", secrets.last_error().c_str());
+                }
+                // DRM probe ({"drmProbe": true}): does LG's DRM service answer a Developer Mode native app?
+                // Web apps get a client id from it for PlayReady/Widevine and pass it to the platform's
+                // media pipeline; the replies (no secrets in them) are logged whole.
+                {
+                    const auto params = nlohmann::json::parse(launch.params_json.empty() ? "{}" : launch.params_json, nullptr, false);
+                    if (params.is_object() && params.value("drmProbe", false)) run_drm_probe(launch.app_id);
                 }
                 Demo demo(*renderer, regular, bold, saved.note, saved.focus_tile);
                 wnk::async::MainDispatcher dispatcher;

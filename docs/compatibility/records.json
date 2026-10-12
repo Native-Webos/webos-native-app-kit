@@ -764,6 +764,15 @@
       "method": "Example D 0.16.0: JW Player oceans_aes (AES-128 MPEG-TS VOD), Mux dai-discontinuity-deltatre (a new key URI and IV for every 10 s segment), and a live AES-128 HLS stream written by ffmpeg -re on the dev machine (2 s segments, sliding 6-segment window), 30 s each",
       "evidence": "Starfish first frame 0.2 s after Playing; sink 120-126 frames displayed per 5 s, 0 dropped; decoder position advancing across segment and key boundaries; the live stream followed the playlist",
       "limitations": "the picture was not looked at (no one at the TV); SAMPLE-AES in fMP4 has no public test stream here and is untested on the TV"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "date": "2026-10-12",
+      "feature": "drm.service_from_native_app",
+      "result": "supported",
+      "method": "Example A 0.8.0 launch {\"drmProbe\": true}: luna://com.webos.service.drm load / getRightsError / unload for widevine and playready, from the app's own bus identity (Developer Mode, not rooted)",
+      "evidence": "load widevine and load playready each returned {\"returnValue\":true,\"clientId\":...}; unload returned true; getRightsError without subscribe answered 504",
+      "limitations": "only the first step: licence acquisition (sendDrmMessage) and protected playback through uMediaServer are not tried yet; see docs/research/DRM-FEASIBILITY.md"
     }
   ]
 }

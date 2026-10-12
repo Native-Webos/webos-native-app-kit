@@ -16,7 +16,7 @@ wnk_add_webos_package(
         TARGET wnk-hello
         APPID org.wnk.examples.hello
         TITLE "WNK Hello"
-        VERSION 0.7.1
+        VERSION 0.8.0
         VENDOR "webos-native-app-kit"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"

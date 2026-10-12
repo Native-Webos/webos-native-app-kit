@@ -116,7 +116,7 @@ fi
 
 python3 tools/release-notes.py "$out" --version "$version" --commit "$commit" --reproducible "$reproducible" "${fw_logs[@]}"
 (cd "$out" && sha256sum -- *.ipk *.tar.* RELEASE-NOTES.md > SHA256SUMS)
+[[ "$reproducible" != no ]] || die "packages are not reproducible; compare $out/build/dist with $out/build-again/dist"
 rm -rf "$out/build-again"
-[[ "$reproducible" != no ]] || die "packages are not reproducible; see above (the release directory is kept for inspection)"
 note "release $version ready in $out"
 note "after checking it: git tag -a v$version -m \"webOS Native App Kit $version\" $commit"

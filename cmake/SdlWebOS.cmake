@@ -36,6 +36,8 @@ ExternalProject_Add(wnk_sdl_webos_ext
             -DSDL_OFFSCREEN=OFF -DSDL_DISKAUDIO=OFF -DSDL_DUMMYAUDIO=OFF -DSDL_DUMMYVIDEO=OFF
             -DSDL_KMSDRM=OFF -DSDL_STATIC=OFF -DSDL_TEST=OFF
             "-DSDL_VENDOR_INFO:STRING=webOS Backport (webos-native-app-kit)"
+            # SDL's asserts embed __FILE__: map the build tree away so packages are reproducible.
+            "-DCMAKE_C_FLAGS:STRING=-ffile-prefix-map=${CMAKE_BINARY_DIR}/third_party/sdl-webos-build=sdl-webos"
         BUILD_BYPRODUCTS "${WNK_SDL_WEBOS_LIBRARY}"
 )
 

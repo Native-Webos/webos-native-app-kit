@@ -71,6 +71,13 @@ build/host-debug/applications/examples/shows/wnk-shows      # Example C (needs t
 build/host-debug/applications/examples/player/wnk-player    # Example D (no picture on the host: pacing backend); WNK_PLAYER_KEYS / _SHOT
 ```
 
+## Releasing
+
+`tools/release.sh --check-reproducible` builds every package from a clean tree with the tests, package
+and firmware checks, the source archive, the FFmpeg source and generated release notes. See
+[docs/RELEASING.md](docs/RELEASING.md).
+
 ## Licence
 
-GPL-3.0-or-later. See [LICENSING.md](LICENSING.md) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+GPL-3.0-or-later. See [LICENSING.md](LICENSING.md) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); every package
+carries its licence texts in `licenses/`.

@@ -5,6 +5,7 @@ KIT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 
 # The openlgtv buildroot NDK. Override with WEBOS_NDK=/path/to/arm-webos-linux-gnueabi_sdk-buildroot.
 resolve_ndk() {

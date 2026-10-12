@@ -14,6 +14,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(WNK_BUILD_TESTS "Build host unit tests" ${WNK_HOST})
 option(WNK_BUILD_EXAMPLES "Build example applications" ON)
+set(WNK_SOURCE_URL "" CACHE STRING "Where packages' corresponding source is published (licenses/SOURCE.txt)")
 
 if (WNK_WEBOS)
     # libstdc++ on the TV ranges from 6.0.16 to 6.0.32 (6.0.25 on webOS 6) and a bundled copy would
@@ -21,6 +22,9 @@ if (WNK_WEBOS)
     # -tno-glibc-polyfill: the NDK gcc otherwise links libglibc_polyfills.a (a getauxval shim whose
     # licence is unknown) whenever something references getauxval.
     add_link_options(-static-libstdc++ -static-libgcc -Wl,--build-id=sha1 -Wl,--as-needed -tno-glibc-polyfill)
+    # Build paths never reach the binaries, so the same source gives the same packages in any build
+    # directory or checkout location (tools/release.sh --check-reproducible).
+    add_compile_options("-ffile-prefix-map=${CMAKE_SOURCE_DIR}=." "-ffile-prefix-map=${CMAKE_BINARY_DIR}=build")
     # Debug info in the build tree for tools/symbolize-crash.py; the ipk's staged copies are stripped.
     add_compile_options(-g)
     # Bundled shared libraries live in lib/ next to the executable.

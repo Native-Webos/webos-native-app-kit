@@ -320,8 +320,17 @@ live, subtitles from manifests, WebM renditions, DRM (refused).
 Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from
 com.webos.service.config (the decoder table is not visible in the Developer Mode jail).
 
+Starfish extras (2026-10-19, from Kodi's webOS pipeline and PlxNative): VP9 and AV1 on Starfish where
+`getMaxVideoResolution` reports a decoder (an unknown name gets the 1920x1088 default, so only a larger
+answer counts), AV1 fed as temporal units, the TV's decoder size bounding the envelope, container
+HDR10/HLG metadata declared with `setHdrInfo`, HDR10+ SEI messages removed from HEVC, `ac3PlusInfo` for
+E-AC-3, and `AudioOutputCaps` (getARCState). Example D 0.20 logs the panel's dynamic range every 5 s.
+On the TV: VP9 and AV1 10-bit PQ play with 0 drops and switch the panel to HDR only with setHdrInfo
+(A/B: without it, sdr); DV + Atmos and SDR unchanged; HDR10+ HEVC plays with and without stripping.
+TrueHD cannot be passed through from an app (`docs/research/AUDIO-PASSTHROUGH.md`).
+
 Open: subtitles from external files, ASS styling (libass), non-Latin fonts, bitmap subtitles on the TV,
-HDR metadata, VP9/AV1 on the TV,
+VP9 PQ without mastering values (stays SDR), Dolby Vision profile 7 (base layer only),
 Opus passthrough, resampling for sample rates NDL lacks, pause and seek latency (the queued lead, up to 1 s), video-only files (reported to need an audio prime),
 a decoder-side position, real pause via Starfish, and a PTS-unit test that does not feed in real time.
 

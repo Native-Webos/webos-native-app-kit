@@ -350,6 +350,24 @@ class PlayerScreen : public Screen {
                      static_cast<unsigned long long>(s.video_packets), static_cast<unsigned long long>(s.audio_packets),
                      static_cast<unsigned long long>(s.full_retries), static_cast<unsigned long long>(s.untimed_packets));
         }
+        // Every 5 s: what the panel is doing with the picture (sdr, hdr, dolbyHdr), which a log of what
+        // was declared cannot show. settingsservice reports it in the reply's "dimension" (PlxNative).
+        if (ui.now_ms() - last_panel_ms_ >= 5000 && s.state == PlayState::Playing) {
+            last_panel_ms_ = ui.now_ms();
+            ctx_.pool().submit([](const wnk::async::CancellationToken &) {
+                const auto r = wnk::platform::luna_call_sync("luna://com.webos.settingsservice/getSystemSettings",
+                                                             R"({"category":"picture","keys":["pictureMode"]})", 2000);
+                const auto j = nlohmann::json::parse(r.payload.empty() ? "{}" : r.payload, nullptr, false);
+                std::string range = "?", mode = "?";
+                if (j.is_object() && j.contains("dimension") && j["dimension"].is_object()) {
+                    range = j["dimension"].value("dynamicRange", range);
+                }
+                if (j.is_object() && j.contains("settings") && j["settings"].is_object()) {
+                    mode = j["settings"].value("pictureMode", mode);
+                }
+                WNK_LOGI(kCat, "panel: dynamic range %s, picture mode %s", range.c_str(), mode.c_str());
+            });
+        }
     }
 
  private:
@@ -459,6 +477,7 @@ class PlayerScreen : public Screen {
     bool opened_ = false;
     double last_input_ms_ = 0;
     double last_log_ms_ = 0;
+    double last_panel_ms_ = 0;
     double opened_ms_ = -1;
     std::vector<std::pair<double, double>> seeks_;
     size_t next_seek_ = 0;
@@ -882,6 +901,7 @@ class Player : public wnk::app::Delegate {
         if (wnk::platform::kIsWebOS) {
             s.device = DeviceMediaCaps::detect();
             WNK_LOGI(kCat, "device media: %s", s.device.summary().c_str());
+            WNK_LOGI(kCat, "audio output: %s", wnk::media::AudioOutputCaps::detect().summary().c_str());
         }
         WNK_LOGI(kCat, "%s; PTS unit %s; NDL pause/seek by %s; lead %d ms", FfmpegSource::version().c_str(),
                  s.pts_unit == PtsUnit::Milliseconds ? "ms" : "us", s.ndl_reload ? "reload" : "hold/splice", s.lead_ms);

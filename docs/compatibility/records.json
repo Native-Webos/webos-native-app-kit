@@ -908,6 +908,87 @@
       "method": "Example D 0.19.0 {\"drmTest\": {drm widevine, Shaka angel-one-widevine MPD, license url|callback|service, transportInOption false}}: com.webos.media/load by URL with mediaTransportType beside option",
       "evidence": "Encrypted DASH no longer kills the pipeline: MPD parsed (10 audio tracks), tracks selected, buffering, EME-style 'encrypted' event with cenc init data (Widevine PSSH), then error 552 'Encrypted Content' and drmRightsError for edef8ba9-79d6-4ace-a3c8-27dcd51d21ed. option.drm.licenseUrl does not fetch a licence; useLicenseCallback raises no drmEncrypted (libumedia_api has /setDrmOperation, but this pipeline does not call back); a drm service client is accepted but gets no licence by itself",
       "limitations": "No licence delivered: the DRM service's Widevine message format is undocumented. NDL_MediaSetDrmOperation (LG's Flutter plugin route) is absent on this firmware"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.audio.truehd_platform_pipeline",
+      "result": "unsupported",
+      "date": "2026-10-19",
+      "method": "Example D 0.19.0 {\"drmTest\":{\"drm\":\"none\",\"transport\":\"\",\"type\":\"media\"}}: com.webos.media/load by URL of an MKV with H.264 video and TrueHD 7.1 with Atmos audio; control: the same clip with the disc's AC-3 5.1 track",
+      "evidence": "TrueHD: media event error 200 'Audio Codec Not Supported', sourceInfo numAudioTracks 0, audioSinkType unknown, the video plays silently. AC-3 control: 1 audio track, audioSinkType main_sound. Firmware strings agree: libpf's BUFFERSTREAM audio names are MP3, AC3, AAC, DTS, AC3 PLUS, HE AAC, PCM WAV, WMA PRO, VORBIS, OPUS, MPEGH, AC4, FLAC; lxaudiodec/decproxy sink caps have no audio/x-true-hd (only matroskademux and avdec_truehd know it)",
+      "limitations": "Not tried: other containers (M2TS) for TrueHD by URL. The connected eARC soundbar does take TrueHD (getARCState), so the limit is the TV's app pipelines"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.starfish.truehd_ac3_reencode",
+      "result": "supported",
+      "date": "2026-10-19",
+      "method": "Example D 0.19.0 {\"uri\":...} on Starfish: a 60 s stream copy of a UHD Blu-ray remux (TrueHD 7.1 with Atmos, HEVC DV profile 7) served over LAN HTTP, video re-encoded to 1080p H.264",
+      "evidence": "TrueHD 8 ch 48 kHz decoded by FFmpeg and re-encoded to AC-3 5.1 640 kb/s at 4.5% of a core (45 ms CPU per s of audio); 40 s steady, audio and video pts within 0.1 s, 0 full retries",
+      "limitations": "Lossy and without Atmos objects; sound not judged by ear; CPU figure excludes the TrueHD decode itself"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.audio.output_arc_state",
+      "result": "supported",
+      "date": "2026-10-19",
+      "method": "Example D 0.20.0 startup: luna://com.webos.service.arccontroller/getARCState from the app (AudioOutputCaps), an eARC Atmos soundbar connected",
+      "evidence": "arcActivation eARC, earcCapability [AAC, DTS, PCM, DD, DD+, TrueHD, MAT2PCM], earcATMOS true, advancedEarcCapability PCM up to 8 channels, audioDeviceType sound_mode_sync; tv.model.edidType 'TrueHD' (no DTS, Kodi's test)",
+      "limitations": "Plain ARC, optical and no-device replies not seen; subscription updates not tried"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.starfish.max_video_resolution",
+      "result": "supported",
+      "date": "2026-10-19",
+      "method": "Example D 0.20.0: smp::util::getMaxVideoResolution (libplayerAPIs, by-value std::string signature) for H264, H265, VP8, VP9, AV1, MPEG2 and an invented name",
+      "evidence": "H264 4096x2304@60, H265 4096x2304@120, VP9 and AV1 4096x2304@60, VP8 and MPEG2 1920x1088@60, 'NOSUCH' also true with 1920x1088@60: the answer works inside the Developer Mode jail but a name it does not know gets the FHD default, so only a larger answer names a decoder",
+      "limitations": "An FHD-only TV cannot be told apart from the default this way"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.starfish.vp9",
+      "result": "supported",
+      "date": "2026-10-19",
+      "method": "Example D 0.20.0 on Starfish (codec VP9): 15 s 1920x804 VP9 profile 2 10-bit, PQ/BT.2020 in the Matroska Colour element, E-AC-3 5.1",
+      "evidence": "Pipeline caps video/x-vp9, first frame presented, 120 displayed and 0 dropped per 5 s (23.976 fps), audio and video pts together through the end",
+      "limitations": "One clip, 1080p, no seeks tried; VP9 in WebM over DASH not tried"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.starfish.av1",
+      "result": "supported",
+      "date": "2026-10-19",
+      "method": "Example D 0.20.0 on Starfish (codec AV1): 15 s 1920x804 AV1 10-bit (SVT-AV1), PQ/BT.2020, fed as temporal units (temporal delimiter first, av1C sequence header on keyframes)",
+      "evidence": "Pipeline caps video/x-av1, first frame presented, 120 displayed and 0 dropped per 5 s, panel in HDR",
+      "limitations": "Not tried without the temporal-unit framing, at 4K, or with seeks"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.starfish.set_hdr_info",
+      "result": "supported",
+      "date": "2026-10-19",
+      "method": "Example D 0.20.0: StarfishMediaAPIs::setHdrInfo after Load with Kodi's payload (hdrType, sei, vui) from Matroska MasteringMetadata/MaxCLL/MaxFALL; panel state read every 5 s from settingsservice getSystemSettings dimension.dynamicRange. A/B: the same VP9 clip without container metadata (no call)",
+      "evidence": "With setHdrInfo: pipeline sourceInfo hdrType HDR10, dynamicRange hdr, pictureMode hdrStandard (VP9 and AV1). Without: hdrType none, dynamicRange sdr, pictureMode normal. The call answered 1",
+      "limitations": "PQ without mastering values is not declared (Kodi: some TVs crash on an HDR message without SEI), so such a VP9 stream stays SDR; HLG not tried"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.hevc.hdr10plus",
+      "result": "supported",
+      "date": "2026-10-19",
+      "method": "4K HEVC HDR10 WEB-DL with HDR10+ (ST 2094-40) SEI on every frame, 15 s: Example D 0.17.0 (feeds it as it is) and 0.20.0 (removes the HDR10+ messages)",
+      "evidence": "Both play: 0.17.0 120-121 displayed and 0 dropped per 5 s to the end; 0.20.0 the same, panel hdr from the bitstream's own SEI. The stall PlxNative measured on another set does not happen here",
+      "limitations": "The HDR10+ curve itself is not used either way (the TV does not support HDR10+)"
+    },
+    {
+      "device": "lg-oled65c1ptb-6.5.3",
+      "feature": "media.starfish.eac3_ac3plusinfo",
+      "result": "supported",
+      "date": "2026-10-19",
+      "method": "Example D 0.20.0: Dolby's DV profile 8.1 + E-AC-3 JOC DASH test stream on Starfish with contents.ac3PlusInfo {channels 8, frequency 48} beside DolbyHdrInfo and immersive ATMOS",
+      "evidence": "Pipeline audio info immersive ATMOS, hdrType DolbyVision, dynamicRange dolbyHdr (pictureMode dolbyHdrCinema), 300 displayed and 0 dropped per 5 s for 30 s",
+      "limitations": "Whether the soundbar showed Atmos was not looked at"
     }
   ]
 }

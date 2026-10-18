@@ -327,6 +327,8 @@ stubbing a lookalike.
 | Another app covering this one | `on_lifecycle`: `pause_and_release()` on `Suspended`, resume when `Resuming` returns to `Running`. |
 | Device model, webOS release, GLES limits | `ctx.device()`, `ctx.capabilities()`. |
 | HEVC / UHD / Dolby Vision / Atmos | `media::DeviceMediaCaps::detect()` once at startup (blocking Luna; startup is acceptable). Unknown stays unknown. |
+| Soundbar / AVR on ARC or eARC | `media::AudioOutputCaps::detect()` (getARCState): the link and the formats the device takes. It does not widen what an app can send: TrueHD never leaves the TV (`docs/research/AUDIO-PASSTHROUGH.md`). |
+| VP9, AV1, HDR10 in the container | Nothing to do: `StarfishBackend` offers VP9/AV1 where the TV reports a decoder and declares container HDR10/HLG metadata with `setHdrInfo`. |
 | On-screen frame timing | `config.metrics_toggle = Action::Blue`, or launch param `{"wnkMetrics": true}`. |
 | Call another Luna service | `platform::luna_call_sync` from a worker, never from `draw`. |
 | Host screenshot / scripted keys | `<PREFIX>_KEYS` and `<PREFIX>_SHOT`. Names are in the comment at the top of `app/src/app.cpp` (`Script`). |

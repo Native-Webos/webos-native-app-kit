@@ -72,6 +72,21 @@ struct MediaInfo {
     const TrackInfo *best(TrackType type) const;
 };
 
+// The colour description and static HDR metadata the container states (H.273 code points, 2 meaning
+// unspecified). Values carried only in the bitstream (HEVC SEI) are not here: they reach the decoder
+// with the stream itself.
+struct VideoColour {
+    int transfer = 2, primaries = 2, matrix = 2;  // e.g. 16 PQ, 18 HLG; 9 BT.2020; 9 BT.2020 NCL
+    bool full_range = false;
+    bool has_primaries = false;
+    double display_primaries[3][2] = {};  // mastering display R, G, B as CIE 1931 (x, y)
+    double white_point[2] = {};
+    bool has_luminance = false;
+    double min_luminance = 0, max_luminance = 0;  // cd/m2
+    bool has_light_level = false;
+    unsigned max_cll = 0, max_fall = 0;  // cd/m2
+};
+
 // What the backend is asked to load: the selected tracks in the form the source will deliver them.
 struct VideoFormat {
     CodecId codec = CodecId::Unknown;
@@ -80,6 +95,7 @@ struct VideoFormat {
     // Single-layer Dolby Vision carried in the stream (RPUs in-band): its profile (5, 8, ...), else -1.
     // Dual-layer streams (an enhancement layer, profile 7) report -1: only the base layer is fed.
     int dolby_vision_profile = -1;
+    VideoColour colour{};
 };
 struct AudioFormat {
     CodecId codec = CodecId::Unknown;  // PcmS16 when the source decodes in software, Ac3 when it re-encodes

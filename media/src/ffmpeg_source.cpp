@@ -2,6 +2,7 @@
 #include "wnk/media/ffmpeg_source.hpp"
 
 #include "wnk/log.hpp"
+#include "wnk/media/bitstream.hpp"
 #include "wnk/media/subtitles.hpp"
 
 extern "C" {
@@ -12,6 +13,7 @@ extern "C" {
 #include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/opt.h>
 #include <libswresample/swresample.h>
 }
@@ -139,6 +141,41 @@ void mix_to_stereo_s16(const float *const *planes, int channels, int samples, co
     }
 }
 
+// The container's colour description and HDR10 static metadata (MKV Colour, MP4 colr/mdcv/clli).
+VideoColour colour_of(const AVCodecParameters *par) {
+    VideoColour c;
+    c.transfer = par->color_trc;  // AVCodecParameters defaults to 2 (unspecified) as well
+    c.primaries = par->color_primaries;
+    c.matrix = par->color_space;
+    c.full_range = par->color_range == AVCOL_RANGE_JPEG;
+    if (const AVPacketSideData *sd = av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data,
+                                                             AV_PKT_DATA_MASTERING_DISPLAY_METADATA)) {
+        const auto *m = reinterpret_cast<const AVMasteringDisplayMetadata *>(sd->data);
+        if (m->has_primaries) {
+            c.has_primaries = true;
+            for (int i = 0; i < 3; ++i) {
+                c.display_primaries[i][0] = av_q2d(m->display_primaries[i][0]);
+                c.display_primaries[i][1] = av_q2d(m->display_primaries[i][1]);
+            }
+            c.white_point[0] = av_q2d(m->white_point[0]);
+            c.white_point[1] = av_q2d(m->white_point[1]);
+        }
+        if (m->has_luminance) {
+            c.has_luminance = true;
+            c.min_luminance = av_q2d(m->min_luminance);
+            c.max_luminance = av_q2d(m->max_luminance);
+        }
+    }
+    if (const AVPacketSideData *sd = av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data,
+                                                             AV_PKT_DATA_CONTENT_LIGHT_LEVEL)) {
+        const auto *l = reinterpret_cast<const AVContentLightMetadata *>(sd->data);
+        c.has_light_level = true;
+        c.max_cll = l->MaxCLL;
+        c.max_fall = l->MaxFALL;
+    }
+    return c;
+}
+
 struct FfmpegSource::Impl {
     FfmpegSourceOptions options;
     AVFormatContext *fmt = nullptr;
@@ -152,6 +189,9 @@ struct FfmpegSource::Impl {
     AVFrame *frame = nullptr;
     MediaInfo info;
     int video = -1, audio = -1;
+    CodecId video_codec = CodecId::Unknown;
+    std::vector<uint8_t> av1_config;  // AV1: the av1C record, for keyframes without a sequence header
+    int64_t hdr10plus_stripped = 0;   // HEVC access units that lost an HDR10+ message
     bool decode_audio = false;
     // AudioPath::Ac3: decoded audio is converted by `swr` (made for the first frame and remade when
     // the frames change) into planar float at the encoder's layout and rate, collected in `fifo` and
@@ -719,7 +759,14 @@ struct FfmpegSource::Impl {
         Packet v;
         v.type = TrackType::Video;
         v.key = key;
-        v.data.assign(p->data, p->data + p->size);
+        if (video_codec == CodecId::Av1) {
+            v.data = av1_temporal_unit(p->data, static_cast<size_t>(p->size), av1_config, key);
+        } else {
+            v.data.assign(p->data, p->data + p->size);
+        }
+        if (video_codec == CodecId::Hevc && hevc_strip_hdr10plus(&v.data) && hdr10plus_stripped++ == 0) {
+            WNK_LOGI(kCat, "removing HDR10+ metadata from the HEVC stream (webOS decoders stall on it)");
+        }
         v.pts_us = to_us(p->pts != AV_NOPTS_VALUE ? p->pts : p->dts, tb);
         v.dts_us = to_us(p->dts, tb);
         v.duration_us = p->duration > 0 ? av_rescale_q(p->duration, tb, kMicros) : 0;
@@ -935,7 +982,13 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
             }
         }
         m.video = video_track;
+        m.video_codec = t->codec;
+        m.av1_config.clear();
+        if (t->codec == CodecId::Av1 && par->extradata_size > 0) {
+            m.av1_config.assign(par->extradata, par->extradata + par->extradata_size);
+        }
         out->video = VideoFormat{t->codec, t->width, t->height, t->frame_rate};
+        out->video->colour = colour_of(par);
         // Dolby Vision configuration record (MP4 dvcC/dvvC, Matroska block addition mapping).
         if (const AVPacketSideData *sd = av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data,
                                                                  AV_PKT_DATA_DOVI_CONF)) {

@@ -3,6 +3,8 @@
 // Derived from PlxNative's src/starfish.c and rust-modules/media/src/player/engine.rs (Copyright the
 // PlxNative authors, GPL-3.0-or-later): the mangled entry points, the in-place object, the sret
 // Feed reply, the BUFFERSTREAM payload, the exported-window binding and the frame-rate envelope.
+// The setHdrInfo payload, ac3PlusInfo, the VP9/AV1 names and the getMaxVideoResolution envelope follow
+// Kodi's xbmc/cores/VideoPlayer/MediaPipelineWebOS.cpp (Team Kodi, GPL-2.0-or-later).
 #include "wnk/media/starfish_backend.hpp"
 
 #include "wnk/log.hpp"
@@ -39,6 +41,10 @@ struct Api {
     int (*unload)(void *self) = nullptr;
     int (*push_eos)(void *self) = nullptr;
     void (*notify_foreground)(void *self) = nullptr;
+    // Optional (absent on webOS 1.x-3.x images): smp::util::getMaxVideoResolution. Its std::string
+    // parameter is by value up to webOS 10 and const& from 11; both pass the string's address.
+    bool (*max_video_resolution)(const std::string &codec, int32_t *w, int32_t *h, int32_t *fps) = nullptr;
+    int (*set_hdr_info)(void *self, const char *payload) = nullptr;  // optional: webOS 5+
     // SDL-webOS exported window (already loaded with the app's SDL).
     const char *(*create_window)(int type) = nullptr;
     int (*set_window)(const char *id, void *src, void *dst) = nullptr;  // SDL_bool, SDL_Rect*
@@ -76,6 +82,13 @@ const Api &api() {
     ok = sym(h, g_api.unload, "_ZN17StarfishMediaAPIs6UnloadEv") && ok;
     ok = sym(h, g_api.push_eos, "_ZN17StarfishMediaAPIs7pushEOSEv") && ok;
     ok = sym(h, g_api.notify_foreground, "_ZN17StarfishMediaAPIs16notifyForegroundEv") && ok;
+    g_api.max_video_resolution = reinterpret_cast<decltype(g_api.max_video_resolution)>(dlsym(
+        h, "_ZN3smp4util21getMaxVideoResolutionENSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEPiS7_S7_"));
+    if (g_api.max_video_resolution == nullptr) {
+        g_api.max_video_resolution = reinterpret_cast<decltype(g_api.max_video_resolution)>(dlsym(
+            h, "_ZN3smp4util21getMaxVideoResolutionERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEPiS8_S8_"));
+    }
+    g_api.set_hdr_info = reinterpret_cast<decltype(g_api.set_hdr_info)>(dlsym(h, "_ZN17StarfishMediaAPIs10setHdrInfoEPKc"));
     ok = sym(RTLD_DEFAULT, g_api.create_window, "SDL_webOSCreateExportedWindow") && ok;
     ok = sym(RTLD_DEFAULT, g_api.set_window, "SDL_webOSSetExportedWindow") && ok;
     ok = sym(RTLD_DEFAULT, g_api.destroy_window, "SDL_webOSDestroyExportedWindow") && ok;
@@ -120,6 +133,8 @@ const char *StarfishBackend::codec_string(CodecId c) {
     switch (c) {
         case CodecId::H264: return "H264";
         case CodecId::Hevc: return "H265";
+        case CodecId::Vp9: return "VP9";
+        case CodecId::Av1: return "AV1";
         case CodecId::Aac: return "AAC";
         case CodecId::Ac3: return "AC3";
         case CodecId::Eac3: return "AC3 PLUS";  // LG's name; "EAC3" is not in its vocabulary
@@ -163,8 +178,13 @@ std::string StarfishBackend::build_load_payload(const StarfishLoad &l) {
     // The sink the pipeline allocates for (PlxNative's envelope): H.264 that fits FHD declares
     // 1920x1080 (webOS 10.3.1 refuses H.264 declared as 4K), everything else 3840x2160. H.264
     // declares its own rate class; HEVC stays at 60, the value its Dolby Vision runs were verified at.
+    // A TV that reports a smaller decoder (an FHD set) bounds the envelope further.
     const bool fhd = l.video == CodecId::H264 && l.width > 0 && l.height > 0 && l.width <= 1920 && l.height <= 1088;
-    const int max_w = fhd ? 1920 : 3840, max_h = fhd ? 1080 : 2160;
+    int max_w = fhd ? 1920 : 3840, max_h = fhd ? 1080 : 2160;
+    if (l.decoder_max_width > 0 && l.decoder_max_height > 0) {
+        max_w = std::min(max_w, l.decoder_max_width);
+        max_h = std::min(max_h, l.decoder_max_height);
+    }
     const int max_fps = l.video == CodecId::H264 && l.frame_rate > 0 ? frame_rate_class(l.frame_rate) : 60;
     std::string codec = std::string("{\"video\":\"") + (video != nullptr ? video : "H264") + "\"";
     if (has_audio) codec += std::string(",\"audio\":\"") + audio + "\"";
@@ -188,6 +208,13 @@ std::string StarfishBackend::build_load_payload(const StarfishLoad &l) {
                  std::to_string(l.dolby_vision_profile) + "}";
     }
     if (l.atmos && l.audio == CodecId::Eac3) extra += ",\"immersive\":\"ATMOS\"";
+    // E-AC-3 as it is: its channels (two more for Atmos) and rate in kHz, as Kodi declares it.
+    if (l.audio == CodecId::Eac3 && l.audio_channels > 0 && l.audio_rate > 0) {
+        char info[96];
+        std::snprintf(info, sizeof info, ",\"ac3PlusInfo\":{\"channels\":%d,\"frequency\":%g}",
+                      l.audio_channels + (l.atmos ? 2 : 0), l.audio_rate / 1000.0);
+        extra += info;
+    }
     p += ",\"externalStreamingInfo\":{\"contents\":{\"codec\":" + codec + ",\"esInfo\":" + es +
          ",\"format\":\"RAW\",\"provider\":\"wnk\"" + extra + "},\"streamQualityInfo\":true,\"streamQualityInfoNonFlushable\":true,"
          "\"audioSync\":true,\"restartStreaming\":false,\"bufferingCtrInfo\":{\"bufferMaxLevel\":0,\"bufferMinLevel\":0,"
@@ -202,6 +229,58 @@ std::string StarfishBackend::build_load_payload(const StarfishLoad &l) {
     p += ",\"maxWidth\":" + std::to_string(max_w) + ",\"maxHeight\":" + std::to_string(max_h) +
          ",\"maxFrameRate\":" + std::to_string(max_fps) + "}}}]}";
     return p;
+}
+
+bool StarfishBackend::max_video_resolution(const char *codec, int *width, int *height, int *frame_rate) {
+    if (!usable() || api().max_video_resolution == nullptr) return false;
+    const std::string name = codec;  // short names stay in the small-string buffer
+    int32_t w = 0, h = 0, fps = 0;
+    if (!api().max_video_resolution(name, &w, &h, &fps)) return false;
+    *width = w;
+    *height = h;
+    *frame_rate = fps;
+    return true;
+}
+
+std::string StarfishBackend::build_hdr_payload(const VideoColour &c) {
+    const char *type = c.transfer == 16 ? "HDR10" : c.transfer == 18 ? "HLG" : nullptr;
+    if (type == nullptr) return "";
+    // SEI units: chromaticity in 1/50000, luminance in 1/10000 cd/m2, primaries in G, B, R order
+    // (CTA-861.3, Kodi). Without any of it the call is skipped: some TVs crash on an HDR message with
+    // no SEI (Kodi), and the decoder still sees whatever the bitstream carries.
+    std::string sei;
+    auto add = [&sei](const char *key, long long v) {
+        sei += std::string(sei.empty() ? "" : ",") + "\"" + key + "\":" + std::to_string(v);
+    };
+    auto chroma = [](double v) { return std::llround(v * 50000); };
+    if (c.has_primaries) {
+        static constexpr int kOrder[3] = {1, 2, 0};  // G, B, R from R, G, B
+        for (int i = 0; i < 3; ++i) {
+            add(("displayPrimariesX" + std::to_string(i)).c_str(), chroma(c.display_primaries[kOrder[i]][0]));
+            add(("displayPrimariesY" + std::to_string(i)).c_str(), chroma(c.display_primaries[kOrder[i]][1]));
+        }
+        add("whitePointX", chroma(c.white_point[0]));
+        add("whitePointY", chroma(c.white_point[1]));
+    }
+    if (c.has_luminance) {
+        add("minDisplayMasteringLuminance", std::llround(c.min_luminance * 10000));
+        add("maxDisplayMasteringLuminance", std::llround(c.max_luminance * 10000));
+    }
+    if (c.has_light_level) {
+        add("maxContentLightLevel", c.max_cll);
+        add("maxPicAverageLightLevel", c.max_fall);
+    }
+    if (sei.empty()) return "";
+    return std::string("{\"hdrType\":\"") + type + "\",\"sei\":{" + sei + "},\"vui\":{\"transferCharacteristics\":" +
+           std::to_string(c.transfer) + ",\"colorPrimaries\":" + std::to_string(c.primaries) +
+           ",\"matrixCoeffs\":" + std::to_string(c.matrix) + ",\"videoFullRangeFlag\":" +
+           (c.full_range ? "true" : "false") + "}}";
+}
+
+bool StarfishBackend::decoder_listed(int width, int height) {
+    // An unknown name gets 1920x1088@60 back (measured on the OLED65C1PTB with "NOSUCH"), so only a
+    // larger answer says the TV has that decoder.
+    return static_cast<long long>(width) * height > 1920LL * 1088;
 }
 
 bool StarfishBackend::available(std::string *why) {
@@ -220,6 +299,13 @@ StarfishBackend::StarfishBackend(StarfishOptions options)
         options_.app_id = id != nullptr ? id : "";
     }
     if (!usable()) return;
+    for (const CodecId c : {CodecId::H264, CodecId::Hevc, CodecId::Vp9, CodecId::Av1}) {
+        Limit &l = limits_[static_cast<size_t>(c)];
+        l.known = max_video_resolution(codec_string(c), &l.width, &l.height, &l.frame_rate);
+        WNK_LOGI(kCat, "decoder %s: %s", codec_string(c),
+                 l.known ? (std::to_string(l.width) + "x" + std::to_string(l.height) + "@" + std::to_string(l.frame_rate)).c_str()
+                         : "not reported");
+    }
     // Type 0 is the video window (LG's header spells the constant EXPORED).
     if (const char *id = api().create_window(0)) {
         window_id_ = id;  // SDL's string has no documented lifetime: copy it
@@ -237,6 +323,11 @@ StarfishBackend::~StarfishBackend() {
 BackendCaps StarfishBackend::caps() const {
     BackendCaps c;
     c.video_codecs = {CodecId::H264, CodecId::Hevc};
+    // VP9 and AV1 only where the TV reports a decoder for them.
+    for (const CodecId v : {CodecId::Vp9, CodecId::Av1}) {
+        const Limit &l = limits_[static_cast<size_t>(v)];
+        if (l.known && decoder_listed(l.width, l.height)) c.video_codecs.push_back(v);
+    }
     c.audio_codecs = {CodecId::Aac, CodecId::Ac3, CodecId::Eac3};
     c.aac_adts = true;
     c.adaptive_resolution = true;  // Load declares adaptiveResolution and the 4K/FHD envelope
@@ -319,7 +410,15 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
     l.width = format.video->width;
     l.height = format.video->height;
     l.frame_rate = format.video->frame_rate;
-    if (format.audio) l.audio = format.audio->codec;
+    if (format.audio) {
+        l.audio = format.audio->codec;
+        l.audio_channels = format.audio->channels;
+        l.audio_rate = format.audio->sample_rate;
+    }
+    if (const Limit &lim = limits_[static_cast<size_t>(l.video)]; lim.known && decoder_listed(lim.width, lim.height)) {
+        l.decoder_max_width = lim.width;
+        l.decoder_max_height = lim.height;
+    }
     if (options_.dolby_vision) l.dolby_vision_profile = format.video->dolby_vision_profile;
     l.atmos = options_.atmos && format.audio && format.audio->atmos;
     const std::string payload = build_load_payload(l);
@@ -350,6 +449,14 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         g_registry.erase(epoch);
         *error = "StarfishMediaAPIs::Load refused the stream";
         return false;
+    }
+    // Static HDR metadata only the container states (VP9 has no SEI of its own): after Load, as Kodi.
+    if (const std::string hdr = build_hdr_payload(format.video->colour); !hdr.empty()) {
+        if (api().set_hdr_info != nullptr) {
+            WNK_LOGI(kCat, "setHdrInfo %s -> %d", hdr.c_str(), api().set_hdr_info(object, hdr.c_str()) & 0xFF);
+        } else {
+            WNK_LOGI(kCat, "no setHdrInfo on this firmware: container HDR metadata not declared");
+        }
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);

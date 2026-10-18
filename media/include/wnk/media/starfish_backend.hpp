@@ -24,6 +24,10 @@
 //   * Pause and Play are real. Seeks splice the timeline like the NDL backend (no flush: PlxNative
 //     found Starfish's flush leaves a stale segment and wedges the sink after ~48 s).
 //
+//   * VP9 and AV1 are offered where getMaxVideoResolution reports a decoder for them; its answer also
+//     bounds the envelope. Container HDR10/HLG metadata goes through setHdrInfo after Load (webOS 5+,
+//     Kodi's payload). E-AC-3 carries ac3PlusInfo (Kodi).
+//
 // Unverified until measured on a TV (docs/compatibility/records.json): everything specific to this
 // implementation. PlxNative's path was verified on webOS 6.5.2 (2026-08-11, its issue #22).
 #pragma once
@@ -60,6 +64,8 @@ struct StarfishLoad {
     CodecId audio = CodecId::Unknown;  // Unknown: no audio
     int dolby_vision_profile = -1;     // >= 0: declare DolbyHdrInfo with this profileId
     bool atmos = false;                // declare immersive ATMOS
+    int audio_channels = 0, audio_rate = 0;
+    int decoder_max_width = 0, decoder_max_height = 0;  // what the TV reports for the codec; 0 unknown
 };
 
 class StarfishBackend : public MediaBackend {
@@ -70,6 +76,10 @@ class StarfishBackend : public MediaBackend {
 
     // libplayerAPIs.so.1 with every entry point, and SDL-webOS's exported window.
     static bool available(std::string *why = nullptr);
+    // The largest picture this TV's decoder takes for a Starfish codec name ("H264", "H265", "VP9",
+    // "AV1"), from libplayerAPIs' smp::util::getMaxVideoResolution. False when Starfish or the
+    // function is missing, or the TV does not say.
+    static bool max_video_resolution(const char *codec, int *width, int *height, int *frame_rate);
 
     const char *name() const override { return "starfish"; }
     BackendCaps caps() const override;
@@ -89,6 +99,11 @@ class StarfishBackend : public MediaBackend {
     static const char *codec_string(CodecId c);  // "H264", "AC3 PLUS", ... or nullptr
     static int frame_rate_class(double fps);      // 24, 25, 30, 50, 60 or the rate rounded up
     static void frame_rate_fraction(double fps, int64_t *num, int64_t *den);  // 24000/1001, 25/1, ...
+    // setHdrInfo payload for the container's HDR10/HLG metadata, or "" when there is none to declare.
+    static std::string build_hdr_payload(const VideoColour &colour);
+    // Whether a getMaxVideoResolution answer names a real decoder (larger than the default it gives
+    // for any name, 1920x1088).
+    static bool decoder_listed(int width, int height);
 
     // Called from the library's thread through the epoch registry.
     void on_event(int type, long long num, const char *str);
@@ -97,6 +112,11 @@ class StarfishBackend : public MediaBackend {
     void place_locked();
 
     StarfishOptions options_;
+    struct Limit {
+        bool known = false;
+        int width = 0, height = 0, frame_rate = 0;
+    };
+    Limit limits_[16];  // by CodecId, measured at construction
     std::string window_id_;
     mutable std::mutex mutex_;  // format_, area_, object_
     StreamFormat format_;

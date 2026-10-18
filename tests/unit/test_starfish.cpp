@@ -129,3 +129,59 @@ TEST("starfish: unavailable on the host, with a reason; caps") {
     CHECK(!c.pause_drains);
     CHECK(c.accepts(CodecId::Aac) && !c.accepts(CodecId::PcmS16));
 }
+
+TEST("starfish: VP9 and AV1 names; only answers above the 1920x1088 default name a decoder") {
+    CHECK_EQ(std::string(StarfishBackend::codec_string(CodecId::Vp9)), std::string("VP9"));
+    CHECK_EQ(std::string(StarfishBackend::codec_string(CodecId::Av1)), std::string("AV1"));
+    // OLED65C1PTB answers: VP9/AV1 4096x2304, an unknown name 1920x1088.
+    CHECK(StarfishBackend::decoder_listed(4096, 2304));
+    CHECK(!StarfishBackend::decoder_listed(1920, 1088));
+}
+
+TEST("starfish: the TV's decoder size bounds the envelope; E-AC-3 declares ac3PlusInfo") {
+    StarfishLoad l;
+    l.video = CodecId::Vp9;
+    l.width = 1920;
+    l.height = 1080;
+    l.frame_rate = 30;
+    l.audio = CodecId::Eac3;
+    l.audio_channels = 6;
+    l.audio_rate = 48000;
+    std::string p = StarfishBackend::build_load_payload(l);
+    CHECK(has(p, "\"video\":\"VP9\""));
+    CHECK(has(p, "\"maxWidth\":3840,\"maxHeight\":2160"));
+    CHECK(has(p, "\"ac3PlusInfo\":{\"channels\":6,\"frequency\":48}"));
+    l.atmos = true;
+    CHECK(has(StarfishBackend::build_load_payload(l), "\"ac3PlusInfo\":{\"channels\":8,\"frequency\":48}"));
+    l.decoder_max_width = 1920;
+    l.decoder_max_height = 1088;
+    CHECK(has(StarfishBackend::build_load_payload(l), "\"maxWidth\":1920,\"maxHeight\":1088"));
+    l.audio = CodecId::Ac3;
+    CHECK(!has(StarfishBackend::build_load_payload(l), "ac3PlusInfo"));
+}
+
+TEST("starfish: setHdrInfo payload from container HDR10 metadata, in SEI units and G,B,R order") {
+    VideoColour c;
+    CHECK(StarfishBackend::build_hdr_payload(c).empty());  // SDR
+    c.transfer = 16;
+    c.primaries = 9;
+    c.matrix = 9;
+    CHECK(StarfishBackend::build_hdr_payload(c).empty());  // PQ without metadata: nothing to declare
+    c.has_primaries = true;
+    c.display_primaries[0][0] = 0.708, c.display_primaries[0][1] = 0.292;  // R
+    c.display_primaries[1][0] = 0.170, c.display_primaries[1][1] = 0.797;  // G
+    c.display_primaries[2][0] = 0.131, c.display_primaries[2][1] = 0.046;  // B
+    c.white_point[0] = 0.3127, c.white_point[1] = 0.3290;
+    c.has_luminance = true;
+    c.min_luminance = 0.0001, c.max_luminance = 1000;
+    c.has_light_level = true;
+    c.max_cll = 1000, c.max_fall = 400;
+    CHECK_EQ(StarfishBackend::build_hdr_payload(c),
+             std::string(R"({"hdrType":"HDR10","sei":{"displayPrimariesX0":8500,"displayPrimariesY0":39850,)"
+                         R"("displayPrimariesX1":6550,"displayPrimariesY1":2300,"displayPrimariesX2":35400,"displayPrimariesY2":14600,)"
+                         R"("whitePointX":15635,"whitePointY":16450,"minDisplayMasteringLuminance":1,)"
+                         R"("maxDisplayMasteringLuminance":10000000,"maxContentLightLevel":1000,"maxPicAverageLightLevel":400},)"
+                         R"("vui":{"transferCharacteristics":16,"colorPrimaries":9,"matrixCoeffs":9,"videoFullRangeFlag":false}})"));
+    c.transfer = 18;
+    CHECK(has(StarfishBackend::build_hdr_payload(c), "\"hdrType\":\"HLG\""));
+}

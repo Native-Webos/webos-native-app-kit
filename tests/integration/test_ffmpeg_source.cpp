@@ -229,6 +229,39 @@ TEST("ffmpeg source: WebM VP9 + Opus → Opus passes through with its header") {
     CHECK(std::string(f.audio->codec_header.begin(), f.audio->codec_header.begin() + 8) == "OpusHead");
 }
 
+TEST("ffmpeg source: MKV AV1 → temporal units (delimiter first, sequence header on keyframes); PQ colour") {
+    SKIP_WITHOUT_FFMPEG();
+    if (!make_clip("av1_pq.mkv", "libsvtav1 -preset 12 -pix_fmt yuv420p10le", "libopus",
+                   "-color_trc smpte2084 -color_primaries bt2020 -colorspace bt2020nc")) {
+        std::printf("  SKIP: no libsvtav1/libopus encoder\n");
+        return;
+    }
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/av1_pq.mkv", &err));
+    const TrackInfo *v = s.info().best(TrackType::Video);
+    REQUIRE(v);
+    CHECK(v->codec == CodecId::Av1);
+    StreamFormat f;
+    REQUIRE(s.select(v->index, -1, ndl_like_caps(), &f, &err));
+    REQUIRE(f.video.has_value());
+    CHECK_EQ(f.video->colour.transfer, 16);
+    CHECK_EQ(f.video->colour.primaries, 9);
+    CHECK_EQ(f.video->colour.matrix, 9);
+    const Drained d = drain(s);
+    REQUIRE(d.video.size() >= 40);
+    int keys = 0;
+    for (const Packet &p : d.video) {
+        REQUIRE(p.data.size() > 4);
+        CHECK(p.data[0] == 0x12 && p.data[1] == 0x00);  // OBU_TEMPORAL_DELIMITER, size 0
+        if (p.key) {
+            ++keys;
+            CHECK(((p.data[2] >> 3) & 0x0F) == 1);  // then OBU_SEQUENCE_HEADER
+        }
+    }
+    CHECK(keys >= 2);
+}
+
 TEST("ffmpeg source: seek lands on a keyframe at or before the target") {
     SKIP_WITHOUT_FFMPEG();
     REQUIRE(make_clip("h264_aac.mp4", "libx264", "aac"));

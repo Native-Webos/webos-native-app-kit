@@ -1,16 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+//
+// AudioOutputCaps reads what Kodi's xbmc/platform/linux/WebOSTVPlatformConfig.cpp reads (getARCState,
+// tv.model.edidType; Team Kodi, GPL-2.0-or-later).
 #include "wnk/media/device_caps.hpp"
 
 #include "wnk/platform/luna.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cctype>
+
 namespace wnk::media {
 namespace {
 
 constexpr const char *kKeys[] = {"tv.conti.supportHevc",          "tv.hw.panelResolution",     "tv.hw.panelOutputFrameRate",
                                  "tv.model.supportHDR",           "tv.config.supportDolbyHDRContents",
-                                 "tv.config.supportDolbyTVATMOS", "tv.hw.SoCChipType"};
+                                 "tv.config.supportDolbyTVATMOS", "tv.hw.SoCChipType",     "tv.model.edidType"};
 
 std::optional<bool> boolean(const nlohmann::json &c, const char *key) {
     const auto it = c.find(key);
@@ -53,6 +59,12 @@ DeviceMediaCaps DeviceMediaCaps::parse(const std::string &reply) {
         }
     }
     if (const auto it = c.find("tv.hw.SoCChipType"); it != c.end() && it->is_string()) d.soc = it->get<std::string>();
+    if (const auto it = c.find("tv.model.edidType"); it != c.end() && it->is_string()) {
+        d.edid_audio = it->get<std::string>();
+        std::string lower = d.edid_audio;
+        for (char &ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        d.dts = lower.find("dts") != std::string::npos;
+    }
     return d;
 }
 
@@ -70,7 +82,60 @@ std::string DeviceMediaCaps::summary() const {
     if (!measured) return "not measured (" + detail + ")";
     return "hevc " + yes_no(hevc) + ", uhd " + yes_no(uhd_panel) + ", " +
            (panel_hz ? std::to_string(*panel_hz) + " Hz" : std::string("? Hz")) + ", hdr " + yes_no(hdr) + ", dv " +
-           yes_no(dolby_vision) + ", atmos " + yes_no(dolby_atmos) + ", soc " + (soc.empty() ? "?" : soc);
+           yes_no(dolby_vision) + ", atmos " + yes_no(dolby_atmos) + ", dts " + yes_no(dts) + ", soc " +
+           (soc.empty() ? "?" : soc);
+}
+
+bool AudioOutputCaps::takes(const std::string &format) const {
+    return std::find(formats.begin(), formats.end(), format) != formats.end();
+}
+
+AudioOutputCaps AudioOutputCaps::parse(const std::string &reply) {
+    AudioOutputCaps a;
+    const auto j = nlohmann::json::parse(reply, nullptr, false);
+    if (!j.is_object() || j.value("returnValue", false) != true) {
+        a.detail = "not a getARCState reply";
+        return a;
+    }
+    a.measured = true;
+    a.link = j.value("arcActivation", std::string());
+    if (!a.earc()) return a;
+    if (const auto it = j.find("earcCapability"); it != j.end() && it->is_array()) {
+        for (const auto &f : *it) {
+            if (f.is_string()) a.formats.push_back(f.get<std::string>());
+        }
+    }
+    if (const auto it = j.find("earcATMOS"); it != j.end() && it->is_boolean()) a.atmos = it->get<bool>();
+    if (const auto it = j.find("advancedEarcCapability"); it != j.end() && it->is_array()) {
+        for (const auto &e : *it) {
+            if (e.is_object() && e.value("audioCodingType", std::string()) == "PCM") {
+                a.pcm_channels = std::max(a.pcm_channels, e.value("maxChannelNumber", 0));
+            }
+        }
+    }
+    return a;
+}
+
+AudioOutputCaps AudioOutputCaps::detect(int timeout_ms) {
+    const auto r = platform::luna_call_sync("luna://com.webos.service.arccontroller/getARCState", "{}", timeout_ms);
+    if (r.status != platform::LunaStatus::Ok) {
+        AudioOutputCaps a;
+        a.detail = std::string("getARCState: ") + platform::luna_status_name(r.status) + (r.detail.empty() ? "" : " " + r.detail);
+        return a;
+    }
+    return parse(r.payload);
+}
+
+std::string AudioOutputCaps::summary() const {
+    if (!measured) return "not measured (" + detail + ")";
+    if (link.empty()) return "no ARC device";
+    std::string s = link + ":";
+    for (const std::string &f : formats) s += " " + f;
+    if (earc()) {
+        s += std::string(", atmos ") + (!atmos ? "?" : *atmos ? "yes" : "no") + ", pcm " +
+             (pcm_channels > 0 ? std::to_string(pcm_channels) + " ch" : std::string("?"));
+    }
+    return s;
 }
 
 }  // namespace wnk::media

@@ -846,7 +846,7 @@ TEST("device caps: parses a getConfigs reply (OLED65C1PTB, webOS 6.5.3); unknown
     CHECK(d.dolby_vision == true);
     CHECK(d.dolby_atmos == true);
     CHECK_EQ(d.soc, std::string("O20N"));
-    CHECK_EQ(d.summary(), std::string("hevc yes, uhd yes, 120 Hz, hdr yes, dv yes, atmos yes, soc O20N"));
+    CHECK_EQ(d.summary(), std::string("hevc yes, uhd yes, 120 Hz, hdr yes, dv yes, atmos yes, dts ?, soc O20N"));
 
     const DeviceMediaCaps partial = DeviceMediaCaps::parse(
         R"({"configs":{"tv.hw.panelResolution":"FHD","tv.conti.supportHevc":"maybe"},"returnValue":true})");
@@ -999,4 +999,31 @@ TEST("controller: a playback thread stuck past the stop deadline outlives the co
     StuckBackend::release = true;
     std::this_thread::sleep_for(300ms);  // the thread finishes, feeds, sees Stop and ends on its own
     main.drain();                        // nothing posted after destruction reaches a callback
+}
+
+TEST("device caps: tv.model.edidType names DTS only where it says so") {
+    // OLED65C1PTB, webOS 6.5.3, 2026-10-19: "TrueHD" (no DTS in its pipeline).
+    DeviceMediaCaps d = DeviceMediaCaps::parse(R"({"configs":{"tv.model.edidType":"TrueHD"},"returnValue":true})");
+    CHECK_EQ(d.edid_audio, std::string("TrueHD"));
+    CHECK(d.dts == false);
+    d = DeviceMediaCaps::parse(R"({"configs":{"tv.model.edidType":"TrueHD_DTS"},"returnValue":true})");
+    CHECK(d.dts == true);
+    CHECK(!DeviceMediaCaps::parse(R"({"configs":{},"returnValue":true})").dts.has_value());
+}
+
+TEST("audio output: parses getARCState from an eARC soundbar (OLED65C1PTB, 2026-10-19)") {
+    const std::string reply =
+        R"({"returnValue":true,"connectionDepth":"depth_1","earcATMOS":true,"arcProfile":"","advancedEarcCapability":[)"
+        R"({"audioCodingType":"AAC","hexSAD":"350750","maxChannelNumber":6},{"audioCodingType":"DTSHD","hexSAD":"5f7e01","maxChannelNumber":8},)"
+        R"({"audioCodingType":"PCM","hexSAD":"0f7f07","maxChannelNumber":8},{"audioCodingType":"DD+","hexSAD":"570403","maxChannelNumber":8},)"
+        R"({"audioCodingType":"TrueHD","hexSAD":"677e07","maxChannelNumber":8}],"mpeg4AACLC":false,"arcActivation":"eARC",)"
+        R"("earcCapability":["AAC","DTS","PCM","DD","DD+","TrueHD","MAT2PCM"],"audioDeviceType":"sound_mode_sync"})";
+    const AudioOutputCaps a = AudioOutputCaps::parse(reply);
+    CHECK(a.measured && a.earc());
+    CHECK(a.takes("DD+") && a.takes("TrueHD") && !a.takes("AC4"));
+    CHECK(a.atmos == true);
+    CHECK_EQ(a.pcm_channels, 8);
+    CHECK_EQ(a.summary(), std::string("eARC: AAC DTS PCM DD DD+ TrueHD MAT2PCM, atmos yes, pcm 8 ch"));
+    CHECK_EQ(AudioOutputCaps::parse(R"({"returnValue":true,"arcActivation":""})").summary(), std::string("no ARC device"));
+    CHECK(!AudioOutputCaps::parse(R"({"returnValue":false})").measured);
 }

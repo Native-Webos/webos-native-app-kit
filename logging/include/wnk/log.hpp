@@ -38,7 +38,8 @@ struct Record {
 //   "<ms> <LEVEL> [<category>] (<tid>) <message>"
 std::string format_record(const Record &record);
 
-// Mask secrets: query parameters and key/value pairs whose key looks like a credential
+// Mask secrets: every query parameter value of a URL ("scheme://…?k=<redacted>&…"), fragment values,
+// and key/value pairs whose key looks like a credential
 // (token, access_token, api_key, apikey, password, passwd, secret, session, auth, x-plex-token,
 // x-emby-token, authorization), "Authorization: <scheme> <value>" and "Bearer <value>".
 std::string redact(std::string_view text);

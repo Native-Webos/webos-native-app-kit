@@ -14,6 +14,10 @@
 #     [EXTRA_DIRS <dir>...]              copied next to the executable as <basename>/ (e.g. fonts)
 #     [REQUIRED_PERMISSIONS <acg>...]    appinfo.json requiredPermissions (e.g. database.operation)
 #     [BUNDLED_LIBS <so>...]             further libraries for lib/ (e.g. WNK_FFMPEG_RUNTIME_LIBS)
+#     [PRIVATE_RUNTIMES <dir>...]        self-contained runtimes (own loader and C library) copied as
+#                                        <basename>/ and started as separate processes; checked with
+#                                        check-package.py --private-runtime instead of the executable's
+#                                        ARM/libstdc++ rules
 #     [SOURCE_URL <url>]                 where the app's corresponding source is published (named in
 #                                        licenses/SOURCE.txt; default WNK_SOURCE_URL, else the kit's notice)
 # )
@@ -39,7 +43,7 @@ set(WNK_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}/../tools")
 
 function(wnk_add_webos_package)
     cmake_parse_arguments(P "" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE;SOURCE_URL"
-            "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS;BUNDLED_LIBS" ${ARGN})
+            "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS;BUNDLED_LIBS;PRIVATE_RUNTIMES" ${ARGN})
     foreach (req TARGET APPID TITLE VERSION VENDOR ICON LARGE_ICON)
         if (NOT P_${req})
             message(FATAL_ERROR "wnk_add_webos_package: ${req} is required")
@@ -176,6 +180,15 @@ of the same version and options.
     if (P_EXPECTED_NEEDED)
         set(_check_args --expected-needed "${P_EXPECTED_NEEDED}")
     endif ()
+    set(_verify_args)
+    foreach (_d IN LISTS P_PRIVATE_RUNTIMES)
+        get_filename_component(_dname "${_d}" NAME)
+        list(APPEND _verify_args --private-runtime "${_dname}")
+        list(APPEND _cmds COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_d}" "${_stage}/${_dname}")
+        file(GLOB_RECURSE _dfiles CONFIGURE_DEPENDS "${_d}/*")
+        list(APPEND _dir_deps ${_dfiles})
+        list(APPEND _check_args --private-runtime "${_dname}")
+    endforeach ()
 
     add_custom_target(${P_TARGET}-ipk
             ${_cmds}
@@ -190,7 +203,7 @@ of the same version and options.
             VERBATIM)
     add_custom_target(${P_TARGET}-verify
             COMMAND "${WNK_TOOLS_DIR}/verify.sh" "${_ipk}" --min-release "${P_MIN_RELEASE}"
-                --runtime-libs "${WNK_PACKAGE_MODULE_DIR}/sdl-webos-runtime-libs.txt"
+                --runtime-libs "${WNK_PACKAGE_MODULE_DIR}/sdl-webos-runtime-libs.txt" ${_verify_args}
             DEPENDS ${P_TARGET}-ipk
             COMMENT "Checking ${P_APPID} against firmware inventories"
             VERBATIM USES_TERMINAL)

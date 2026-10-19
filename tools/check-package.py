@@ -36,6 +36,17 @@ DENY_BUNDLED = [
     r"libEGL\.so.*", r"libGLES.*", r"libwayland-.*", r"libluna-service2.*", r"libhelpers\.so.*",
     r"libpbnjson.*", r"libPmLog.*", r"libumedia.*", r"libresource_mgr.*", r"libums_.*",
 ]
+# A private runtime (--private-runtime DIR) is a self-contained tree run as a separate process through its
+# own bundled loader, e.g. a JVM/ART with its own C library. It never shares an address space with LG's
+# libraries, so the libstdc++/libgcc/libc/EGL rules above (which exist because a bundled copy would shadow
+# the TV's for LG code) do not apply inside it. LG firmware libraries are still never allowed.
+DENY_IN_PRIVATE_RUNTIME = [
+    r"libNDL_.*", r"libndl-.*", r"libplayerAPIs.*", r"libpf-.*", r"libAcb.*", r"liblgncopenapi.*",
+    r"libGLES.*", r"libwayland-.*", r"libluna-service2.*", r"libhelpers\.so.*", r"libpbnjson.*", r"libPmLog.*",
+    r"libumedia.*", r"libresource_mgr.*", r"libums_.*",
+]
+EM_AARCH64 = 183
+PRIVATE_RUNTIME_MACHINES = {"arm": {wnk_elf.EM_ARM, EM_AARCH64}, "x86_64": {wnk_elf.EM_X86_64}}
 MAINTAINER_RE = re.compile(r"[^<>]+ <[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}>")
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
@@ -60,7 +71,40 @@ def parse_control(text: str) -> dict[str, str]:
     return fields
 
 
-def check_ipk(path: Path, expected_needed: list[str] | None, arch: str) -> list[str]:
+def check_private_runtimes(r: Report, elfs: dict[str, wnk_elf.ElfInfo], app_root: str, runtimes: list[str],
+                           arch: str) -> None:
+    """Self-contained trees: every DT_NEEDED resolves inside the tree, no LG library, nothing outside
+    the tree loads from it (no RPATH/RUNPATH of another ELF names it)."""
+    for rt in runtimes:
+        rt = rt.strip("/")
+        prefix = f"{app_root}{rt}/"
+        inside = {n: i for n, i in elfs.items() if n.startswith(prefix)}
+        if not r.check(bool(inside), f"{rt}/: private runtime contains ELF files"):
+            continue
+        provided = set()
+        for name, info in inside.items():
+            provided.add(posixpath.basename(name))
+            if info.soname:
+                provided.add(info.soname)
+        for name, info in sorted(inside.items()):
+            short = name[len(app_root):]
+            r.check(info.machine in PRIVATE_RUNTIME_MACHINES.get(arch, {info.machine}),
+                    f"{short}: machine {info.machine} allowed in a private runtime for {arch}")
+            missing = [n for n in info.needed if n not in provided]
+            r.check(not missing, f"{short}: every DT_NEEDED is inside {rt}/" + (f" (missing {missing})" if missing else ""))
+            base = {posixpath.basename(name), info.soname or ""}
+            r.check(not any(re.fullmatch(p, b) for p in DENY_IN_PRIVATE_RUNTIME for b in base if b),
+                    f"{short}: not an LG firmware library")
+        for name, info in sorted(elfs.items()):
+            if name.startswith(prefix):
+                continue
+            leaks = [p for p in info.rpath + info.runpath if rt in p.split("/")]
+            r.check(not leaks, f"{name[len(app_root):]}: does not load libraries from {rt}/"
+                    + (f" (rpath {leaks})" if leaks else ""))
+
+
+def check_ipk(path: Path, expected_needed: list[str] | None, arch: str,
+              private_runtimes: list[str] | None = None) -> list[str]:
     r = Report()
     print(f"check-package: {path}")
     members = read_ar(path.read_bytes())
@@ -141,10 +185,16 @@ def check_ipk(path: Path, expected_needed: list[str] | None, arch: str) -> list[
     bundled_dir = app_root + "lib/"
     bundled = {p[len(bundled_dir):]: b for p, b in files.items()
                if p.startswith(bundled_dir) and "/" not in p[len(bundled_dir):]}
+    private_runtimes = private_runtimes or []
+    private_prefixes = tuple(f"{app_root}{rt.strip('/')}/" for rt in private_runtimes)
+    elfs: dict[str, wnk_elf.ElfInfo] = {}
     for name, blob in sorted(files.items()):
         if not wnk_elf.is_elf(blob):
             continue
         info = wnk_elf.parse(blob)
+        elfs[name] = info
+        if private_prefixes and name.startswith(private_prefixes):
+            continue  # checked by check_private_runtimes
         short = name[len(app_root):] if name.startswith(app_root) else name
         if arch == "arm":
             r.check(info.elf_class == 32 and info.little_endian and info.machine == wnk_elf.EM_ARM,
@@ -158,6 +208,7 @@ def check_ipk(path: Path, expected_needed: list[str] | None, arch: str) -> list[
                     f"{short}: allowed to be bundled (not a firmware/runtime library)")
         r.check(not any(lib.startswith("libstdc++") for lib in info.needed),
                 f"{short}: does not need libstdc++.so (link it statically)")
+    check_private_runtimes(r, elfs, app_root, private_runtimes, arch)
 
     # Licences (cmake/WebOSPackage.cmake stages them): a package must say what it is under and where
     # its source is, and carry the licence of everything it bundles.
@@ -190,13 +241,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("ipk", type=Path)
     ap.add_argument("--expected-needed", type=Path, help="file listing the executable's DT_NEEDED, one per line")
     ap.add_argument("--arch", default="arm")
+    ap.add_argument("--private-runtime", action="append", default=[], metavar="DIR",
+                    help="app-relative directory holding a self-contained runtime run as a separate process "
+                         "(see DENY_IN_PRIVATE_RUNTIME); repeatable")
     args = ap.parse_args(argv)
     expected = None
     if args.expected_needed:
         expected = [ln.split("#", 1)[0].strip() for ln in args.expected_needed.read_text().splitlines()
                     if ln.split("#", 1)[0].strip()]
     try:
-        failures = check_ipk(args.ipk, expected, args.arch)
+        failures = check_ipk(args.ipk, expected, args.arch, args.private_runtime)
     except (OSError, ValueError, tarfile.TarError, wnk_elf.ElfError) as exc:
         print(f"check-package: cannot read {args.ipk}: {exc}", file=sys.stderr)
         return 3

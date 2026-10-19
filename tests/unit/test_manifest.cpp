@@ -418,6 +418,138 @@ TEST("sidx: version 0 and 1 boxes give byte ranges and times; hierarchical ones 
     }
 }
 
+TEST("dash: several Periods of a static MPD continue each other; a dynamic MPD keeps the first") {
+    const char *mpd = R"(<MPD type="static" mediaPresentationDuration="PT20S">
+      <Period id="main" duration="PT12S">
+        <AdaptationSet id="v" contentType="video"><SegmentTemplate media="v1-$Number$" duration="4" startNumber="1"/>
+          <Representation id="hi" codecs="avc1.640028" height="1080" bandwidth="5000000"/>
+          <Representation id="lo" codecs="avc1.640028" height="720" bandwidth="2000000"/></AdaptationSet>
+        <AdaptationSet id="a" contentType="audio" lang="en"><SegmentTemplate media="a1-$Number$" duration="4"/>
+          <Representation id="en" codecs="mp4a.40.2" bandwidth="128000"/></AdaptationSet>
+      </Period>
+      <Period id="credits">
+        <AdaptationSet id="x" contentType="video">
+          <SegmentTemplate media="v2-$Number$" duration="4" timescale="1" presentationTimeOffset="100"/>
+          <Representation id="c720" codecs="avc1.640028" height="720" bandwidth="2100000"/>
+          <Representation id="c1080" codecs="avc1.640028" height="1080" bandwidth="4800000"/></AdaptationSet>
+        <AdaptationSet id="a" contentType="audio" lang="en"><SegmentTemplate media="a2-$Number$" duration="4"/>
+          <Representation id="en" codecs="mp4a.40.2" bandwidth="128000"/></AdaptationSet>
+      </Period></MPD>)";
+    Presentation p;
+    std::string err;
+    REQUIRE(parse_mpd(mpd, "https://h/m.mpd", &p, &err));
+    CHECK_EQ(p.duration_us, int64_t{20000000});
+    REQUIRE(p.renditions.size() == 6);
+    auto at = [&](const char *id, int period) {
+        for (size_t i = 0; i < p.renditions.size(); ++i) {
+            if (p.renditions[i].id == id && p.renditions[i].period == period) return static_cast<int>(i);
+        }
+        return -1;
+    };
+    // Ids differ across the video AdaptationSets: the closest bandwidth; the audio keeps its ids.
+    CHECK_EQ(p.renditions[static_cast<size_t>(at("hi", 0))].next_period, at("c1080", 1));
+    CHECK_EQ(p.renditions[static_cast<size_t>(at("lo", 0))].next_period, at("c720", 1));
+    CHECK_EQ(p.renditions[static_cast<size_t>(at("en", 0))].next_period, at("en", 1));
+    CHECK_EQ(p.renditions[static_cast<size_t>(at("c720", 1))].next_period, -1);
+    const Rendition &c = p.renditions[static_cast<size_t>(at("c720", 1))];
+    CHECK_EQ(c.period_start_us, int64_t{12000000});  // the previous Period's start + duration
+    CHECK_EQ(c.period_end_us, int64_t{20000000});    // to the presentation's end
+    REQUIRE(c.segments.size() == 2);
+    CHECK_EQ(c.segments[0].start_us, int64_t{12000000});
+    CHECK_EQ(c.segments[1].url, std::string("https://h/v2-2"));
+    CHECK_EQ(c.time_origin_us, int64_t{100000000 - 12000000});
+    CHECK_EQ(p.renditions[static_cast<size_t>(at("hi", 0))].period_end_us, int64_t{12000000});
+
+    std::string live = mpd;
+    live.replace(live.find("static"), 6, "dynamic");
+    live.replace(live.find(" mediaPresentationDuration=\"PT20S\""), 34, " availabilityStartTime=\"2026-01-01T00:00:00Z\"");
+    REQUIRE(parse_mpd(live, "https://h/m.mpd", &p, &err, 1767225600000000 + 10000000));
+    CHECK_EQ(p.renditions.size(), size_t{3});
+}
+
+TEST("dash: a later Period's audio is matched by language; a type it lacks ends the chain") {
+    const char *mpd = R"(<MPD type="static" mediaPresentationDuration="PT30S">
+      <Period id="1" start="PT0S">
+        <AdaptationSet contentType="video"><SegmentTemplate media="v-$Number$" duration="5"/>
+          <Representation id="v1" codecs="avc1.640028" height="720" bandwidth="2000000"/></AdaptationSet>
+        <AdaptationSet contentType="audio" lang="en"><SegmentTemplate media="en-$Number$" duration="5"/>
+          <Representation id="a1" codecs="mp4a.40.2" bandwidth="128000"/></AdaptationSet>
+        <AdaptationSet contentType="audio" lang="fr"><SegmentTemplate media="fr-$Number$" duration="5"/>
+          <Representation id="a2" codecs="mp4a.40.2" bandwidth="96000"/></AdaptationSet>
+        <AdaptationSet contentType="text" mimeType="text/vtt" lang="en">
+          <Representation id="s1" bandwidth="100"><BaseURL>en.vtt</BaseURL></Representation></AdaptationSet>
+      </Period>
+      <Period id="2" start="PT10S">
+        <AdaptationSet contentType="audio" lang="fr"><SegmentTemplate media="fr2-$Number$" duration="5"/>
+          <Representation id="x" codecs="mp4a.40.2" bandwidth="64000"/></AdaptationSet>
+        <AdaptationSet contentType="audio" lang="en"><SegmentTemplate media="en2-$Number$" duration="5"/>
+          <Representation id="y" codecs="mp4a.40.2" bandwidth="64000"/></AdaptationSet>
+        <AdaptationSet contentType="video"><SegmentTemplate media="v2-$Number$" duration="5"/>
+          <Representation id="z" codecs="hvc1.1.6.L93.B0" height="720" bandwidth="2000000"/></AdaptationSet>
+      </Period></MPD>)";
+    Presentation p;
+    std::string err;
+    REQUIRE(parse_mpd(mpd, "https://h/m.mpd", &p, &err));
+    auto find = [&](const char *id) {
+        for (size_t i = 0; i < p.renditions.size(); ++i) {
+            if (p.renditions[i].id == id) return static_cast<int>(i);
+        }
+        return -1;
+    };
+    auto next = [&](const char *id) { return p.renditions[static_cast<size_t>(find(id))].next_period; };
+    CHECK_EQ(next("a1"), find("y"));  // same language, not the first audio
+    CHECK_EQ(next("a2"), find("x"));
+    CHECK_EQ(next("v1"), -1);  // another codec: no continuation, the video ends with its Period
+    CHECK_EQ(next("s1"), -1);  // no subtitles in the second Period
+    CHECK_EQ(p.renditions[static_cast<size_t>(find("a1"))].period_end_us, int64_t{10000000});  // the next @start
+    CHECK_EQ(p.renditions[static_cast<size_t>(find("y"))].period_end_us, int64_t{30000000});
+}
+
+namespace {
+// An EBML element: ID bytes, a one-byte size (payloads under 127 bytes), the payload.
+std::vector<uint8_t> ebml(std::vector<uint8_t> id, const std::vector<uint8_t> &payload) {
+    id.push_back(static_cast<uint8_t>(0x80 | payload.size()));
+    id.insert(id.end(), payload.begin(), payload.end());
+    return id;
+}
+std::vector<uint8_t> cat(std::initializer_list<std::vector<uint8_t>> parts) {
+    std::vector<uint8_t> out;
+    for (const auto &p : parts) out.insert(out.end(), p.begin(), p.end());
+    return out;
+}
+std::vector<uint8_t> cue(uint8_t time, uint8_t cluster) {
+    return ebml({0xBB}, cat({ebml({0xB3}, {time}), ebml({0xB7}, cat({ebml({0xF7}, {1}), ebml({0xF1}, {cluster})}))}));
+}
+}  // namespace
+
+TEST("webm: Cues give one segment per Cluster, timed by the TimecodeScale") {
+    // EBML header, then a Segment of unknown size whose Info sets 1 ms ticks and a 9 s duration.
+    std::vector<uint8_t> init = cat({ebml({0x1A, 0x45, 0xDF, 0xA3}, {}), {0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}});
+    const size_t segment_data = init.size();
+    // Duration as a 4-byte float: 9000.0f = 0x460CA000.
+    init = cat({init, ebml({0x15, 0x49, 0xA9, 0x66}, cat({ebml({0x2A, 0xD7, 0xB1}, {0x0F, 0x42, 0x40}),
+                                                         ebml({0x44, 0x89}, {0x46, 0x0C, 0xA0, 0x00})}))});
+    // Three Clusters at Segment-relative 100, 50 and 0 (listed out of order), at 60, 30 and 0 ms.
+    const std::vector<uint8_t> cues = ebml({0x1C, 0x53, 0xBB, 0x6B}, cat({cue(60, 100), cue(30, 50), cue(0, 0)}));
+    std::vector<MediaSegment> segs;
+    std::string err;
+    REQUIRE(parse_webm_cues(init.data(), init.size(), 0, cues.data(), cues.size(), 5000, "https://h/v.webm", &segs, &err));
+    REQUIRE(segs.size() == 3);
+    CHECK_EQ(segs[0].range.offset, static_cast<int64_t>(segment_data));
+    CHECK_EQ(segs[0].range.length, int64_t{50});
+    CHECK_EQ(segs[1].range.offset, static_cast<int64_t>(segment_data + 50));
+    CHECK_EQ(segs[2].range.length, static_cast<int64_t>(5000 - (segment_data + 100)));  // up to the Cues
+    CHECK_EQ(segs[0].start_us, int64_t{0});
+    CHECK_EQ(segs[1].start_us, int64_t{30000});  // 30 ticks of 1 ms
+    CHECK_EQ(segs[2].duration_us, int64_t{9000000 - 60000});
+    CHECK_EQ(segs[1].url, std::string("https://h/v.webm"));
+    // Cues before the Clusters: the last one runs to the end of the file.
+    REQUIRE(parse_webm_cues(init.data(), init.size(), 0, cues.data(), cues.size(), 10, "u", &segs, &err));
+    CHECK_EQ(segs[2].range.length, int64_t{-1});
+    CHECK(!parse_webm_cues(init.data(), 4, 0, cues.data(), cues.size(), 0, "u", &segs, &err));    // no Segment
+    CHECK(!parse_webm_cues(init.data(), init.size(), 0, init.data(), init.size(), 0, "u", &segs, &err));  // no Cues
+}
+
 // ---- live ----------------------------------------------------------------------------------------
 
 TEST("ISO 8601 date-times: UTC, fractions, zones") {

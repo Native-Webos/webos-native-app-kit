@@ -678,8 +678,15 @@ HLS `EXT-X-KEY` needs nothing from the app: METHOD=AES-128 segments (MPEG-TS or 
 they download, with the key from its URI (sent with `headers` and `license_headers`) and rotating
 keys followed per segment; SAMPLE-AES / SAMPLE-AES-CTR in fMP4 go through the CENC path with the
 URI's key. SAMPLE-AES in MPEG-TS and FairPlay (`skd://`) are refused with the reason. TTML (`stpp`) is
-listed and not decoded. WebM renditions are left out. Audio bitrate switching is not implemented;
-video bitrate switching is (`adaptive_bitrate`, default on).
+listed and not decoded. Audio bitrate switching is not implemented; video bitrate switching is
+(`adaptive_bitrate`, default on).
+
+A static MPD may have several Periods (chapters, inserted clips). Each rendition continues into the
+matching one of the next Period (same AdaptationSet and Representation ids, else same type, language
+and codec at the closest bandwidth); the source opens it at the Period's end and clips packets to each
+Period, and seeks land in the Period holding the target. Tracks, subtitles and bitrate choice come from
+the first Period; a rendition with no match in the next Period ends there. A live (dynamic) MPD plays
+its first Period. WebM renditions (VP9, Opus) play too, indexed by the file's Cues.
 
 Subtitles the FFmpeg source can decode (SubRip, ASS/SSA, WebVTT, MP4 timed text, PGS, DVD, DVB)
 become cues. ASS styling is stripped to plain text. Manifest subtitles: HLS WebVTT, DASH
@@ -799,7 +806,7 @@ Say these are missing. Do not emulate them with a fake.
 | No second window, no overlay window | One SDL window, one GLES context. |
 | No durable filesystem on Developer Mode webOS | Persist with DB8. |
 | `keymanager3` absent on webOS 6.5.3 | Secrets are plain envelopes there unless `protection()` says otherwise. |
-| TTML subtitles, external subtitle files, ASS styling, WebM adaptive renditions, audio-only bitrate switching | Not implemented. |
+| TTML subtitles, external subtitle files, ASS styling, audio-only bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
 | Home and Exit as background/close paths | Not fully measured. The shell already handles `SDL_QUIT` and background events. |
 | Jellyfin/Plex/Emby clients | Not in the tree. A client would be an app on top of HTTP + this UI + this player, not a change to `media/`. |
 

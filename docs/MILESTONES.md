@@ -316,6 +316,8 @@ subtitles (HLS WebVTT, DASH text/vtt and wvtt); 0.12 plays live DASH and HLS (TV
 Streaming). Live subtitles
 follow their lists (0.13). Open: audio bitrate switching, TTML subtitles,
 live, subtitles from manifests, WebM renditions, DRM (refused).
+Several Periods in a static MPD play in sequence and WebM DASH (VP9, Opus, Cues index) plays
+(2026-10-20, host tests; public multi-Period and WebM streams on the host).
 
 Configuration: `DeviceMediaCaps` reads HEVC, panel, HDR, Dolby Vision and Atmos support from
 com.webos.service.config (the decoder table is not visible in the Developer Mode jail).

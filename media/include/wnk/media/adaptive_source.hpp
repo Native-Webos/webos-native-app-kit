@@ -43,8 +43,12 @@
 //             new segments as it grows (HLS: the loader reloads the subtitle playlists; DASH: the
 //             refresher merges the subtitle renditions with the MPD).
 //
-// Not yet: audio bitrate switching, TTML subtitles,
-// encrypted renditions (refused), WebM renditions (left out), more than the first DASH Period.
+// Several Periods (static DASH): each lane plays its rendition's continuation (Rendition::next_period)
+// when a Period ends, and a seek starts in the Period holding the target. Bitrate switching and
+// subtitles follow the first Period's renditions only.
+// WebM renditions (VP9, Opus) play like fMP4 ones; with SegmentBase their Cues are the index.
+// Not yet: audio bitrate switching, TTML subtitles, encrypted renditions without ClearKey keys
+// (refused), hierarchical sidx indexes.
 #pragma once
 
 #include "wnk/media/clearkey.hpp"

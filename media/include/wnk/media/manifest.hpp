@@ -10,8 +10,10 @@
 //                           r = -1); SegmentList; SegmentBase with an indexRange, whose segments come
 //                           from parse_sidx(); a lone BaseURL as one segment. BaseURLs nest
 //                           MPD → Period → AdaptationSet → Representation; SegmentTemplate and
-//                           SegmentBase attributes are inherited the same way. Only the first Period
-//                           is read. ContentProtection marks a rendition encrypted.
+//                           SegmentBase attributes are inherited the same way. Every Period of a
+//                           static MPD is read, later ones as continuations (Rendition::next_period);
+//                           a dynamic MPD's first Period only. ContentProtection marks a rendition
+//                           encrypted.
 //   HLS (RFC 8216)          master playlists (EXT-X-STREAM-INF variants, EXT-X-MEDIA audio and
 //                           subtitle renditions) and media playlists (EXTINF, EXT-X-BYTERANGE,
 //                           EXT-X-MAP, EXT-X-DISCONTINUITY); EXT-X-KEY other than NONE marks the
@@ -90,6 +92,16 @@ struct Rendition {
     std::string dolby_vision;  // the DV codec string ("dvhe.08.06") when the rendition is Dolby Vision
     bool atmos = false;        // E-AC-3 with Joint Object Coding
 
+    // DASH with several Periods (static MPDs): renditions of later Periods continue one of the
+    // previous Period (same AdaptationSet and Representation id, else same type and language at the
+    // closest bandwidth). Only Period 0 renditions are offered as tracks; `next_period` is the index
+    // in Presentation::renditions of the one that plays after this one ends, -1 if none.
+    int period = 0;
+    int next_period = -1;
+    // The Period's presentation interval; segments may reach past it (ExoPlayer clips them too).
+    int64_t period_start_us = 0;
+    int64_t period_end_us = kNoTime;
+
     std::optional<MediaSegment> init;  // initialisation segment (fMP4), if any
     std::vector<MediaSegment> segments;
     // DASH SegmentBase: the segments are described by the sidx box at `index` of `index_url`.
@@ -150,5 +162,12 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
 // Hierarchical indexes (references to other sidx boxes) are refused.
 bool parse_sidx(const uint8_t *data, size_t size, int64_t box_offset, const std::string &url,
                 std::vector<MediaSegment> *out, std::string *error);
+
+// Segments of a WebM file from its Cues (DASH SegmentBase for video/webm and audio/webm): `init` is
+// the Initialization range (EBML header, Segment header and Info: where the Segment's data begins and
+// its TimecodeScale), `cues` the indexRange holding the Cues element. Each segment is one Cluster that
+// a cue points to, up to the next one (the last to the end of the file).
+bool parse_webm_cues(const uint8_t *init, size_t init_size, int64_t init_offset, const uint8_t *cues, size_t cues_size,
+                     int64_t cues_offset, const std::string &url, std::vector<MediaSegment> *out, std::string *error);
 
 }  // namespace wnk::media

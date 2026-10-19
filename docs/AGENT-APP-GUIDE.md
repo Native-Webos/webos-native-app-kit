@@ -159,6 +159,12 @@ Rules for the package arguments:
 - `REQUIRED_PERMISSIONS` is the ACG list written into `appinfo.json`. Add `database.operation` when
   `AppConfig::storage` is true. Add `securitykey.operation` as well when using `SecretStore`.
 - `BUNDLED_LIBS ${WNK_FFMPEG_RUNTIME_LIBS}` when linking `wnk_media_ffmpeg`.
+- `PRIVATE_RUNTIMES <dir>...` packages a self-contained program tree that the app starts as a
+  separate process (for example a language runtime with its own loader and C library), copied as
+  `<basename>/`. `check-package.py --private-runtime <basename>` then checks it as a unit instead of
+  with the executable's rules: ARM or AArch64 machine, every `DT_NEEDED` resolved inside the tree, no
+  LG firmware library in it, and no ELF outside it loading from it. Pass the same option to
+  `tools/verify.sh` and `tools/install.sh`. Never load such a tree into the app's own process.
 - If the executable's `DT_NEEDED` changes, update `expected-needed.txt` in the same change. A new
   line is a review: the SONAME must exist on every targeted firmware, or the library must be
   bundled under `lib/`. Start from the tvui list; the player list is the media superset.

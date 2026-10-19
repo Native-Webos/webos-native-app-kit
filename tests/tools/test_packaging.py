@@ -159,6 +159,122 @@ class CheckPackageTests(unittest.TestCase):
         self.assertTrue(any("RPATH" in f for f in failures))
 
 
+class PrivateRuntimeTests(unittest.TestCase):
+    """--private-runtime: a self-contained tree (own loader and libc) passes; leaks and gaps fail."""
+
+    LIBC = Path("/lib/x86_64-linux-gnu/libc.so.6")
+    LOADER = Path("/lib64/ld-linux-x86-64.so.2")
+
+    def setUp(self):
+        if not (self.LIBC.exists() and self.LOADER.exists() and Path("/usr/bin/true").exists()):
+            self.skipTest("needs a Debian/Ubuntu x86_64 host layout")
+        self.tmp = Path(tempfile.mkdtemp(prefix="wnk-prt-"))
+        self.stage = make_stage(self.tmp)
+        rt = self.stage / "runtime"
+        (rt / "bin").mkdir(parents=True)
+        (rt / "lib").mkdir()
+        shutil.copyfile("/usr/bin/true", rt / "bin" / "true")
+        (rt / "bin" / "true").chmod(0o755)
+        shutil.copyfile(os.path.realpath(self.LIBC), rt / "lib" / "libc.so.6")
+        shutil.copyfile(os.path.realpath(self.LOADER), rt / "lib" / "ld-linux-x86-64.so.2")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def check(self, runtimes=("runtime",)):
+        ipk = build(self.stage, self.tmp / "out")
+        needed = wnk_elf.parse(HOST_ELF.read_bytes()).needed
+        with redirect_stdout(io.StringIO()) as out:
+            failures = check_package.check_ipk(ipk, needed, "x86_64", list(runtimes))
+        return failures, out.getvalue()
+
+    def test_self_contained_runtime_passes(self):
+        failures, out = self.check()
+        self.assertEqual(failures, [], out)
+
+    def test_missing_dependency_fails(self):
+        (self.stage / "runtime" / "lib" / "ld-linux-x86-64.so.2").unlink()
+        failures, _ = self.check()
+        self.assertTrue(any("every DT_NEEDED is inside runtime/" in f for f in failures), failures)
+
+    def test_lg_library_fails(self):
+        shutil.copyfile(os.path.realpath(self.LIBC), self.stage / "runtime" / "lib" / "libluna-service2.so.3")
+        failures, _ = self.check()
+        self.assertTrue(any("not an LG firmware library" in f for f in failures), failures)
+
+    def test_empty_runtime_fails(self):
+        shutil.rmtree(self.stage / "runtime")
+        (self.stage / "runtime").mkdir()
+        (self.stage / "runtime" / "README").write_text("x")
+        failures, _ = self.check()
+        self.assertTrue(any("contains ELF files" in f for f in failures), failures)
+
+    def test_a_runtime_may_bring_its_own_libstdcxx(self):
+        # Outside a private runtime nothing may need libstdc++.so (the TV's copy is not the app's).
+        libdir = self.LIBC.parent
+        base = {"libstdc++.so.6", "libm.so.6", "libgcc_s.so.1", "libc.so.6", "ld-linux-x86-64.so.2"}
+        user = None
+        for cand in sorted(libdir.glob("lib*.so.*"), key=lambda p: p.stat().st_size if p.is_file() else 1 << 40):
+            if not cand.is_file() or cand.stat().st_size > 400_000:
+                continue
+            try:
+                needed = wnk_elf.parse(cand.read_bytes()).needed
+            except wnk_elf.ElfError:
+                continue
+            if "libstdc++.so.6" in needed and set(needed) <= base:
+                user = cand
+                break
+        if user is None:
+            self.skipTest("no small host library that needs only libstdc++ and the C runtime")
+        lib = self.stage / "runtime" / "lib"
+        for name in sorted(base - {"libc.so.6", "ld-linux-x86-64.so.2"}):
+            shutil.copyfile(os.path.realpath(libdir / name), lib / name)
+        shutil.copyfile(user, lib / user.name)
+        failures, out = self.check()
+        self.assertEqual(failures, [], out)
+        failures, _ = self.check(runtimes=())
+        self.assertTrue(any("does not need libstdc++" in f for f in failures), failures)
+
+
+class PrivateRuntimeRuleTests(unittest.TestCase):
+    """check_private_runtimes on parsed ELF descriptions: machine, RPATH leaks, SONAME resolution."""
+
+    ROOT = "usr/palm/applications/org.example.demo/"
+
+    @staticmethod
+    def elf(machine=wnk_elf.EM_ARM, needed=(), soname=None, rpath=(), runpath=()):
+        return wnk_elf.ElfInfo(elf_class=32, little_endian=True, machine=machine, elf_type=3,
+                               needed=list(needed), soname=soname, rpath=list(rpath), runpath=list(runpath))
+
+    def run_rules(self, elfs, arch="arm"):
+        r = check_package.Report()
+        with redirect_stdout(io.StringIO()):
+            check_package.check_private_runtimes(r, {self.ROOT + k: v for k, v in elfs.items()}, self.ROOT,
+                                                 ["rt"], arch)
+        return r.failures
+
+    def test_aarch64_tree_in_an_arm_package_passes(self):
+        elfs = {"rt/bin/java": self.elf(183, ["libc.musl-aarch64.so.1", "libart.so"]),
+                "rt/lib/ld-musl-aarch64.so.1": self.elf(183, soname="libc.musl-aarch64.so.1"),
+                "rt/lib/libart.so": self.elf(183, ["libc.musl-aarch64.so.1"]),
+                "demo": self.elf()}
+        self.assertEqual(self.run_rules(elfs), [])
+
+    def test_wrong_machine_fails(self):
+        elfs = {"rt/bin/java": self.elf(wnk_elf.EM_X86_64)}
+        self.assertTrue(any("machine" in f for f in self.run_rules(elfs)))
+        self.assertEqual(self.run_rules(elfs, arch="x86_64"), [])
+
+    def test_an_elf_outside_loading_from_the_tree_fails(self):
+        for key in ("rpath", "runpath"):
+            elfs = {"rt/lib/libz.so.1": self.elf(soname="libz.so.1"),
+                    "demo": self.elf(needed=["libz.so.1"], **{key: ["$ORIGIN/rt/lib"]})}
+            self.assertTrue(any("does not load libraries from rt/" in f for f in self.run_rules(elfs)), key)
+        elfs = {"rt/lib/libz.so.1": self.elf(soname="libz.so.1"),
+                "demo": self.elf(rpath=["$ORIGIN/runtime-other/lib"])}  # a component named differently
+        self.assertEqual(self.run_rules(elfs), [])
+
+
 class FwCheckTests(unittest.TestCase):
     """fw-check against a synthetic inventory in the real format: symbols are "name@VERSION" and a
     library's version definitions appear as "VER@VER" entries."""

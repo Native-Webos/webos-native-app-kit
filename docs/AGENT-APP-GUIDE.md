@@ -120,6 +120,19 @@ app links FFmpeg.
 `appinfo.json` is generated. Do not write one by hand. Id, version, and title live only in
 `wnk_add_webos_package()`.
 
+An app kept in its own repository, with the kit as a submodule or a separate checkout, needs no
+`add_subdirectory` line in the kit. List its absolute directory in `WNK_EXTRA_APP_DIRS`
+(`;`-separated; the environment variable is read on the first configure) and the kit's own
+`tools/test.sh`, `tools/build-webos.sh` and packaging build it, with its binary directory at
+`build/<preset>/extra-apps/<basename>`:
+
+```sh
+WNK_EXTRA_APP_DIRS=$HOME/src/myapp/app tools/test.sh
+```
+
+The value is cached: after changing it, set `-DWNK_EXTRA_APP_DIRS=...` or remove
+`build/<preset>/CMakeCache.txt`.
+
 ### 2. CMake
 
 UI app:

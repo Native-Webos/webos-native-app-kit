@@ -78,3 +78,13 @@ if (WNK_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif ()
+
+# Applications kept outside this tree (cmake/ExtraApps.cmake): a ;-separated list of absolute
+# directories, each with its own CMakeLists.txt calling wnk_add_webos_package(). Read from the
+# environment on first configure so tools/test.sh and tools/build-webos.sh need no extra arguments.
+set(WNK_EXTRA_APP_DIRS "$ENV{WNK_EXTRA_APP_DIRS}" CACHE STRING "Out-of-tree application directories")
+if (WNK_EXTRA_APP_DIRS)
+    include(WebOSPackage)
+    include(ExtraApps)
+    wnk_add_extra_app_dirs(${WNK_EXTRA_APP_DIRS})
+endif ()

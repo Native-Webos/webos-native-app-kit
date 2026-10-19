@@ -43,6 +43,9 @@ const CurlApi &api() {
         sym(c.easy_perform, "curl_easy_perform");
         sym(c.easy_send, "curl_easy_send");
         sym(c.easy_recv, "curl_easy_recv");
+        c.share_init = reinterpret_cast<decltype(c.share_init)>(dlsym(lib, "curl_share_init"));
+        c.share_setopt = reinterpret_cast<decltype(c.share_setopt)>(dlsym(lib, "curl_share_setopt"));
+        c.share_cleanup = reinterpret_cast<decltype(c.share_cleanup)>(dlsym(lib, "curl_share_cleanup"));
         if (!ok) {
             c.easy_init = nullptr;
             return c;

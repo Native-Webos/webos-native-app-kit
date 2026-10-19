@@ -347,9 +347,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if url.path == "/cookie/set":
+            # The cookie arrives on a redirect, as login and token pages often set it.
+            self.send_response(302)
+            self.send_header("Set-Cookie", "session=abc123; Path=/")
+            self.send_header("Location", "/cookie/check")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if url.path == "/cookie/check":
+            ok = "session=abc123" in (self.headers.get("Cookie") or "")
+            return self._send(200 if ok else 403, b"cookie ok" if ok else b"no cookie")
+        if url.path.startswith("/guard/") and FILES_DIR["path"]:
+            # A stream behind its site's headers: Referer and Origin on every request, and the cookie
+            # the playlist response sets on every segment.
+            name = urllib.parse.unquote(url.path[len("/guard/"):])
+            path = os.path.join(FILES_DIR["path"], name)
+            if "/" in name or name.startswith(".") or not os.path.isfile(path):
+                return self._send(404, b"not found")
+            if (self.headers.get("Referer") != "https://site.example/" or
+                    self.headers.get("Origin") != "https://site.example"):
+                return self._send(403, b"wrong referer or origin")
+            playlist = name.endswith(".m3u8")
+            if not playlist and "gate=open" not in (self.headers.get("Cookie") or ""):
+                return self._send(403, b"no cookie")
+            with open(path, "rb") as f:
+                data = f.read()
+            extra = {"Set-Cookie": "gate=open; Path=/guard"} if playlist else {}
+            return self._send(200, data, extra)
         if url.path == "/echo":
             info = {"method": self.command, "body": body.decode("utf-8", "replace"),
-                    "x_test": self.headers.get("X-Test", ""), "expect": self.headers.get("Expect", "")}
+                    "x_test": self.headers.get("X-Test", ""), "expect": self.headers.get("Expect", ""),
+                    "cookie": "; ".join(self.headers.get_all("Cookie") or [])}
             return self._send(200, json.dumps(info).encode(), {"Content-Type": "application/json"})
         if url.path == "/clearkey" or url.path.startswith("/clearkey/"):
             return self._clearkey(url.path[len("/clearkey/"):] if url.path != "/clearkey" else "", body)

@@ -105,6 +105,11 @@ class HttpTransport {
 struct CurlOptions {
     std::string ca_bundle;   // extra CA file (PEM) used instead of the system store when set
     std::string user_agent = "wnk/0.1";
+    // Keep the cookies servers set (Set-Cookie, also on redirects) in memory and send them back on
+    // later requests of this transport, as a browser or ExoPlayer's Cronet source does: streaming
+    // servers that set a cookie on the playlist and check it on segments and keys. Never logged, never
+    // written to disk; gone with the transport. A request's own Cookie header is sent as well.
+    bool cookies = false;
 };
 
 // nullptr with *error set if libcurl.so.4 cannot be loaded.

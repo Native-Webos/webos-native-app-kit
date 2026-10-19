@@ -34,6 +34,10 @@ struct CurlApi {
     CURLcode (*easy_perform)(CURL *) = nullptr;
     CURLcode (*easy_send)(CURL *, const void *, size_t, size_t *) = nullptr;
     CURLcode (*easy_recv)(CURL *, void *, size_t, size_t *) = nullptr;
+    // Optional (cookie sharing, 7.10): null when missing; CurlOptions::cookies is then ignored.
+    CURLSH *(*share_init)() = nullptr;
+    CURLSHcode (*share_setopt)(CURLSH *, CURLSHoption, ...) = nullptr;
+    CURLSHcode (*share_cleanup)(CURLSH *) = nullptr;
     std::string error;
     std::string version;
 };

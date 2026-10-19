@@ -468,6 +468,12 @@ connect/timeout). TLS verification is always on. Only `http` and `https`. Bodies
 `HttpTransport::perform` blocks. Call it on a worker, or use `HttpClient`. For a large media body
 use `HttpStream` / `FfmpegSource`, not `perform`.
 
+Requests are independent: `ctx.http()` keeps no cookies. A stream whose server sets a cookie on the
+playlist and checks it on segments and keys needs its own transport made with
+`net::CurlOptions::cookies = true` (`net::make_curl_transport`), passed as the source's `http`. That
+transport keeps the cookies servers set, also on redirects, in memory and sends them back on its later
+requests; a request's own `Cookie` header is sent as well. Nothing is written to disk.
+
 ### Key/value store
 
 `ctx.store()` is `Db8Store` on webOS and a file store on the host. Same contract

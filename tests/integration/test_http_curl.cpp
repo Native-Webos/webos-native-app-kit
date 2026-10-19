@@ -8,10 +8,12 @@
 #include "wnk/net/http.hpp"
 #include "wnk/net/http_stream.hpp"
 
+#include <atomic>
 #include <cstdlib>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace wnk;
 using namespace wnk::net;
@@ -123,6 +125,75 @@ TEST("redirects are followed unless disabled") {
     HttpRequest no = get(kHttp + "/redirect");
     no.max_redirects = 0;
     CHECK_EQ(t->perform(no, {}).status, 302L);
+}
+
+TEST("cookies: kept across requests (also when set on a redirect) only when the transport asks") {
+    NEED_SERVER();
+    CurlOptions o;
+    o.cookies = true;
+    auto jar = make_curl_transport(o);
+    REQUIRE(jar);
+    HttpResponse r = jar->perform(get(kHttp + "/cookie/set"), {});
+    CHECK_EQ(r.status, 200L);  // the redirect's own Set-Cookie is sent to its target
+    CHECK_EQ(r.body, std::string("cookie ok"));
+    CHECK_EQ(jar->perform(get(kHttp + "/cookie/check"), {}).status, 200L);  // and to later requests
+    auto plain = transport();
+    REQUIRE(plain);
+    CHECK_EQ(plain->perform(get(kHttp + "/cookie/set"), {}).status, 403L);
+    CHECK_EQ(plain->perform(get(kHttp + "/cookie/check"), {}).status, 403L);
+    HttpRequest own = get(kHttp + "/cookie/check");
+    own.headers.emplace_back("Cookie", "session=abc123");  // a request's own Cookie header still works
+    CHECK_EQ(plain->perform(own, {}).status, 200L);
+    auto fresh = make_curl_transport(o);  // each transport has its own cookies
+    CHECK_EQ(fresh->perform(get(kHttp + "/cookie/check"), {}).status, 403L);
+}
+
+TEST("cookies: a request's own Cookie header is sent with the kept ones; streams use them too") {
+    NEED_SERVER();
+    CurlOptions o;
+    o.cookies = true;
+    auto jar = make_curl_transport(o);
+    REQUIRE(jar);
+    CHECK_EQ(jar->perform(get(kHttp + "/cookie/set"), {}).status, 200L);
+    HttpRequest own = get(kHttp + "/echo");
+    own.headers.emplace_back("Cookie", "extra=1");
+    const std::string echoed = jar->perform(own, {}).body;
+    CHECK(echoed.find("extra=1") != std::string::npos);
+    CHECK(echoed.find("session=abc123") != std::string::npos);
+    long status = 0;
+    std::string body;
+    HttpStreamSink sink;
+    sink.on_response = [&](long st, const Headers &) {
+        status = st;
+        return true;
+    };
+    sink.on_data = [&](const uint8_t *d, size_t n) {
+        body.append(reinterpret_cast<const char *>(d), n);
+        return true;
+    };
+    CHECK(jar->stream(get(kHttp + "/cookie/check"), {}, sink).error == NetError::None);
+    CHECK_EQ(status, 200L);
+    CHECK_EQ(body, std::string("cookie ok"));
+}
+
+TEST("cookies: one transport shared by threads keeps one cookie store") {
+    NEED_SERVER();
+    CurlOptions o;
+    o.cookies = true;
+    std::shared_ptr<HttpTransport> jar = make_curl_transport(o);
+    REQUIRE(jar);
+    std::atomic<int> ok{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 6; i++) {
+        threads.emplace_back([&] {
+            for (int k = 0; k < 10; k++) {
+                if (jar->perform(get(kHttp + "/cookie/set"), {}).status == 200) ++ok;
+                if (jar->perform(get(kHttp + "/cookie/check"), {}).status == 200) ++ok;
+            }
+        });
+    }
+    for (std::thread &t : threads) t.join();
+    CHECK_EQ(ok.load(), 120);
 }
 
 TEST("POST, PUT and custom headers reach the server; no Expect header") {

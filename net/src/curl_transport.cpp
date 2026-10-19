@@ -109,11 +109,34 @@ NetError map_error(CURLcode code, bool too_large, bool cancelled) {
 }
 
 class CurlTransport final : public HttpTransport {
+    // libcurl's share interface: one lock per data kind it shares (only cookies here).
+    static void lock(CURL *, curl_lock_data data, curl_lock_access, void *user) {
+        static_cast<CurlTransport *>(user)->share_locks_[static_cast<size_t>(data) % kLocks].lock();
+    }
+    static void unlock(CURL *, curl_lock_data data, void *user) {
+        static_cast<CurlTransport *>(user)->share_locks_[static_cast<size_t>(data) % kLocks].unlock();
+    }
+    static constexpr size_t kLocks = 8;
+    CURLSH *share_ = nullptr;
+    std::mutex share_locks_[kLocks];
+
  public:
-    explicit CurlTransport(CurlOptions options) : options_(std::move(options)) {}
+    explicit CurlTransport(CurlOptions options) : options_(std::move(options)) {
+        const CurlApi &c = api();
+        if (options_.cookies && c.share_init != nullptr && c.share_setopt != nullptr) {
+            share_ = c.share_init();
+            if (share_ != nullptr) {
+                c.share_setopt(share_, CURLSHOPT_LOCKFUNC, &CurlTransport::lock);
+                c.share_setopt(share_, CURLSHOPT_UNLOCKFUNC, &CurlTransport::unlock);
+                c.share_setopt(share_, CURLSHOPT_USERDATA, this);
+                c.share_setopt(share_, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
+            }
+        }
+    }
 
     ~CurlTransport() override {
         for (CURLM *m : idle_) api().multi_cleanup(m);
+        if (share_ != nullptr && api().share_cleanup != nullptr) api().share_cleanup(share_);
     }
 
     std::string describe() const override { return api().version; }
@@ -188,6 +211,10 @@ class CurlTransport final : public HttpTransport {
         c.easy_setopt(h, CURLOPT_HEADERFUNCTION, &on_header);
         c.easy_setopt(h, CURLOPT_HEADERDATA, &t);
         c.easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+        if (share_ != nullptr) {
+            c.easy_setopt(h, CURLOPT_SHARE, share_);
+            c.easy_setopt(h, CURLOPT_COOKIEFILE, "");  // the cookie engine on, nothing read from disk
+        }
         if (req.method == "GET") {
             c.easy_setopt(h, CURLOPT_HTTPGET, 1L);
         } else if (req.method == "HEAD") {

@@ -592,6 +592,34 @@ TEST("adaptive source live: dynamic DASH segments become available by the clock;
     CHECK(run.seconds > 4.0);
 }
 
+TEST("adaptive source: HLS behind Referer, Origin and a cookie the playlist sets") {
+    SKIP_UNLESS_READY();
+    // ts.m3u8 at /guard/: every request needs the site's Referer and Origin, every segment the
+    // cookie set with the playlist (as ExoPlayer's Cronet source keeps it).
+    auto run = [](bool cookies, bool headers, std::string *err) {
+        net::CurlOptions co;
+        co.cookies = cookies;
+        AdaptiveSourceOptions o = options();
+        o.http = std::shared_ptr<net::HttpTransport>(net::make_curl_transport(co));
+        if (headers) o.headers = {{"Referer", "https://site.example/"}, {"Origin", "https://site.example"}};
+        AdaptiveSource s(o);
+        if (!s.open(env("WNK_TEST_HTTP_BASE") + "/guard/ts.m3u8", err)) return size_t{0};
+        StreamFormat f;
+        if (!s.select(0, s.info().best(TrackType::Audio) ? s.info().best(TrackType::Audio)->index : -1, starfish_like(),
+                      &f, err)) {
+            return size_t{0};
+        }
+        return drain(s).video.size();
+    };
+    std::string err;
+    CHECK_EQ(run(true, true, &err), size_t{250});
+    CHECK_EQ(run(false, true, &err), size_t{0});  // the segments are refused without the cookie
+    CHECK(err.find("403") != std::string::npos);
+    err.clear();
+    CHECK_EQ(run(true, false, &err), size_t{0});  // and the playlist without the headers
+    CHECK(err.find("403") != std::string::npos);
+}
+
 TEST("throughput estimate: needs 128 KiB, ignores small transfers, falls fast and rises slowly") {
     ThroughputEstimator e;
     CHECK_EQ(e.estimate_bps(), int64_t{0});

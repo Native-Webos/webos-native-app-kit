@@ -329,7 +329,8 @@ std::vector<std::string> Label::wrap(const render::Renderer &r, const render::Te
             scan = word_end;
             while (scan < para_end && text[scan] == ' ') ++scan;
         }
-        if (end == pos) {
+        const bool broken = end == pos;
+        if (broken) {
             // A single word wider than the line: break it at a code point boundary.
             size_t cut = next_boundary(text, pos);
             while (cut < para_end && fits(text.substr(pos, next_boundary(text, cut) - pos))) cut = next_boundary(text, cut);
@@ -339,7 +340,16 @@ std::vector<std::string> Label::wrap(const render::Renderer &r, const render::Te
         const bool more = end < para_end || (para_end < n && text.find_first_not_of(" \n", para_end) != std::string::npos);
         if (last && more) {
             // Whatever remains of this paragraph goes on the last line, shortened with an ellipsis.
-            out.push_back(ellipsize(text.substr(pos, para_end - pos)));
+            // Nothing past the next word can fit (end is the longest run of whole words that does),
+            // so shorten from there: the rest of a long paragraph would be measured once per code point.
+            size_t cut = end;
+            if (broken) {
+                cut = std::min(next_boundary(text, end), para_end);
+            } else {
+                while (cut < para_end && text[cut] == ' ') ++cut;
+                cut = std::min(text.find(' ', cut), para_end);
+            }
+            out.push_back(ellipsize(text.substr(pos, cut - pos)));
             break;
         }
         out.push_back(trim_right(text.substr(pos, end - pos)));

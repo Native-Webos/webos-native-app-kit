@@ -468,14 +468,21 @@ class HomeScreen : public Screen {
 net::HttpClient client(ctx.http(), ctx.pool(), ctx.dispatcher());
 net::HttpRequest req;
 req.url = "https://example.test/catalogue.json";
-client.send(req, {}, life_.weak(), [this](net::HttpResponse res) {
+const bool queued = client.send(req, {}, life_.weak(), [this](net::HttpResponse res) {
     if (!res.ok()) {
         WNK_LOGW(kCat, "catalogue %s", res.detail.c_str());
         return;
     }
     // parse and rebuild the collection here; this callback is on the main thread
 });
+if (!queued) show_error_state();  // refused: the callback will not run
 ```
+
+`send` returns false, without calling the callback, when it refuses the request: an invalid one (a URL
+that is not `http`/`https`, has no host or contains whitespace; a bad method or header) or a pool that
+is shutting down; the reason is logged. The result is `[[nodiscard]]`: handle false where you would
+handle a failed response, or the screen waits for an answer that never comes. URLs taken from data (a
+feed, a third-party list) may need percent-encoding first; the client does not rewrite them.
 
 If `ctx.http()` is null, log `Unsupported` and show an error state. Do not fall back to a
 hand-rolled socket.
@@ -558,7 +565,9 @@ session_->restore([this](auth::SessionState s) { s == auth::SessionState::Signed
 // After the app's own login request succeeded:
 session_->sign_in(creds, /*remember=*/true);
 // Every request that needs the user:
-session_->send(*http_, req, cancel_.token(), life_.weak(), [this](net::HttpResponse r) { ... });
+if (!session_->send(*http_, req, cancel_.token(), life_.weak(), [this](net::HttpResponse r) { ... })) {
+    // signed out, or the client refused the request: the callback will not run
+}
 ```
 
 - `send` adds the credentials, refreshes a token that expires within a minute first, and on a 401

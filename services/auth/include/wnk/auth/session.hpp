@@ -112,8 +112,8 @@ class Session {
 
     // Sends `req` with the credentials, as HttpClient::send does (on_done on the main thread unless
     // `owner` died or `token` was cancelled). Returns false, without calling on_done, when signed out
-    // or the client refused the request.
-    bool send(net::HttpClient &http, net::HttpRequest req, async::CancellationToken token, async::Lifetime::Weak owner,
+    // or the client refused the request; the result must be checked, as for HttpClient::send.
+    [[nodiscard]] bool send(net::HttpClient &http, net::HttpRequest req, async::CancellationToken token, async::Lifetime::Weak owner,
               net::HttpClient::Callback on_done);
 
  private:

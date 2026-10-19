@@ -134,8 +134,9 @@ class HttpClient {
     using Callback = std::function<void(HttpResponse)>;
     // Queues the request. `on_done` runs on the main thread (via `main`) unless `owner` is dead or
     // `token` was cancelled. Returns false if the pool is shutting down or the request is invalid
-    // (in which case on_done is not called).
-    bool send(HttpRequest req, async::CancellationToken token, async::Lifetime::Weak owner, Callback on_done);
+    // (in which case on_done is not called). The result must be checked: a caller that ignores false
+    // waits for a callback that never comes.
+    [[nodiscard]] bool send(HttpRequest req, async::CancellationToken token, async::Lifetime::Weak owner, Callback on_done);
 
     // Blocking variant with retries, for code already running on a worker thread.
     HttpResponse perform_with_retry(const HttpRequest &req, const async::CancellationToken &token);

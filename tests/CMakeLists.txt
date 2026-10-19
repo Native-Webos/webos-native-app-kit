@@ -36,6 +36,21 @@ target_link_libraries(test_audio PRIVATE wnk_audio Threads::Threads)
 target_include_directories(test_secret SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 
+# Compile checks: ignoring the result of HttpClient::send / auth::Session::send (false = on_done is
+# never called) must not build with -Werror=unused-result; checking it must. The probes are built by
+# the tests themselves, one at a time, and are not part of the normal build.
+foreach (v checked ignored)
+    add_library(probe_send_${v} OBJECT EXCLUDE_FROM_ALL compile/send_result.cpp)
+    target_link_libraries(probe_send_${v} PRIVATE wnk_net wnk_auth)
+    target_compile_options(probe_send_${v} PRIVATE -Werror=unused-result)
+    add_test(NAME build.send_result_${v}
+            COMMAND "${CMAKE_COMMAND}" -E env --unset=MAKEFLAGS --unset=MFLAGS
+                    "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}" --target probe_send_${v})
+    set_tests_properties(build.send_result_${v} PROPERTIES RESOURCE_LOCK build_dir)
+endforeach ()
+target_compile_definitions(probe_send_ignored PRIVATE WNK_PROBE_IGNORE)
+set_tests_properties(build.send_result_ignored PROPERTIES WILL_FAIL TRUE)
+
 # curl transport against a local HTTP/HTTPS server started by http_server.py (needs python3 + openssl).
 add_executable(test_websocket_curl integration/test_websocket_curl.cpp)
 target_include_directories(test_websocket_curl PRIVATE unit)

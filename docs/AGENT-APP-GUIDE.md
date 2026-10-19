@@ -719,6 +719,11 @@ One category string per app (`"tvui"`, `"player"`). The shell writes a 0640 log 
 directory. On a Developer Mode TV, `tools/logs.sh <app id>` or Dev Manager can read
 `/tmp/<app id>/events.log`.
 
+Every message passes through `wnk::log::redact()` before any sink. It masks the value of every query
+and fragment parameter of a URL (`https://h/m.m3u8?sig=<redacted>&t=<redacted>`; names, hosts and
+paths stay), credential-like key/value pairs, `Authorization` headers and bearer tokens. Signed media
+URLs carry their signature under names no list knows, so URLs are logged without their query values.
+
 ## Verification before you hand the app over
 
 Run from the repository root. Do not claim a step you did not run.

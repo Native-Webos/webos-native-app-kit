@@ -77,6 +77,11 @@ bool ends_value(char c) {
            c == ',' || c == ';' || c == '}' || c == ')' || c == ']' || c == '>';
 }
 
+// Where a URL ends inside a log message.
+bool ends_url(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '"' || c == '\'' || c == '<' || c == '>';
+}
+
 std::atomic<Logger *> g_default{nullptr};
 
 }  // namespace
@@ -123,7 +128,35 @@ std::string redact(std::string_view text) {
     std::string out;
     out.reserve(text.size());
     size_t i = 0;
+    bool in_url = false;
     while (i < text.size()) {
+        // Inside a URL (after "://"): every query parameter value, whatever its name. Signed media
+        // URLs carry their signature under names no list can know (sec=, sig=, hdnts=, Policy=).
+        if (in_url) {
+            if (ends_url(text[i])) {
+                in_url = false;
+            } else if (text[i] == '?' || text[i] == '&' || text[i] == '#') {
+                out.push_back(text[i++]);
+                size_t k = i;
+                while (k < text.size() && text[k] != '=' && text[k] != '&' && text[k] != '#' && !ends_url(text[k])) ++k;
+                out.append(text.substr(i, k - i));
+                i = k;
+                if (i < text.size() && text[i] == '=') {
+                    out.push_back(text[i++]);
+                    size_t v = i;
+                    while (v < text.size() && text[v] != '&' && text[v] != '#' && !ends_url(text[v])) ++v;
+                    if (v > i) out.append("<redacted>");
+                    i = v;
+                }
+                continue;
+            }
+        }
+        if (text.compare(i, 3, "://") == 0) {
+            in_url = true;
+            out.append("://");
+            i += 3;
+            continue;
+        }
         // "Bearer <value>" / "Basic <value>" anywhere (covers Authorization headers).
         if ((starts_with_ci(text, i, "bearer ") || starts_with_ci(text, i, "basic ")) &&
             (i == 0 || !is_key_char(text[i - 1]))) {

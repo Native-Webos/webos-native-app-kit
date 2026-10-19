@@ -48,6 +48,24 @@ TEST("redact masks credential query parameters") {
     CHECK_EQ(redact("access_token=zzz"), std::string("access_token=<redacted>"));
 }
 
+TEST("redact masks every query value of a URL") {
+    CHECK_EQ(redact("HTTP 403 for https://cdn.example/m.m3u8?sec=abc-DEF_1&dmTs=75&v1st=C6 (x)"),
+             std::string("HTTP 403 for https://cdn.example/m.m3u8?sec=<redacted>&dmTs=<redacted>&v1st=<redacted> (x)"));
+    CHECK_EQ(redact("opened https://h/a.mp3: mp3"), std::string("opened https://h/a.mp3: mp3"));
+    CHECK_EQ(redact("\"https://h/p?flag\" https://h/q#t=1"), std::string("\"https://h/p?flag\" https://h/q#t=<redacted>"));
+}
+
+TEST("redact: URL query values in JSON, lists and several URLs; text after a URL is left alone") {
+    CHECK_EQ(redact("{\"url\":\"https://h/v.mp4?Policy=eyJ&Signature=x~y\",\"n\":2}"),
+             std::string("{\"url\":\"https://h/v.mp4?Policy=<redacted>&Signature=<redacted>\",\"n\":2}"));
+    CHECK_EQ(redact("a https://h/1?k=1 b http://g/2?j=2&empty=&flag c"),
+             std::string("a https://h/1?k=<redacted> b http://g/2?j=<redacted>&empty=&flag c"));
+    CHECK_EQ(redact("<https://h/x?q=1>, then: ok? yes=1"), std::string("<https://h/x?q=<redacted>>, then: ok? yes=1"));
+    CHECK_EQ(redact("https://h/p?sig=a%3D%3D&x=1\n?k=v"), std::string("https://h/p?sig=<redacted>&x=<redacted>\n?k=v"));
+    CHECK_EQ(redact("no url here?a=b&c=d"), std::string("no url here?a=b&c=d"));
+    CHECK_EQ(redact("https://h/p?token=abc"), std::string("https://h/p?token=<redacted>"));  // masked once
+}
+
 TEST("redact masks headers and bearer tokens") {
     CHECK_EQ(redact("Authorization: Bearer eyJabc.def"), std::string("Authorization: <redacted>"));
     CHECK_EQ(redact("sent bearer eyJabc.def ok"), std::string("sent bearer <redacted> ok"));

@@ -271,7 +271,7 @@ bool decryptable(const Rendition &r, const ContentKeys &keys) {
 int choose_video(const Presentation &p, const AdaptiveSourceOptions &o) {
     bool any_plain = false;
     for (const Rendition &r : p.renditions) {
-        if (r.type == TrackType::Video && decryptable(r, o.keys) && r.dolby_vision.empty()) any_plain = true;
+        if (r.type == TrackType::Video && r.period == 0 && decryptable(r, o.keys) && r.dolby_vision.empty()) any_plain = true;
     }
     int best = -1;
     auto rank = [&](const Rendition &r) {
@@ -280,7 +280,7 @@ int choose_video(const Presentation &p, const AdaptiveSourceOptions &o) {
     };
     for (size_t i = 0; i < p.renditions.size(); ++i) {
         const Rendition &r = p.renditions[i];
-        if (r.type != TrackType::Video || !decryptable(r, o.keys) || is_webm(r)) continue;
+        if (r.type != TrackType::Video || r.period > 0 || !decryptable(r, o.keys)) continue;
         if (rank(r) >= static_cast<int>(o.video_codecs.size())) continue;
         if (r.height > o.max_height || r.frame_rate > o.max_frame_rate + 0.01) continue;
         if (o.max_bandwidth > 0 && r.bandwidth > o.max_bandwidth) continue;
@@ -325,6 +325,8 @@ struct AdaptiveSource::Impl {
     // One FfmpegSource reading one rendition.
     struct Lane {
         int rendition = -1;
+        // Its rendition in the first Period: a seek finds the Period to play from there.
+        int head = -1;
         bool want_video = false, want_audio = false;
         std::unique_ptr<FfmpegSource> src;
         std::optional<Packet> pending;
@@ -469,8 +471,22 @@ struct AdaptiveSource::Impl {
             std::string body;
             if (!fetch(r.index_url, &r.index, &body, nullptr, error, ctx)) return false;
             std::vector<MediaSegment> segs;
-            if (!parse_sidx(reinterpret_cast<const uint8_t *>(body.data()), body.size(), r.index.offset, r.index_url,
-                            &segs, error)) {
+            if (is_webm(r)) {
+                // WebM: the index range holds Cues; the initialisation range says where the Segment's
+                // data starts (Cue positions are relative to it) and the timecode scale.
+                std::string init_body;
+                if (!r.init) {
+                    *error = "rendition " + r.id + ": WebM without an Initialization range";
+                    return false;
+                }
+                if (!fetch(r.init->url, &r.init->range, &init_body, nullptr, error, ctx)) return false;
+                if (!parse_webm_cues(reinterpret_cast<const uint8_t *>(init_body.data()), init_body.size(), r.init->range.offset,
+                                     reinterpret_cast<const uint8_t *>(body.data()), body.size(), r.index.offset, r.index_url,
+                                     &segs, error)) {
+                    return false;
+                }
+            } else if (!parse_sidx(reinterpret_cast<const uint8_t *>(body.data()), body.size(), r.index.offset, r.index_url,
+                                   &segs, error)) {
                 return false;
             }
             const int64_t origin = r.time_origin_us != kNoTime ? r.time_origin_us : 0;
@@ -833,7 +849,7 @@ struct AdaptiveSource::Impl {
         const Rendition &b = pres.renditions[static_cast<size_t>(base)];
         for (size_t i = 0; i < pres.renditions.size(); ++i) {
             const Rendition &r = pres.renditions[i];
-            if (r.type != TrackType::Video || !decryptable(r, opt.keys) || is_webm(r)) continue;
+            if (r.type != TrackType::Video || r.period > 0 || !decryptable(r, opt.keys)) continue;
             if (video_codec(r) != video_codec(b) || r.dolby_vision != b.dolby_vision) continue;
             if (r.height > opt.max_height || r.frame_rate > opt.max_frame_rate + 0.01) continue;
             if (opt.max_bandwidth > 0 && r.bandwidth > opt.max_bandwidth) continue;
@@ -947,17 +963,49 @@ struct AdaptiveSource::Impl {
                 }
                 ++switch_count;
                 if (lane.want_video) video = sw.rendition;  // a later select() keeps this quality
+                if (pres.renditions[static_cast<size_t>(sw.rendition)].period == 0) lane.head = sw.rendition;
                 const Rendition &a = pres.renditions[static_cast<size_t>(from)];
                 const Rendition &b = pres.renditions[static_cast<size_t>(sw.rendition)];
                 WNK_LOGI(kCat, "video %s (%dx%d %s) -> %s (%dx%d %s) at segment %zu", a.id.c_str(), a.width, a.height,
                          mbps(a.bandwidth).c_str(), b.id.c_str(), b.width, b.height, mbps(b.bandwidth).c_str(), sw.first);
                 continue;
             }
+            if (r == MediaSource::Read::EndOfStream && !lane.next) {
+                // The Period ended: its continuation in the next Period (own initialisation segment
+                // and timeline offset) plays from its first segment.
+                const int next = pres.renditions[static_cast<size_t>(lane.rendition)].next_period;
+                if (next >= 0) {
+                    Rendition &to = pres.renditions[static_cast<size_t>(next)];
+                    if (!ensure_segments(to, error)) {
+                        if (interrupted) return MediaSource::Read::Interrupted;
+                        return MediaSource::Read::Error;
+                    }
+                    const int from = lane.rendition;
+                    {
+                        std::lock_guard<std::mutex> lock(lanes_mutex);
+                        lane.rendition = next;
+                    }
+                    StreamFormat fmt;
+                    if (!open_lane(lane, 0, &fmt, error)) {
+                        if (interrupted) return MediaSource::Read::Interrupted;
+                        return MediaSource::Read::Error;
+                    }
+                    lane.drop_before_us = to.period_start_us;  // its first segment may begin earlier
+                    WNK_LOGI(kCat, "period %d -> %d: %s %s", pres.renditions[static_cast<size_t>(from)].period, to.period,
+                             track_type_name(to.type), to.id.c_str());
+                    continue;
+                }
+            }
             if (r == MediaSource::Read::EndOfStream) {
                 lane.ended = true;
             } else if (r != MediaSource::Read::Packet) {
                 return r;
             } else if (p.type != TrackType::Subtitle) {
+                // A Period's segments may run past its end; its continuation has what comes next.
+                const Rendition &cur = pres.renditions[static_cast<size_t>(lane.rendition)];
+                if (cur.next_period >= 0 && cur.period_end_us != kNoTime && p.pts_us != kNoTime && p.pts_us >= cur.period_end_us) {
+                    continue;
+                }
                 if (lane.drop_before_us != kNoTime && p.pts_us != kNoTime &&
                     p.pts_us + std::max<int64_t>(p.duration_us, 1) <= lane.drop_before_us) {
                     continue;
@@ -1016,8 +1064,33 @@ struct AdaptiveSource::Impl {
     }
 
     // (Re)opens the selected renditions at `t`.
+    // The rendition of `head`'s chain (Rendition::next_period) whose Period holds `t`.
+    int locate(int head, int64_t t, std::string *error) {
+        int r = head;
+        for (;;) {
+            Rendition &cur = pres.renditions[static_cast<size_t>(r)];
+            if (cur.next_period < 0) return r;
+            if (!ensure_segments(cur, error)) return -1;
+            int64_t end;
+            {
+                std::lock_guard<std::mutex> plock(pres_mutex);
+                end = cur.segments.empty() ? 0 : cur.segments.back().start_us + cur.segments.back().duration_us;
+            }
+            if (t < end) return r;
+            r = cur.next_period;
+            if (!ensure_segments(pres.renditions[static_cast<size_t>(r)], error)) return -1;
+        }
+    }
+
     bool open_at(int64_t t, StreamFormat *out, std::string *error) {
         if (lanes.empty()) return false;
+        for (Lane &lane : lanes) {
+            if (lane.head < 0 || pres.renditions[static_cast<size_t>(lane.head)].next_period < 0) continue;
+            const int r = locate(lane.head, t, error);
+            if (r < 0) return false;
+            std::lock_guard<std::mutex> lock(lanes_mutex);
+            lane.rendition = r;
+        }
         // Where each lane starts: the first leads (video if any); the others start at or before its
         // segment.
         std::vector<size_t> firsts(lanes.size());
@@ -1346,7 +1419,7 @@ struct AdaptiveSource::Impl {
             std::vector<int> picks;
             for (size_t i = 0; i < pres.renditions.size(); ++i) {
                 const Rendition &r = pres.renditions[i];
-                if (r.type != TrackType::Audio || !decryptable(r, opt.keys) || is_webm(r)) continue;
+                if (r.type != TrackType::Audio || r.period > 0 || !decryptable(r, opt.keys)) continue;
                 const bool known = codec_from_rfc6381(r.codecs, TrackType::Audio) != CodecId::Unknown || r.codecs.empty();
                 if (!known) continue;
                 auto same = std::find_if(picks.begin(), picks.end(), [&](int k) {
@@ -1402,7 +1475,7 @@ struct AdaptiveSource::Impl {
         subtitle_choices.clear();
         for (size_t i = 0; i < pres.renditions.size(); ++i) {
             const Rendition &r = pres.renditions[i];
-            if (r.type != TrackType::Subtitle || !decryptable(r, opt.keys)) continue;
+            if (r.type != TrackType::Subtitle || r.period > 0 || !decryptable(r, opt.keys)) continue;
             const bool seen = std::any_of(subtitle_choices.begin(), subtitle_choices.end(), [&](const SubtitleChoice &c) {
                 const Rendition &o = pres.renditions[static_cast<size_t>(c.rendition)];
                 return pres.format == Presentation::Format::Dash ? o.group == r.group : o.playlist_url == r.playlist_url;
@@ -1579,6 +1652,7 @@ bool AdaptiveSource::select(int video_track, int audio_track, const BackendCaps 
     std::vector<Impl::Lane> lanes;
     Impl::Lane main;
     main.rendition = m.video;
+    main.head = m.video;
     main.want_video = video_track == 0;
     std::optional<Impl::AudioChoice> audio;
     if (audio_track > 0) audio = m.audio_choices[static_cast<size_t>(audio_track - 1)];
@@ -1589,6 +1663,7 @@ bool AdaptiveSource::select(int video_track, int audio_track, const BackendCaps 
         if (!m.ensure_segments(r, error)) return false;
         Impl::Lane aux;
         aux.rendition = audio->rendition;
+        aux.head = audio->rendition;
         aux.want_audio = true;
         lanes.push_back(std::move(aux));
         m.sel_audio = audio->rendition;

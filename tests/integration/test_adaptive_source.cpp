@@ -122,6 +122,29 @@ bool make_presentations() {
             std::fputs(mpd.c_str(), out);
             std::fclose(out);
         }
+        // d.mpd's segments as two Periods: 0-4 s (segments 1-2), then 4-10 s (3-5) with its own
+        // presentationTimeOffset, as ad-inserted and chaptered VOD is published.
+        auto period = [](const char *id, const char *start, const char *dur, int first, int pto_ms) {
+            std::string out = std::string("<Period id=\"") + id + "\" start=\"" + start + "\" duration=\"" + dur + "\">";
+            for (int rep = 0; rep < 2; ++rep) {
+                const std::string r = std::to_string(rep);
+                out += std::string("<AdaptationSet id=\"") + r + "\" contentType=\"" + (rep == 0 ? "video" : "audio") +
+                       "\"><Representation id=\"" + r + "\" mimeType=\"" + (rep == 0 ? "video/mp4" : "audio/mp4") +
+                       "\" codecs=\"" + (rep == 0 ? "avc1.640016" : "mp4a.40.2") + "\" bandwidth=\"" +
+                       (rep == 0 ? "300000" : "128000") + "\"" + (rep == 0 ? " width=\"320\" height=\"240\"" : "") +
+                       "><SegmentTemplate timescale=\"1000\" duration=\"2000\" startNumber=\"" + std::to_string(first) +
+                       "\" presentationTimeOffset=\"" + std::to_string(pto_ms) + "\" initialization=\"d-init-" + r +
+                       ".m4s\" media=\"d-" + r + "-$Number%05d$.m4s\"/></Representation></AdaptationSet>";
+            }
+            return out + "</Period>";
+        };
+        const std::string mp = "<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" "
+                               "mediaPresentationDuration=\"PT10S\">" +
+                               period("a", "PT0S", "PT4S", 1, 0) + period("b", "PT4S", "PT6S", 3, 4000) + "</MPD>";
+        if (FILE *out = std::fopen((d + "/mp.mpd").c_str(), "w")) {
+            std::fputs(mp.c_str(), out);
+            std::fclose(out);
+        }
         return true;
     }();
     return ok;
@@ -378,6 +401,83 @@ TEST("adaptive source: HLS WebVTT subtitles arrive as cues on the presentation t
         // map; within a frame or two of N.2 s is what a viewer needs.
         CHECK(std::llabs(cues[static_cast<size_t>(i)]->start_us - (i * 1000000 + 200000)) < 150000);
     }
+}
+
+TEST("adaptive source: DASH with two Periods plays through the boundary and seeks into the second") {
+    SKIP_UNLESS_READY();
+    {
+        AdaptiveSource s(options());
+        std::string err;
+        REQUIRE(s.open(url("mp.mpd"), &err));
+        CHECK_EQ(s.info().duration_us, int64_t{10000000});
+        CHECK_EQ(s.info().tracks.size(), size_t{2});  // the second Period adds no tracks
+        StreamFormat f;
+        REQUIRE(s.select(0, 1, starfish_like(), &f, &err));
+        const Drained d = drain(s);
+        CHECK_EQ(d.video.size(), size_t{250});
+        CHECK(d.ordered);
+        CHECK(d.timed);
+        REQUIRE(!d.audio.empty());
+        CHECK(d.audio.back().pts_us > 9800000);
+        for (size_t i = 1; i < d.video.size(); ++i) {
+            if (d.video[i].key) CHECK_EQ(d.video[i].pts_us % 1000000, int64_t{0});  // nothing repeated or lost
+        }
+        // Audio across the boundary: nothing twice (never back in time) and no real gap. ffmpeg's AAC
+        // segments are a few frames shorter than the 2 s this MPD claims, so the second Period's first
+        // segment holds audio from before 4 s that the clip drops: up to ~100 ms is the fixture's.
+        int64_t worst = 0;
+        bool forward = true;
+        for (size_t i = 1; i < d.audio.size(); ++i) {
+            const int64_t step = d.audio[i].pts_us - d.audio[i - 1].pts_us;
+            forward = forward && step > 0;
+            worst = std::max(worst, step);
+        }
+        CHECK(forward);
+        CHECK(worst < 100000);
+    }
+    check_seek("mp.mpd", 7000000, 6000000);  // in the second Period
+    check_seek("mp.mpd", 3000000, 2000000);  // back in the first
+}
+
+TEST("adaptive source: WebM DASH (VP9, Opus) indexed by its Cues") {
+    SKIP_UNLESS_READY();
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    const std::string make =
+        "cd '" + d + "' && ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc2=size=320x240:rate=25:duration=10 "
+        "-c:v libvpx-vp9 -b:v 300k -g 25 -keyint_min 25 -deadline realtime -cpu-used 8 -an -f webm -dash 1 "
+        "-cluster_time_limit 2000 wv.webm && ffmpeg -hide_banner -loglevel error -y -f lavfi "
+        "-i sine=frequency=440:sample_rate=48000:duration=10 -c:a libopus -b:a 64k -vn -f webm -dash 1 "
+        "-cluster_time_limit 2000 wa.webm && ffmpeg -hide_banner -loglevel error -y -f webm_dash_manifest -i wv.webm "
+        "-f webm_dash_manifest -i wa.webm -c copy -map 0 -map 1 -f webm_dash_manifest "
+        "-adaptation_sets 'id=0,streams=0 id=1,streams=1' w.mpd";
+    if (std::system(make.c_str()) != 0) {
+        std::printf("  SKIP: the ffmpeg CLI has no libvpx-vp9 or libopus\n");
+        return;
+    }
+    AdaptiveSourceOptions o = options();
+    o.video_codecs = {CodecId::Vp9};
+    AdaptiveSource s(o);
+    std::string err;
+    REQUIRE(s.open(url("w.mpd"), &err));
+    REQUIRE(s.info().tracks.size() == 2);
+    CHECK(s.info().tracks[0].codec == CodecId::Vp9);
+    CHECK(s.info().tracks[1].codec == CodecId::Opus);
+    BackendCaps caps = ndl_like();
+    caps.video_codecs = {CodecId::Vp9};
+    StreamFormat f;
+    REQUIRE(s.select(0, 1, caps, &f, &err));
+    REQUIRE(f.video && f.audio);
+    CHECK(f.video->codec == CodecId::Vp9);
+    CHECK(f.audio->codec == CodecId::PcmS16);
+    const Drained all = drain(s);
+    CHECK_EQ(all.video.size(), size_t{250});
+    REQUIRE(!all.audio.empty());
+    CHECK(all.audio.back().pts_us > 9800000);
+    REQUIRE(s.seek(5000000, &err));
+    const Drained after = drain(s);
+    REQUIRE(!after.video.empty());
+    CHECK(after.video[0].key);
+    CHECK_EQ(after.video[0].pts_us, int64_t{5000000});  // ffmpeg starts a Cluster at every keyframe
 }
 
 TEST("adaptive source: DASH text/vtt subtitles; TTML listed but not readable; a seek does not stop loading") {

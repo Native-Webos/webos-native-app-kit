@@ -706,6 +706,33 @@ int dolby_vision_profile(const std::string &codec) {
     return end != codec.c_str() + dot + 1 && p >= 0 && p < 100 ? static_cast<int>(p) : -1;
 }
 
+// Each rendition of the previous Period [prev, cur) continues in the Period [cur, end): the same
+// AdaptationSet and Representation ids, else the same type and language at the closest bandwidth.
+void link_periods(std::vector<Rendition> &rs, size_t prev, size_t cur) {
+    for (size_t i = prev; i < cur; ++i) {
+        Rendition &a = rs[i];
+        int best = -1;
+        for (size_t j = cur; j < rs.size(); ++j) {
+            const Rendition &b = rs[j];
+            if (b.type == a.type && b.group == a.group && b.id == a.id && !a.id.empty()) {
+                best = static_cast<int>(j);
+                break;
+            }
+        }
+        if (best < 0) {
+            int64_t gap = INT64_MAX;
+            for (size_t j = cur; j < rs.size(); ++j) {
+                const Rendition &b = rs[j];
+                if (b.type != a.type || b.language != a.language) continue;
+                if (codec_from_rfc6381(b.codecs, b.type) != codec_from_rfc6381(a.codecs, a.type)) continue;
+                const int64_t d = b.bandwidth > a.bandwidth ? b.bandwidth - a.bandwidth : a.bandwidth - b.bandwidth;
+                if (d < gap) gap = d, best = static_cast<int>(j);
+            }
+        }
+        a.next_period = best;
+    }
+}
+
 bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out, std::string *error, int64_t now_epoch_us) {
     *out = Presentation{};
     out->format = Presentation::Format::Dash;
@@ -740,111 +767,147 @@ bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out
         int64_t v = 0;
         if (parse_iso_duration(*d, &v)) mpd_duration = v;
     }
-    const XmlNode *period = mpd.child("Period");
-    if (period == nullptr) {
+    const std::vector<const XmlNode *> periods = mpd.children_named("Period");
+    if (periods.empty()) {
         *error = "MPD without a Period";
         return false;
     }
-    int64_t period_start = 0, period_duration = kNoTime;
-    if (const std::string *s = period->attribute("start")) parse_iso_duration(*s, &period_start);
-    if (const std::string *d = period->attribute("duration")) {
-        int64_t v = 0;
-        if (parse_iso_duration(*d, &v)) period_duration = v;
+    // Period starts: @start, else the previous one's start + duration (ISO/IEC 23009-1 5.3.2.1).
+    std::vector<int64_t> starts, durations;
+    for (size_t k = 0; k < periods.size(); ++k) {
+        int64_t st = kNoTime, du = kNoTime;
+        if (const std::string *v = periods[k]->attribute("start")) {
+            int64_t x = 0;
+            if (parse_iso_duration(*v, &x)) st = x;
+        }
+        if (st == kNoTime) st = k == 0 ? 0 : (durations.back() != kNoTime ? starts.back() + durations.back() : kNoTime);
+        if (const std::string *d = periods[k]->attribute("duration")) {
+            int64_t x = 0;
+            if (parse_iso_duration(*d, &x)) du = x;
+        }
+        starts.push_back(st);
+        durations.push_back(du);
     }
-    if (period_duration == kNoTime && mpd_duration != kNoTime) period_duration = mpd_duration - period_start;
-    out->duration_us = mpd_duration != kNoTime ? mpd_duration : period_duration;
+    for (size_t k = 0; k < periods.size(); ++k) {
+        if (durations[k] != kNoTime) continue;
+        if (k + 1 < periods.size() && starts[k + 1] != kNoTime && starts[k] != kNoTime) durations[k] = starts[k + 1] - starts[k];
+        else if (k + 1 == periods.size() && mpd_duration != kNoTime && starts[k] != kNoTime) durations[k] = mpd_duration - starts[k];
+    }
+    // A dynamic MPD keeps its first Period; a static one plays them in order while their times are known.
+    size_t used = 1;
+    if (!out->live) {
+        while (used < periods.size() && starts[used] != kNoTime && durations[used - 1] != kNoTime) ++used;
+    }
+    out->duration_us = mpd_duration != kNoTime ? mpd_duration : durations[0];
+    if (!out->live && used > 1 && mpd_duration == kNoTime && durations[used - 1] != kNoTime) {
+        out->duration_us = starts[used - 1] + durations[used - 1];
+    }
     LiveClock clock;
     clock.live = out->live;
     if (out->live) {
         if (out->time_shift_us != kNoTime) clock.window_us = out->time_shift_us;
         if (now_epoch_us != kNoTime) {
             const int64_t ast = out->availability_start_us != kNoTime ? out->availability_start_us : 0;
-            clock.elapsed_us = now_epoch_us - ast - period_start;
+            clock.elapsed_us = now_epoch_us - ast - starts[0];
         }
         out->duration_us = kNoTime;
     }
 
     const std::string mpd_base = base_url_of(&mpd, url);
-    const std::string period_base = base_url_of(period, mpd_base);
-    SegmentInfo period_si;
-    bool period_template = false, period_list = false;
-    if (const XmlNode *n = period->child("SegmentTemplate")) period_si.merge(n), period_template = true;
-    if (const XmlNode *n = period->child("SegmentList")) period_si.merge(n), period_list = true;
-    if (const XmlNode *n = period->child("SegmentBase")) period_si.merge(n);
+    size_t prev_begin = 0;
+    for (size_t pk = 0; pk < used; ++pk) {
+        const XmlNode *period = periods[pk];
+        const int64_t period_start = starts[pk], period_duration = durations[pk];
+        const size_t begin = out->renditions.size();
+        const std::string period_base = base_url_of(period, mpd_base);
+        SegmentInfo period_si;
+        bool period_template = false, period_list = false;
+        if (const XmlNode *n = period->child("SegmentTemplate")) period_si.merge(n), period_template = true;
+        if (const XmlNode *n = period->child("SegmentList")) period_si.merge(n), period_list = true;
+        if (const XmlNode *n = period->child("SegmentBase")) period_si.merge(n);
 
-    int as_index = 0;
-    for (const XmlNode *as : period->children_named("AdaptationSet")) {
-        const std::string as_base = base_url_of(as, period_base);
-        SegmentInfo as_si = period_si;
-        bool as_template = period_template, as_list = period_list;
-        if (const XmlNode *n = as->child("SegmentTemplate")) as_si.merge(n), as_template = true;
-        if (const XmlNode *n = as->child("SegmentList")) as_si.merge(n), as_list = true;
-        if (const XmlNode *n = as->child("SegmentBase")) as_si.merge(n);
-        const bool as_protected = as->child("ContentProtection") != nullptr;
-        bool as_atmos = false;
-        for (const char *prop : {"SupplementalProperty", "EssentialProperty"}) {
-            for (const XmlNode *p : as->children_named(prop)) {
-                if (p->attribute_or("schemeIdUri", "").find("EC3_ExtensionType") != std::string::npos &&
-                    p->attribute_or("value", "") == "JOC") {
-                    as_atmos = true;
-                }
-            }
-        }
-        bool as_main = false;
-        for (const XmlNode *role : as->children_named("Role")) as_main = as_main || role->attribute_or("value", "") == "main";
-        const std::string as_id = as->attribute_or("id", std::to_string(as_index++));
-        for (const XmlNode *rep : as->children_named("Representation")) {
-            Rendition r;
-            r.id = rep->attribute_or("id", "");
-            r.group = as_id;
-            r.codecs = rep->attribute_or("codecs", as->attribute_or("codecs", ""));
-            r.mime_type = rep->attribute_or("mimeType", as->attribute_or("mimeType", ""));
-            r.type = dash_type(as->attribute_or("contentType", ""), r.mime_type, r.codecs);
-            r.bandwidth = i64_or(rep->attribute("bandwidth"), 0);
-            r.width = static_cast<int>(i64_or(rep->attribute("width"), i64_or(as->attribute("width"), 0)));
-            r.height = static_cast<int>(i64_or(rep->attribute("height"), i64_or(as->attribute("height"), 0)));
-            r.frame_rate = frame_rate(rep->attribute_or("frameRate", as->attribute_or("frameRate", "")));
-            r.sample_rate = static_cast<int>(i64_or(rep->attribute("audioSamplingRate"), i64_or(as->attribute("audioSamplingRate"), 0)));
-            const XmlNode *acc = rep->child("AudioChannelConfiguration");
-            if (acc == nullptr) acc = as->child("AudioChannelConfiguration");
-            if (acc != nullptr) {
-                const std::string value = acc->attribute_or("value", "");
-                int64_t ch = 0;
-                if (acc->attribute_or("schemeIdUri", "").find("dolby") != std::string::npos) {
-                    r.channels = dolby_channel_count(value);
-                } else if (to_i64(value, &ch)) {
-                    r.channels = static_cast<int>(ch);
-                }
-            }
-            r.language = rep->attribute_or("lang", as->attribute_or("lang", ""));
-            if (const XmlNode *label = as->child("Label")) r.label = trim(label->text);
-            r.is_default = as_main;
-            r.encrypted = as_protected || rep->child("ContentProtection") != nullptr;
-            if (r.encrypted) read_protection(as, rep, base_url_of(rep, as_base), &r);
-            if (is_dolby_vision(r.codecs)) r.dolby_vision = r.codecs;
-            r.atmos = as_atmos;
+        int as_index = 0;
+        for (const XmlNode *as : period->children_named("AdaptationSet")) {
+            const std::string as_base = base_url_of(as, period_base);
+            SegmentInfo as_si = period_si;
+            bool as_template = period_template, as_list = period_list;
+            if (const XmlNode *n = as->child("SegmentTemplate")) as_si.merge(n), as_template = true;
+            if (const XmlNode *n = as->child("SegmentList")) as_si.merge(n), as_list = true;
+            if (const XmlNode *n = as->child("SegmentBase")) as_si.merge(n);
+            const bool as_protected = as->child("ContentProtection") != nullptr;
+            bool as_atmos = false;
             for (const char *prop : {"SupplementalProperty", "EssentialProperty"}) {
-                for (const XmlNode *p : rep->children_named(prop)) {
+                for (const XmlNode *p : as->children_named(prop)) {
                     if (p->attribute_or("schemeIdUri", "").find("EC3_ExtensionType") != std::string::npos &&
                         p->attribute_or("value", "") == "JOC") {
-                        r.atmos = true;
+                        as_atmos = true;
                     }
                 }
             }
-            SegmentInfo si = as_si;
-            bool is_template = as_template, is_list = as_list;
-            if (const XmlNode *n = rep->child("SegmentTemplate")) si.merge(n), is_template = true;
-            if (const XmlNode *n = rep->child("SegmentList")) si.merge(n), is_list = true, is_template = false;
-            if (const XmlNode *n = rep->child("SegmentBase")) si.merge(n), is_template = false, is_list = false;
-            const std::string base = base_url_of(rep, as_base);
-            std::string why;
-            if (!dash_segments(si, base, r.id, r.bandwidth, period_start, period_duration, is_template, is_list, &r, clock,
-                               &why)) {
-                *error = "Representation " + r.id + ": " + why;
-                return false;
+            bool as_main = false;
+            for (const XmlNode *role : as->children_named("Role")) as_main = as_main || role->attribute_or("value", "") == "main";
+            const std::string as_id = as->attribute_or("id", std::to_string(as_index++));
+            for (const XmlNode *rep : as->children_named("Representation")) {
+                Rendition r;
+                r.id = rep->attribute_or("id", "");
+                r.group = as_id;
+                r.codecs = rep->attribute_or("codecs", as->attribute_or("codecs", ""));
+                r.mime_type = rep->attribute_or("mimeType", as->attribute_or("mimeType", ""));
+                r.type = dash_type(as->attribute_or("contentType", ""), r.mime_type, r.codecs);
+                r.bandwidth = i64_or(rep->attribute("bandwidth"), 0);
+                r.width = static_cast<int>(i64_or(rep->attribute("width"), i64_or(as->attribute("width"), 0)));
+                r.height = static_cast<int>(i64_or(rep->attribute("height"), i64_or(as->attribute("height"), 0)));
+                r.frame_rate = frame_rate(rep->attribute_or("frameRate", as->attribute_or("frameRate", "")));
+                r.sample_rate = static_cast<int>(i64_or(rep->attribute("audioSamplingRate"), i64_or(as->attribute("audioSamplingRate"), 0)));
+                const XmlNode *acc = rep->child("AudioChannelConfiguration");
+                if (acc == nullptr) acc = as->child("AudioChannelConfiguration");
+                if (acc != nullptr) {
+                    const std::string value = acc->attribute_or("value", "");
+                    int64_t ch = 0;
+                    if (acc->attribute_or("schemeIdUri", "").find("dolby") != std::string::npos) {
+                        r.channels = dolby_channel_count(value);
+                    } else if (to_i64(value, &ch)) {
+                        r.channels = static_cast<int>(ch);
+                    }
+                }
+                r.language = rep->attribute_or("lang", as->attribute_or("lang", ""));
+                if (const XmlNode *label = as->child("Label")) r.label = trim(label->text);
+                r.is_default = as_main;
+                r.encrypted = as_protected || rep->child("ContentProtection") != nullptr;
+                if (r.encrypted) read_protection(as, rep, base_url_of(rep, as_base), &r);
+                if (is_dolby_vision(r.codecs)) r.dolby_vision = r.codecs;
+                r.atmos = as_atmos;
+                for (const char *prop : {"SupplementalProperty", "EssentialProperty"}) {
+                    for (const XmlNode *p : rep->children_named(prop)) {
+                        if (p->attribute_or("schemeIdUri", "").find("EC3_ExtensionType") != std::string::npos &&
+                            p->attribute_or("value", "") == "JOC") {
+                            r.atmos = true;
+                        }
+                    }
+                }
+                SegmentInfo si = as_si;
+                bool is_template = as_template, is_list = as_list;
+                if (const XmlNode *n = rep->child("SegmentTemplate")) si.merge(n), is_template = true;
+                if (const XmlNode *n = rep->child("SegmentList")) si.merge(n), is_list = true, is_template = false;
+                if (const XmlNode *n = rep->child("SegmentBase")) si.merge(n), is_template = false, is_list = false;
+                const std::string base = base_url_of(rep, as_base);
+                std::string why;
+                if (!dash_segments(si, base, r.id, r.bandwidth, period_start, period_duration, is_template, is_list, &r, clock,
+                                   &why)) {
+                    *error = "Representation " + r.id + ": " + why;
+                    return false;
+                }
+                out->renditions.push_back(std::move(r));
             }
-            out->renditions.push_back(std::move(r));
         }
+        for (size_t i = begin; i < out->renditions.size(); ++i) {
+            Rendition &r = out->renditions[i];
+            r.period = static_cast<int>(pk);
+            r.period_start_us = period_start;
+            r.period_end_us = period_duration != kNoTime ? period_start + period_duration : kNoTime;
+        }
+        if (pk > 0) link_periods(out->renditions, prev_begin, begin);
+        prev_begin = begin;
     }
     if (out->renditions.empty()) {
         *error = "MPD without Representations";
@@ -1088,6 +1151,169 @@ bool parse_hls_media(const std::string &text, const std::string &url, Rendition 
     if (r->segments.empty()) {
         *error = "media playlist without segments";
         return false;
+    }
+    return true;
+}
+
+// ---- WebM Cues ------------------------------------------------------------------------------------
+
+namespace {
+// One EBML element header at data[pos]: its ID (with the length marker) and payload size (-1 for
+// "unknown"). False if it does not fit.
+bool ebml_header(const uint8_t *d, size_t n, size_t pos, uint32_t *id, int64_t *size, size_t *payload) {
+    if (pos >= n) return false;
+    int len = 1;
+    while (len <= 4 && !(d[pos] & (0x80 >> (len - 1)))) ++len;
+    if (len > 4 || pos + static_cast<size_t>(len) > n) return false;
+    uint32_t v = 0;
+    for (int i = 0; i < len; ++i) v = (v << 8) | d[pos + static_cast<size_t>(i)];
+    *id = v;
+    pos += static_cast<size_t>(len);
+    if (pos >= n) return false;
+    int sl = 1;
+    while (sl <= 8 && !(d[pos] & (0x80 >> (sl - 1)))) ++sl;
+    if (sl > 8 || pos + static_cast<size_t>(sl) > n) return false;
+    uint64_t sz = d[pos] & (0xFF >> sl);
+    bool all_ones = sz == (0xFFu >> sl);
+    for (int i = 1; i < sl; ++i) {
+        sz = (sz << 8) | d[pos + static_cast<size_t>(i)];
+        all_ones = all_ones && d[pos + static_cast<size_t>(i)] == 0xFF;
+    }
+    *size = all_ones ? -1 : static_cast<int64_t>(sz);
+    *payload = pos + static_cast<size_t>(sl);
+    return true;
+}
+
+uint64_t ebml_uint(const uint8_t *d, size_t len) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < len && i < 8; ++i) v = (v << 8) | d[i];
+    return v;
+}
+
+double ebml_float(const uint8_t *d, size_t len) {
+    if (len == 4) {
+        const uint32_t b = static_cast<uint32_t>(ebml_uint(d, 4));
+        float f;
+        std::memcpy(&f, &b, 4);
+        return f;
+    }
+    if (len == 8) {
+        const uint64_t b = ebml_uint(d, 8);
+        double f;
+        std::memcpy(&f, &b, 8);
+        return f;
+    }
+    return 0;
+}
+
+constexpr uint32_t kSegment = 0x18538067, kInfo = 0x1549A966, kTimecodeScale = 0x2AD7B1,
+                   kDuration = 0x4489, kCues = 0x1C53BB6B, kCuePoint = 0xBB, kCueTime = 0xB3, kCueTrackPositions = 0xB7,
+                   kCueClusterPosition = 0xF1;
+}  // namespace
+
+bool parse_webm_cues(const uint8_t *init, size_t init_size, int64_t init_offset, const uint8_t *cues, size_t cues_size,
+                     int64_t cues_offset, const std::string &url, std::vector<MediaSegment> *out, std::string *error) {
+    out->clear();
+    // The Segment's data start and the Info in the initialisation range.
+    int64_t segment_data = -1;
+    uint64_t scale = 1000000;  // ns per timecode tick
+    double duration_ticks = 0;
+    size_t pos = 0;
+    while (pos < init_size) {
+        uint32_t id;
+        int64_t size;
+        size_t payload;
+        if (!ebml_header(init, init_size, pos, &id, &size, &payload)) break;
+        if (id == kSegment) {
+            segment_data = init_offset + static_cast<int64_t>(payload);
+            pos = payload;  // descend
+            continue;
+        }
+        if (id == kInfo && size >= 0) {
+            const size_t end = std::min(init_size, payload + static_cast<size_t>(size));
+            size_t q = payload;
+            while (q < end) {
+                uint32_t cid;
+                int64_t csize;
+                size_t cp;
+                if (!ebml_header(init, end, q, &cid, &csize, &cp) || csize < 0 || cp + static_cast<size_t>(csize) > end) break;
+                if (cid == kTimecodeScale) scale = ebml_uint(init + cp, static_cast<size_t>(csize));
+                if (cid == kDuration) duration_ticks = ebml_float(init + cp, static_cast<size_t>(csize));
+                q = cp + static_cast<size_t>(csize);
+            }
+        }
+        if (size < 0) break;
+        pos = payload + static_cast<size_t>(size);
+    }
+    if (segment_data < 0) {
+        *error = "WebM: no Segment in the initialisation range";
+        return false;
+    }
+    if (scale == 0) scale = 1000000;
+    // Cues → (time, cluster offset), in order of offset.
+    std::vector<std::pair<int64_t, int64_t>> points;
+    uint32_t id;
+    int64_t size;
+    size_t payload;
+    if (!ebml_header(cues, cues_size, 0, &id, &size, &payload) || id != kCues) {
+        *error = "WebM: no Cues at the index range";
+        return false;
+    }
+    const size_t cues_end = size < 0 ? cues_size : std::min(cues_size, payload + static_cast<size_t>(size));
+    for (size_t q = payload; q < cues_end;) {
+        uint32_t pid;
+        int64_t psize;
+        size_t pp;
+        if (!ebml_header(cues, cues_end, q, &pid, &psize, &pp) || psize < 0) break;
+        const size_t pend = std::min(cues_end, pp + static_cast<size_t>(psize));
+        if (pid == kCuePoint) {
+            int64_t time = -1, cluster = -1;
+            for (size_t r = pp; r < pend;) {
+                uint32_t eid;
+                int64_t esize;
+                size_t ep;
+                if (!ebml_header(cues, pend, r, &eid, &esize, &ep) || esize < 0) break;
+                const size_t eend = std::min(pend, ep + static_cast<size_t>(esize));
+                if (eid == kCueTime) time = static_cast<int64_t>(ebml_uint(cues + ep, eend - ep));
+                if (eid == kCueTrackPositions && cluster < 0) {
+                    for (size_t t = ep; t < eend;) {
+                        uint32_t tid;
+                        int64_t tsize;
+                        size_t tp;
+                        if (!ebml_header(cues, eend, t, &tid, &tsize, &tp) || tsize < 0) break;
+                        if (tid == kCueClusterPosition) cluster = static_cast<int64_t>(ebml_uint(cues + tp, static_cast<size_t>(tsize)));
+                        t = tp + static_cast<size_t>(tsize);
+                    }
+                }
+                r = eend;
+            }
+            if (time >= 0 && cluster >= 0) points.emplace_back(time, segment_data + cluster);
+        }
+        q = pend;
+    }
+    std::sort(points.begin(), points.end(), [](const auto &a, const auto &b) { return a.second < b.second; });
+    points.erase(std::unique(points.begin(), points.end(), [](const auto &a, const auto &b) { return a.second == b.second; }),
+                 points.end());
+    if (points.empty()) {
+        *error = "WebM: the Cues point to no Cluster";
+        return false;
+    }
+    auto to_us = [scale](int64_t ticks) { return static_cast<int64_t>(static_cast<double>(ticks) * static_cast<double>(scale) / 1000.0); };
+    const int64_t total_us = duration_ticks > 0 ? static_cast<int64_t>(duration_ticks * static_cast<double>(scale) / 1000.0) : kNoTime;
+    for (size_t i = 0; i < points.size(); ++i) {
+        MediaSegment s;
+        s.url = url;
+        s.range.offset = points[i].second;
+        if (i + 1 < points.size()) {
+            s.range.length = points[i + 1].second - points[i].second;
+        } else if (cues_offset > points[i].second) {
+            s.range.length = cues_offset - points[i].second;  // Cues after the Clusters
+        }
+        s.start_us = to_us(points[i].first);
+        const int64_t end_us = i + 1 < points.size() ? to_us(points[i + 1].first) : total_us;
+        s.duration_us = end_us != kNoTime && end_us > s.start_us ? end_us - s.start_us : 0;
+        s.number = static_cast<int64_t>(i);
+        out->push_back(std::move(s));
     }
     return true;
 }

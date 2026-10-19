@@ -65,8 +65,10 @@ class FakeRenderer : public render::Renderer {
         return measure_text(s, t);
     }
     float measure_text(const render::TextStyle &s, std::string_view t) const override {
+        ++measured;
         return static_cast<float>(render::decode_utf8(t).size()) * s.size * 0.5f;
     }
+    mutable int measured = 0;
     float line_height(const render::TextStyle &s) const override { return s.size * 1.25f; }
     float ascent(const render::TextStyle &s) const override { return s.size; }
     void end_frame() override {}
@@ -211,6 +213,94 @@ TEST("label: wraps on spaces, breaks long words, ellipsises the last line") {
     REQUIRE(lines.size() == 2);
     CHECK_EQ(lines[0], std::string("\xC3\xA9\xC3\xA9"));
     CHECK(Label::wrap(r, s, "x", 0, 2).empty());
+}
+
+TEST("label: ellipsising a long paragraph measures about one line, not the whole paragraph") {
+    FakeRenderer r;
+    render::TextStyle s{1, 20, render::kWhite};
+    std::string text;
+    for (int i = 0; i < 2000; i++) text += "word ";  // a long video description
+    r.measured = 0;
+    auto lines = Label::wrap(r, s, text, 300, 3);
+    REQUIRE(lines.size() == 3);
+    CHECK_EQ(lines[2], std::string("word word word word word word\xE2\x80\xA6"));  // 30 code points
+    CHECK(r.measured < 100);
+    std::string word(5000, 'x');  // one unbreakable word
+    r.measured = 0;
+    lines = Label::wrap(r, s, word, 300, 2);
+    REQUIRE(lines.size() == 2);
+    CHECK_EQ(lines[1], std::string(29, 'x') + "\xE2\x80\xA6");
+    CHECK(r.measured < 200);
+}
+
+namespace {
+
+// Uneven widths: 'i' narrow, 'm' wide, a two-byte code point wider still.
+class UnevenRenderer : public FakeRenderer {
+ public:
+    float measure_text(const render::TextStyle &, std::string_view t) const override {
+        ++measured;
+        float w = 0;
+        for (uint32_t c : render::decode_utf8(t)) w += c == 'i' ? 4 : c == 'm' ? 14 : c == ' ' ? 5 : c > 0x7f ? 18 : 9;
+        return w;
+    }
+};
+
+}  // namespace
+
+TEST("label: the ellipsised line is the longest prefix of the rest of the paragraph that fits") {
+    // The last line used to be the whole rest of the paragraph shortened one code point at a time;
+    // starting from the next word instead must give the same line.
+    UnevenRenderer r;
+    render::TextStyle s{1, 20, render::kWhite};
+    auto reference = [&](std::string rest, float width) {  // the former ellipsize(rest of paragraph)
+        auto trim = [](std::string v) {
+            while (!v.empty() && v.back() == ' ') v.pop_back();
+            return v;
+        };
+        rest = trim(rest);
+        while (!rest.empty() && r.measure_text(s, rest + "\xE2\x80\xA6") > width) {
+            size_t cut = rest.size() - 1;
+            while (cut > 0 && (static_cast<unsigned char>(rest[cut]) & 0xC0) == 0x80) --cut;
+            rest = trim(rest.substr(0, cut));
+        }
+        return rest + "\xE2\x80\xA6";
+    };
+    const char *letters[] = {"i", "m", "a", "e", "\xC3\xA9", "\xE2\x82\xAC"};
+    uint32_t seed = 12345;
+    auto next = [&](uint32_t m) {
+        seed = seed * 1103515245u + 12345u;
+        return (seed >> 16) % m;
+    };
+    int truncated = 0;
+    for (int round = 0; round < 400; round++) {
+        std::string text;
+        const uint32_t words = 3 + next(40);
+        for (uint32_t w = 0; w < words; w++) {
+            if (w > 0) text += next(6) == 0 ? "  " : " ";
+            const uint32_t len = 1 + (next(10) == 0 ? 30 + next(30) : next(9));  // some words wider than a line
+            for (uint32_t k = 0; k < len; k++) text += letters[next(6)];
+        }
+        const float width = static_cast<float>(60 + next(240));
+        const int max_lines = 1 + static_cast<int>(next(4));
+        const auto all = Label::wrap(r, s, text, width, 1000);
+        const auto lines = Label::wrap(r, s, text, width, max_lines);
+        for (const std::string &l : lines) CHECK(r.measure_text(s, l) <= width);
+        if (static_cast<int>(all.size()) <= max_lines) {
+            CHECK(lines == all);
+            continue;
+        }
+        ++truncated;
+        REQUIRE(static_cast<int>(lines.size()) == max_lines);
+        size_t pos = 0;  // where the last line starts: after the lines before it
+        for (int i = 0; i + 1 < max_lines; i++) {
+            CHECK_EQ(lines[static_cast<size_t>(i)], all[static_cast<size_t>(i)]);
+            pos = text.find(all[static_cast<size_t>(i)], pos) + all[static_cast<size_t>(i)].size();
+        }
+        while (pos < text.size() && text[pos] == ' ') ++pos;
+        CHECK_EQ(lines.back(), reference(text.substr(pos), width));
+    }
+    CHECK(truncated > 100);
 }
 
 TEST("label: single line measures at natural width and draws at its baseline") {

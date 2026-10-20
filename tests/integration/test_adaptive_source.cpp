@@ -908,6 +908,40 @@ TEST("adaptive source live: a DASH bitrate switch lands on the current segment o
     CHECK_EQ(s.presentation().renditions[static_cast<size_t>(s.video_rendition())].height, 120);
 }
 
+TEST("adaptive source live: the join point leaves room for the longest segments (6 s audio, 2 s video)") {
+    SKIP_UNLESS_READY();
+    // 20.5 s into the event: video (2 s) is listed to 20 s, audio (6 s) only to 18 s. Three video
+    // segments back from the video's edge (14 s) is inside the audio's newest segment, which is
+    // not published until 24 s: playback would stop for audio at once. Three of the longest
+    // segments back from the earliest edge: 0 s. Only where playback starts is checked here.
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    const auto ast = std::chrono::system_clock::now() - std::chrono::milliseconds(20500);
+    auto tmpl = [](int64_t dur_us) {
+        return "<SegmentTemplate timescale=\"1000000\" duration=\"" + std::to_string(dur_us) +
+               "\" initialization=\"l-init-$RepresentationID$.m4s\" media=\"l-$RepresentationID$-$Number%05d$.m4s\" startNumber=\"1\"/>";
+    };
+    const std::string m = "<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"dynamic\" availabilityStartTime=\"" +
+                          iso_utc(ast) + "\" minimumUpdatePeriod=\"PT30S\" timeShiftBufferDepth=\"PT60S\"><Period id=\"0\" start=\"PT0S\">"
+                          "<AdaptationSet id=\"0\" contentType=\"video\">" + tmpl(2000000) +
+                          "<Representation id=\"1\" mimeType=\"video/mp4\" codecs=\"avc1.64000d\" bandwidth=\"400000\" width=\"320\" height=\"240\"/>"
+                          "</AdaptationSet><AdaptationSet id=\"1\" contentType=\"audio\">" + tmpl(6000000) +
+                          "<Representation id=\"3\" mimeType=\"audio/mp4\" codecs=\"mp4a.40.2\" bandwidth=\"69000\" audioSamplingRate=\"48000\"/>"
+                          "</AdaptationSet></Period></MPD>";
+    write_file(d + "/lj.mpd", m);
+    AdaptiveSource s(options());
+    std::string err;
+    REQUIRE(s.open(url("lj.mpd"), &err));
+    StreamFormat f;
+    REQUIRE(s.select(0, -1, starfish_like(), &f, &err));  // video only: the audio files are 2 s long
+    Packet p;
+    int64_t first = kNoTime;
+    while (first == kNoTime && s.read(&p, &err) == MediaSource::Read::Packet) {
+        if (p.type == TrackType::Video) first = p.pts_us;
+    }
+    std::printf("  first video packet at %.2f s\n", first / 1e6);
+    CHECK(first != kNoTime && first < 1000000);
+}
+
 TEST("adaptive source: a backend without adaptive resolution keeps the picture size") {
     SKIP_UNLESS_READY();
     AdaptiveSourceOptions o = options();

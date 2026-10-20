@@ -8,9 +8,11 @@
 //                  └──────────────(any failure)──────────────────────────────────► Error
 //   any state ─stop─► Stopped
 //
-// The playback thread reads packets into one lane per stream (video, audio) and feeds each lane when
-// its next packet is due, so a packet held back on one stream never blocks the other however the
-// file interleaves them. It retries while the backend reports Full and never feeds more than
+// A reader thread reads packets into one lane per stream (video, audio), up to max_queue_us ahead;
+// the playback thread feeds each lane when its next packet is due, so a packet held back on one
+// stream never blocks the other however the file interleaves them, and a read that waits (a live
+// segment not published yet, a slow server) never stops what is queued from reaching the decoder.
+// The playback thread retries while the backend reports Full and never feeds more than
 // max_lead_us ahead of the playback clock (decoders that accept everything would otherwise receive
 // the whole file at once). After a load or seek it primes: nothing is fed until both lanes hold a
 // little (prime_video_us / prime_audio_us), then that goes in as one burst, so the decoder does not
@@ -20,6 +22,12 @@
 // Pause: when the backend cannot pause at all the controller stops feeding, unloads the decoder
 // and, on resume, reloads and seeks back to where playback stopped. A backend whose pause drains
 // (NDL: it only stops being fed) stops on the last frame fed, so that is where the clock stops.
+//
+// Buffering: when a stream's lane is empty and the decoder holds less than rebuffer_low_us of it, a
+// backend that can pause is paused and the clock stops (PlaybackSnapshot::buffering), so nothing fed
+// later arrives late for a decoder whose clock ran on (Starfish then drops every such frame). Once
+// every lane holds rebuffer_goal_us, or the source has ended, playback resumes where it stopped, as
+// a browser's media element does while it waits for data. The play state stays Playing.
 //
 // Seek: the source repositions and the backend is flushed. A backend that splices instead keeps
 // presenting what it holds first, so the clock for the new content starts only after that backlog.
@@ -70,6 +78,8 @@ struct PlaybackSnapshot {
     int64_t last_video_pts_us = kNoTime;
     int64_t last_audio_pts_us = kNoTime;  // of the latest audio packet fed
     uint64_t untimed_packets = 0;         // fed without a timestamp (a source bug if it grows)
+    bool buffering = false;               // Playing, held until enough is queued (see above)
+    uint64_t rebuffers = 0;               // times playback stopped to buffer since open
 };
 
 struct PlaybackOptions {
@@ -88,6 +98,10 @@ struct PlaybackOptions {
     int64_t prime_video_us = 700000;
     int64_t prime_audio_us = 300000;
     int64_t prime_video_max_us = 2500000;
+    // Buffering: entered when a lane is empty and the decoder holds less than rebuffer_low_us of its
+    // stream; left when every lane holds rebuffer_goal_us. Backends without pause never buffer.
+    int64_t rebuffer_low_us = 300000;
+    int64_t rebuffer_goal_us = 2000000;
     // With a splicing backend nothing fed is ever dropped, so a burst of seeks would play a piece of
     // every target. After a seek, feeding waits until no further seek has been asked for this long.
     std::chrono::milliseconds seek_settle{400};

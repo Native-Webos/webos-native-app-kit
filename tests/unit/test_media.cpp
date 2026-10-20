@@ -41,6 +41,9 @@ class ScriptedSource : public MediaSource {
     std::atomic<int> selected_audio{-2};  // at the last successful select
     int64_t audio_early_us = 0;  // audio stored this far ahead of the video it plays with
     std::atomic<int> video_read{0};  // since open or the last seek
+    // Once both streams reach stall_at_us, a read waits stall_ms (a live segment not published yet).
+    int64_t stall_at_us = kNoTime;
+    int stall_ms = 0;
 
     bool open(const std::string &uri, std::string *error) override {
         if (uri == "block") {
@@ -113,6 +116,14 @@ class ScriptedSource : public MediaSource {
     }
     Read read(Packet *out, std::string *) override {
         if (interrupted_) return Read::Interrupted;
+        if (!stalled_ && stall_at_us != kNoTime && std::min(vpts_, apts_) >= stall_at_us) {
+            stalled_ = true;
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(stall_ms);
+            while (std::chrono::steady_clock::now() < until) {
+                if (interrupted_) return Read::Interrupted;
+                std::this_thread::sleep_for(1ms);
+            }
+        }
         const bool v_more = video_ && vpts_ < duration_;
         const bool a_more = audio_ && apts_ < duration_;
         if (!v_more && !a_more) return Read::EndOfStream;
@@ -163,6 +174,7 @@ class ScriptedSource : public MediaSource {
     int64_t duration_;
     bool video_, audio_;
     int64_t vpts_ = 0, apts_ = 0, sub_next_ = 0;
+    bool stalled_ = false;
     std::atomic<bool> interrupted_{false};
 };
 
@@ -180,6 +192,9 @@ class PacedBackend : public MediaBackend {
         const std::atomic<int> *source_video_read = nullptr;
         std::atomic<int> video_read_at_first_feed{-1};
         std::atomic<int> starts{0};  // times a first video packet arrived after a load or flush
+        std::atomic<int> pauses{0}, unpauses{0};  // pause(true) / pause(false) on a pausing backend
+        std::atomic<int64_t> max_video_gap_us{0};  // longest wall-clock wait between two video packets
+        std::atomic<bool> in_order{true};  // video PTS only ever went up (between flushes)
         AudioFormat audio_format;
         std::mutex m;
     };
@@ -224,6 +239,13 @@ class PacedBackend : public MediaBackend {
                 ++log_->starts;
                 if (log_->source_video_read != nullptr) log_->video_read_at_first_feed = log_->source_video_read->load();
             }
+            const auto now = std::chrono::steady_clock::now();
+            if (log_->first_video_after_flush != p.pts_us && last_video_at_ != std::chrono::steady_clock::time_point{}) {
+                const int64_t gap = std::chrono::duration_cast<std::chrono::microseconds>(now - last_video_at_).count();
+                log_->max_video_gap_us = std::max<int64_t>(log_->max_video_gap_us, gap);
+                if (p.pts_us <= log_->last_video_pts) log_->in_order = false;
+            }
+            last_video_at_ = now;
             log_->last_video_pts = p.pts_us;
             ++log_->video;
         } else {
@@ -238,7 +260,10 @@ class PacedBackend : public MediaBackend {
     }
     void unload() override { ++log_->unloads; }
     void set_area(const Rect &) override {}
-    bool pause(bool) override { return can_pause_; }
+    bool pause(bool paused) override {
+        if (can_pause_) ++(paused ? log_->pauses : log_->unpauses);
+        return can_pause_;
+    }
     void emit(BackendEvent e) {
         if (events_) events_(e, "test");
     }
@@ -247,6 +272,7 @@ class PacedBackend : public MediaBackend {
     void restart() {
         base_ = kNoTime;
         log_->first_video_after_flush = kNoTime;
+        last_video_at_ = {};
     }
     std::shared_ptr<Log> log_;
     bool can_pause_;
@@ -254,6 +280,7 @@ class PacedBackend : public MediaBackend {
     int64_t lead_;
     int64_t base_ = kNoTime;
     std::chrono::steady_clock::time_point start_;
+    std::chrono::steady_clock::time_point last_video_at_{};
     EventFn events_;
 };
 
@@ -635,6 +662,69 @@ TEST("controller: audio-only media plays and ends on the audio clock; Ended + pl
     r.pc->play();
     REQUIRE(r.wait([&] { return r.source->seeks.load() == 1; }));
     CHECK_EQ(r.source->last_seek.load(), int64_t{0});
+    r.pc->stop();
+}
+
+TEST("controller: a read that waits does not stop what is queued from reaching the decoder") {
+    // A live segment published late: the source blocks for 1.5 s with 3 s already read. The decoder
+    // must go on receiving what is queued (it used to wait with the read, and starve).
+    auto src = std::make_unique<ScriptedSource>(6000000);
+    src->stall_at_us = 3000000;
+    src->stall_ms = 1500;
+    Rig r(std::move(src));
+    r.pc->open("stall");
+    REQUIRE(r.wait_state(PlayState::Ended, 15000ms));
+    CHECK_EQ(r.log->video.load(), 150);
+    CHECK(r.log->in_order.load());
+    std::printf("  longest wait between video packets %.2f s\n", r.log->max_video_gap_us.load() / 1e6);
+    CHECK(r.log->max_video_gap_us.load() < 400000);
+    CHECK_EQ(r.pc->snapshot().rebuffers, uint64_t{0});
+}
+
+TEST("controller: running dry pauses a pausing backend and the clock; enough queued resumes it") {
+    // The source stops for 3 s at 2 s, longer than anything queued: buffering, not dropped frames.
+    auto src = std::make_unique<ScriptedSource>(5000000);
+    src->stall_at_us = 2000000;
+    src->stall_ms = 3000;
+    Rig r(std::move(src), /*can_pause=*/true);
+    r.pc->open("stall");
+    REQUIRE(r.wait([&] { return r.pc->snapshot().buffering; }, 8000ms));
+    CHECK_EQ(r.pc->state(), PlayState::Playing);  // buffering is not a play state
+    CHECK_EQ(r.log->pauses.load(), 1);
+    const int64_t held = r.pc->snapshot().position_us;
+    CHECK(held > 1500000 && held < 2100000);  // stopped near where the data ran out
+    std::this_thread::sleep_for(500ms);
+    CHECK_EQ(r.pc->snapshot().position_us, held);  // the clock does not run while buffering
+    REQUIRE(r.wait([&] { return !r.pc->snapshot().buffering; }, 8000ms));
+    CHECK_EQ(r.log->unpauses.load(), 1);
+    REQUIRE(r.wait_state(PlayState::Ended, 15000ms));
+    CHECK_EQ(r.log->video.load(), 125);  // every frame, once, in order
+    CHECK(r.log->in_order.load());
+    const PlaybackSnapshot s = r.pc->snapshot();
+    CHECK_EQ(s.rebuffers, uint64_t{1});
+    CHECK(!s.buffering);
+    CHECK(!r.saw(PlayState::Playing, PlayState::Paused));
+}
+
+TEST("controller: a seek while buffering plays the target; a pause while buffering holds") {
+    auto src = std::make_unique<ScriptedSource>(20000000);
+    src->stall_at_us = 2000000;
+    src->stall_ms = 60000;  // never comes back by itself
+    Rig r(std::move(src), /*can_pause=*/true);
+    r.pc->open("stall");
+    REQUIRE(r.wait([&] { return r.pc->snapshot().buffering; }, 8000ms));
+    r.pc->pause();
+    REQUIRE(r.wait_state(PlayState::Paused));
+    CHECK(!r.pc->snapshot().buffering);
+    r.pc->seek(10000000);  // interrupts the stalled read; stays paused at the target
+    REQUIRE(r.wait([&] { return r.source->last_seek.load() == 10000000 && r.pc->state() == PlayState::Paused; }, 8000ms));
+    r.pc->play();
+    REQUIRE(r.wait([&] { return r.log->first_video_after_flush.load() == 10000000; }, 8000ms));
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us > 11000000; }, 8000ms));
+    CHECK_EQ(r.pc->state(), PlayState::Playing);
+    CHECK(!r.pc->snapshot().buffering);
+    CHECK_EQ(r.log->pauses.load(), 2);    // buffering, then the user's pause
+    CHECK_EQ(r.log->unpauses.load(), 1);  // play: the backend runs again
     r.pc->stop();
 }
 

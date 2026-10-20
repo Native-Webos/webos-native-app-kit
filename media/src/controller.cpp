@@ -82,9 +82,19 @@ struct PlaybackController::Core {
     void do_audio(int track);
     bool load_backend();
     void feed_one();
-    bool read_one();          // false: nothing read (interrupted, finished, failed)
     bool prime_done() const;  // playback thread
     void clear_lanes();
+    // Reader thread: reads the source into the lanes while they have room and it is resumed.
+    void reader_loop();
+    bool lanes_room() const;  // lanes_mutex_ held
+    // Playback thread, around every use of the source: park stops the reader (interrupting a read
+    // in progress) and waits until it is idle; resume lets it read on from where the source is.
+    void park_reader();
+    void resume_reader();
+    void quit_reader();
+    // Buffering (playback thread): stop or restart the backend and the clock.
+    bool update_buffering();  // true: hold feeding for now
+    void leave_buffering(bool restart_clock);
     void set_state(PlayState s, const std::string &error = {});
     void fail(const std::string &error);
     int64_t estimated_position() const;  // lock held; never before the clock's base (for display)
@@ -111,12 +121,23 @@ struct PlaybackController::Core {
     // Playback thread only.
     bool loaded_ = false;
     bool feeding_ = false;
-    bool source_done_ = false;
+    bool source_ready_ = false;  // opened and selected: the reader may read it
+    bool buffering_ = false;     // the backend is paused for buffering
     int64_t last_primary_pts_ = kNoTime;  // last PTS fed on the stream that drives the clock (guarded by mutex_)
     int64_t last_any_pts_ = kNoTime;      // last PTS fed on any stream (guarded by mutex_)
     int64_t splice_delay_us_ = 0;         // the next clock start waits this long (guarded by mutex_)
+    // Lanes, filled by the reader thread and emptied by the playback thread (guarded by lanes_mutex_;
+    // only the playback thread pops or clears them, so the front element stays put while it is fed).
+    mutable std::mutex lanes_mutex_;
+    std::condition_variable reader_cv_;
     std::deque<Packet> lanes_[2];  // [0] video, [1] audio
     size_t lane_bytes_ = 0;
+    bool reader_on_ = false;    // the playback thread lets it read
+    bool reader_busy_ = false;  // in source_->read()
+    bool reader_quit_ = false;
+    std::string reader_error_;  // a read failed; the playback thread fails with it
+    std::atomic<bool> source_done_{false};
+    std::thread reader_;
     bool priming_ = false;
     bool eos_sent_ = false;  // backend told everything is fed
     std::atomic<int64_t> last_seek_request_ms_{0};  // steady clock, from seek() on the main thread
@@ -138,15 +159,17 @@ PlaybackController::Core::Core(std::unique_ptr<MediaSource> source, std::unique_
 
 void PlaybackController::Core::start(const std::shared_ptr<Core> &self) {
     thread_ = std::thread([self] { self->run(); });
+    reader_ = std::thread([self] { self->reader_loop(); });
 }
 
 PlaybackController::Core::~Core() {
-    // The last reference may be the playback thread's own (it was detached and has now finished).
-    if (thread_.joinable()) {
-        if (thread_.get_id() == std::this_thread::get_id()) {
-            thread_.detach();
+    // The last reference may be the playback or reader thread's own (detached, and now finished).
+    for (std::thread *t : {&thread_, &reader_}) {
+        if (!t->joinable()) continue;
+        if (t->get_id() == std::this_thread::get_id()) {
+            t->detach();
         } else {
-            thread_.join();
+            t->join();
         }
     }
 }
@@ -334,6 +357,9 @@ void PlaybackController::Core::set_state(PlayState s, const std::string &error) 
 
 void PlaybackController::Core::fail(const std::string &error) {
     feeding_ = false;
+    park_reader();
+    source_ready_ = false;
+    leave_buffering(false);
     clear_lanes();
     if (loaded_) {
         backend_->unload();
@@ -370,6 +396,7 @@ void PlaybackController::Core::run() {
         }
         if (cmd) {
             if (!apply(*cmd)) return;
+            resume_reader();  // a command may have interrupted it; reads on from where the source is
             continue;
         }
         if (has_commands()) {
@@ -435,6 +462,9 @@ bool PlaybackController::Core::apply(const Command &c) {
             break;
         case Cmd::Stop:
             feeding_ = false;
+            quit_reader();
+            source_ready_ = false;
+            leave_buffering(false);
             clear_lanes();
             if (loaded_) {
                 backend_->unload();
@@ -452,6 +482,9 @@ bool PlaybackController::Core::apply(const Command &c) {
 }
 
 void PlaybackController::Core::do_open(const std::string &uri) {
+    park_reader();
+    source_ready_ = false;
+    leave_buffering(false);
     if (loaded_) {
         backend_->unload();
         loaded_ = false;
@@ -488,6 +521,7 @@ void PlaybackController::Core::do_open(const std::string &uri) {
         fail("tracks not playable: " + err);
         return;
     }
+    source_ready_ = true;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snap_.info = info;
@@ -541,6 +575,11 @@ void PlaybackController::Core::do_seek(int64_t pts_us) {
         if (resume && pos != kNoTime && last_any_pts_ != kNoTime) splice_delay = std::max<int64_t>(0, last_any_pts_ - pos);
         splice_delay += caps.splice_gap_us;
     }
+    park_reader();
+    if (buffering_) {
+        if (loaded_) backend_->pause(false);  // the seek decides whether it plays or holds
+        leave_buffering(false);
+    }
     set_state(PlayState::Seeking);
     source_->reset_interrupt();
     clear_lanes();
@@ -585,6 +624,7 @@ void PlaybackController::Core::do_seek(int64_t pts_us) {
 void PlaybackController::Core::do_pause(bool release) {
     const BackendCaps caps = backend_->caps();
     const bool hold = caps.pause && !release;
+    leave_buffering(false);  // already held where buffering stopped it; paused_at_us_ stays
     {
         std::lock_guard<std::mutex> lock(mutex_);
         int64_t at = raw_position();
@@ -627,6 +667,7 @@ void PlaybackController::Core::do_resume() {
     } else {
         if (!loaded_ && !load_backend()) return;
         std::string err;
+        park_reader();
         source_->reset_interrupt();
         source_done_ = false;
         eos_seen_ = false;
@@ -675,6 +716,8 @@ void PlaybackController::Core::do_audio(int track) {
     // Selecting can fetch (DASH/HLS: the new rendition's init segment), so say so before it starts.
     if (before != PlayState::Paused) set_state(PlayState::Seeking);
     feeding_ = false;
+    park_reader();
+    leave_buffering(false);
     clear_lanes();
     if (loaded_) {
         backend_->unload();
@@ -726,9 +769,13 @@ void PlaybackController::Core::do_audio(int track) {
 }
 
 void PlaybackController::Core::clear_lanes() {
-    lanes_[0].clear();
-    lanes_[1].clear();
-    lane_bytes_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        lanes_[0].clear();
+        lanes_[1].clear();
+        lane_bytes_ = 0;
+    }
+    reader_cv_.notify_all();  // room again
     eos_sent_ = false;  // every caller restarts or stops feeding
 }
 
@@ -749,37 +796,181 @@ bool PlaybackController::Core::prime_done() const {
         has_video = snap_.format.video.has_value();
         has_audio = snap_.format.audio.has_value();
     }
+    std::lock_guard<std::mutex> lock(lanes_mutex_);
     const int64_t v = lane_span(lanes_[0]), a = lane_span(lanes_[1]);
     if (has_video && v >= options_.prime_video_max_us) return true;  // no audio coming soon
     if (lane_bytes_ >= options_.max_queue_bytes) return true;
     return (!has_video || v >= options_.prime_video_us) && (!has_audio || a >= options_.prime_audio_us);
 }
 
-bool PlaybackController::Core::read_one() {
-    Packet p;
-    std::string err;
-    switch (source_->read(&p, &err)) {
-        case MediaSource::Read::Packet: break;
-        case MediaSource::Read::EndOfStream:
-            WNK_LOGI(kCat, "source finished");
-            source_done_ = true;
-            return false;
-        case MediaSource::Read::Interrupted: return false;  // a command is waiting
-        case MediaSource::Read::Error: fail("read failed: " + err); return false;
-    }
-    if (p.type == TrackType::Subtitle) {
-        // Never fed to the backend: the app draws them from the store.
-        if (p.subtitle) subtitles_.add(p.subtitle);
-        return true;
-    }
-    if (p.type != TrackType::Video && p.type != TrackType::Audio) return true;
-    lane_bytes_ += p.data.size();
-    lanes_[p.type == TrackType::Video ? 0 : 1].push_back(std::move(p));
-    return true;
+// ---- reader thread ----------------------------------------------------------------------------------
+
+bool PlaybackController::Core::lanes_room() const {
+    return lane_bytes_ < options_.max_queue_bytes &&
+           (lanes_[0].empty() || lanes_[1].empty() ||
+            (lane_span(lanes_[0]) < options_.max_queue_us && lane_span(lanes_[1]) < options_.max_queue_us));
 }
 
+void PlaybackController::Core::reader_loop() {
+    std::unique_lock<std::mutex> lock(lanes_mutex_);
+    for (;;) {
+        reader_cv_.wait(lock, [this] {
+            return reader_quit_ || (reader_on_ && !source_done_ && reader_error_.empty() && lanes_room());
+        });
+        if (reader_quit_) return;
+        reader_busy_ = true;
+        lock.unlock();
+        Packet p;
+        std::string err;
+        const MediaSource::Read r = source_->read(&p, &err);
+        lock.lock();
+        reader_busy_ = false;
+        // Parked meanwhile: whatever came back belongs to a position about to be left.
+        if (reader_on_) {
+            switch (r) {
+                case MediaSource::Read::Packet:
+                    if (p.type == TrackType::Subtitle) {
+                        // Never fed to the backend: the app draws them from the store.
+                        if (p.subtitle) subtitles_.add(p.subtitle);
+                    } else if (p.type == TrackType::Video || p.type == TrackType::Audio) {
+                        lane_bytes_ += p.data.size();
+                        lanes_[p.type == TrackType::Video ? 0 : 1].push_back(std::move(p));
+                    }
+                    break;
+                case MediaSource::Read::EndOfStream:
+                    WNK_LOGI(kCat, "source finished");
+                    source_done_ = true;
+                    break;
+                case MediaSource::Read::Interrupted:
+                    reader_on_ = false;  // a command is waiting; the playback thread resumes it
+                    break;
+                case MediaSource::Read::Error: reader_error_ = err.empty() ? "unknown error" : err; break;
+            }
+        }
+        reader_cv_.notify_all();  // park_reader() waits for it to be idle
+        cv_.notify_all();         // the playback thread waits for packets
+    }
+}
+
+void PlaybackController::Core::park_reader() {
+    {
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        reader_on_ = false;
+    }
+    source_->interrupt();
+    std::unique_lock<std::mutex> lock(lanes_mutex_);
+    reader_cv_.wait(lock, [this] { return !reader_busy_; });
+}
+
+void PlaybackController::Core::resume_reader() {
+    source_->reset_interrupt();
+    {
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        if (reader_on_ || !source_ready_) return;
+        reader_on_ = true;
+    }
+    reader_cv_.notify_all();
+}
+
+void PlaybackController::Core::quit_reader() {
+    {
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        reader_on_ = false;
+        reader_quit_ = true;
+    }
+    source_->interrupt();
+    reader_cv_.notify_all();
+    if (reader_.joinable() && reader_.get_id() != std::this_thread::get_id()) reader_.join();
+}
+
+// ---- buffering (playback thread) ---------------------------------------------------------------------
+
+// Enters or leaves buffering; true while it holds feeding.
+bool PlaybackController::Core::update_buffering() {
+    const BackendCaps caps = backend_->caps();
+    if (!loaded_ || !caps.pause || priming_) return buffering_;
+    const bool done = source_done_;
+    int64_t span[2], lead[2];
+    bool active[2], empty[2];
+    {
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        for (int i = 0; i < 2; ++i) {
+            empty[i] = lanes_[i].empty();
+            span[i] = lane_span(lanes_[i]);
+        }
+    }
+    int64_t pos;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active[0] = snap_.format.video.has_value();
+        active[1] = snap_.format.audio.has_value();
+        pos = raw_position();
+        const int64_t last[2] = {snap_.last_video_pts_us, snap_.last_audio_pts_us};
+        for (int i = 0; i < 2; ++i) lead[i] = last[i] == kNoTime || pos == kNoTime ? 0 : last[i] - pos;
+        if (!buffering_ && !clock_running_) return false;  // nothing presented yet, or paused
+    }
+    if (!buffering_) {
+        bool starving = false;
+        for (int i = 0; i < 2; ++i) starving = starving || (active[i] && empty[i] && lead[i] < options_.rebuffer_low_us);
+        if (!starving || done) return false;
+        if (!backend_->pause(true)) return false;  // cannot hold: carry on as without buffering
+        buffering_ = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            int64_t at = raw_position();
+            if (caps.pause_drains && last_primary_pts_ != kNoTime) at = std::max(at, last_primary_pts_);
+            paused_at_us_ = at;
+            clock_running_ = false;
+            snap_.buffering = true;
+            ++snap_.rebuffers;
+        }
+        WNK_LOGI(kCat, "buffering at %.2f s: decoder ahead video %.2f s, audio %.2f s; queued %.2f s, %.2f s",
+                 pos / 1e6, lead[0] / 1e6, lead[1] / 1e6, span[0] / 1e6, span[1] / 1e6);
+        return true;
+    }
+    bool enough = true;
+    for (int i = 0; i < 2; ++i) enough = enough && (!active[i] || span[i] >= options_.rebuffer_goal_us);
+    size_t bytes;
+    {
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        bytes = lane_bytes_;
+    }
+    if (!enough && !done && bytes < options_.max_queue_bytes) return true;
+    WNK_LOGI(kCat, "buffered: queued %.2f s video, %.2f s audio%s", span[0] / 1e6, span[1] / 1e6, done ? " (source ended)" : "");
+    backend_->pause(false);
+    leave_buffering(/*restart_clock=*/true);
+    return false;
+}
+
+// restart_clock: the backend was unpaused here, playback carries on from where it stopped; else the
+// caller takes over the paused state (a pause, seek, reload).
+void PlaybackController::Core::leave_buffering(bool restart_clock) {
+    if (!buffering_) return;
+    buffering_ = false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    snap_.buffering = false;
+    if (restart_clock && paused_at_us_ != kNoTime) {
+        clock_base_us_ = paused_at_us_;
+        clock_start_ = std::chrono::steady_clock::now();
+        paused_at_us_ = kNoTime;
+        clock_running_ = true;
+    }
+}
+
+// ---- playback thread: feeding ------------------------------------------------------------------------
+
 void PlaybackController::Core::feed_one() {
-    const bool lanes_empty = lanes_[0].empty() && lanes_[1].empty();
+    bool lanes_empty;
+    std::string read_error;
+    {
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        lanes_empty = lanes_[0].empty() && lanes_[1].empty();
+        read_error.swap(reader_error_);
+    }
+    if (!read_error.empty()) {
+        fail("read failed: " + read_error);
+        return;
+    }
     if (source_done_ && lanes_empty) {
         // Everything is fed: wait for the backend to present it.
         if (!eos_sent_ && loaded_) {
@@ -812,7 +1003,9 @@ void PlaybackController::Core::feed_one() {
 
     if (priming_) {
         if (!prime_done()) {
-            read_one();
+            // The reader is filling the lanes.
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, std::chrono::milliseconds(10), [this] { return !commands_.empty(); });
             return;
         }
         if (backend_->caps().seek_splices) {
@@ -831,15 +1024,27 @@ void PlaybackController::Core::feed_one() {
         priming_ = false;
     }
 
+    if (update_buffering()) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait_for(lock, std::chrono::milliseconds(20), [this] { return !commands_.empty(); });
+        return;
+    }
+
     // The lane whose head is due and earliest; how long until one is, otherwise.
     int lane = -1;
     int64_t wait_us = 20000;
+    Packet *heads[2] = {nullptr, nullptr};
+    {
+        // Only this thread pops the lanes, so a head stays valid after the lock is let go.
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        for (int i = 0; i < 2; ++i) heads[i] = lanes_[i].empty() ? nullptr : &lanes_[i].front();
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const int64_t pos = raw_position();
         for (int i = 0; i < 2; ++i) {
-            if (lanes_[i].empty()) continue;
-            const int64_t pts = lanes_[i].front().pts_us;
+            if (heads[i] == nullptr) continue;
+            const int64_t pts = heads[i]->pts_us;
             const int64_t ahead = options_.max_lead_us > 0 && clock_running_ && pts != kNoTime && pos != kNoTime
                                       ? pts - pos - options_.max_lead_us
                                       : 0;
@@ -847,26 +1052,17 @@ void PlaybackController::Core::feed_one() {
                 wait_us = std::min(wait_us, ahead);
                 continue;
             }
-            if (lane < 0 || (pts != kNoTime && lanes_[lane].front().pts_us != kNoTime && pts < lanes_[lane].front().pts_us)) {
-                lane = i;
-            }
+            if (lane < 0 || (pts != kNoTime && heads[lane]->pts_us != kNoTime && pts < heads[lane]->pts_us)) lane = i;
         }
     }
     if (lane < 0) {
-        // Nothing due: read ahead while there is room, else wait for the clock.
-        const bool room = lane_bytes_ < options_.max_queue_bytes &&
-                          (lanes_[0].empty() || lanes_[1].empty() ||
-                           (lane_span(lanes_[0]) < options_.max_queue_us && lane_span(lanes_[1]) < options_.max_queue_us));
-        if (!source_done_ && room) {
-            read_one();
-            return;
-        }
+        // Nothing due: wait for the clock or for the reader.
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait_for(lock, std::chrono::microseconds(wait_us), [this] { return !commands_.empty(); });
         return;
     }
 
-    Packet &pkt = lanes_[lane].front();
+    Packet &pkt = *heads[lane];
     switch (backend_->feed(pkt)) {
         case MediaBackend::Feed::Accepted: {
             {
@@ -894,8 +1090,12 @@ void PlaybackController::Core::feed_one() {
                     clock_running_ = true;
                 }
             }
-            lane_bytes_ -= std::min(lane_bytes_, pkt.data.size());
-            lanes_[lane].pop_front();
+            {
+                std::lock_guard<std::mutex> lock(lanes_mutex_);
+                lane_bytes_ -= std::min(lane_bytes_, pkt.data.size());
+                lanes_[lane].pop_front();
+            }
+            reader_cv_.notify_all();  // room again
             break;
         }
         case MediaBackend::Feed::Full: {

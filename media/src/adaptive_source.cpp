@@ -1656,15 +1656,29 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
     if (!m.ensure_segments(v, error)) return false;
     if (m.pres.live) {
         // Join a few segments behind the newest (HLS: three target durations; DASH: the suggested
-        // presentation delay, else three segments), which leaves room for the next refresh.
+        // presentation delay, else three segments), which leaves room for the next refresh. The
+        // newest and the segment length are those of every rendition that may play (audio
+        // segments can be longer than video ones and end earlier), and a DASH presentation delay
+        // never puts the join point within two segments of that edge: a segment is only published
+        // once complete, so the next one would not be there in time.
         int64_t seg = v.target_duration_us;
-        for (const MediaSegment &s : v.segments) seg = std::max(seg, s.duration_us);
-        const int64_t delay = !hls && m.pres.live_delay_us != kNoTime ? m.pres.live_delay_us : 3 * seg;
-        const MediaSegment &last = v.segments.back();
-        m.position_us = std::max(v.segments.front().start_us, last.start_us + last.duration_us - delay);
+        int64_t edge = v.segments.back().start_us + v.segments.back().duration_us;
+        auto consider = [&](const Rendition &r) {
+            if (r.segments.empty()) return;
+            for (const MediaSegment &s : r.segments) seg = std::max(seg, s.duration_us);
+            edge = std::min(edge, r.segments.back().start_us + r.segments.back().duration_us);
+        };
+        consider(v);
+        if (!hls) {
+            for (const Rendition &r : m.pres.renditions) {
+                if (r.type == TrackType::Audio && r.period == v.period) consider(r);
+            }
+        }
+        const int64_t delay = !hls && m.pres.live_delay_us != kNoTime ? std::max(m.pres.live_delay_us, 2 * seg) : 3 * seg;
+        m.position_us = std::max(v.segments.front().start_us, edge - delay);
         m.pres.duration_us = kNoTime;
-        WNK_LOGI(kCat, "live: %zu segments listed, joining at %.1f s of %.1f s", v.segments.size(), m.position_us / 1e6,
-                 (last.start_us + last.duration_us) / 1e6);
+        WNK_LOGI(kCat, "live: %zu segments listed, joining at %.1f s of %.1f s (segments up to %.1f s)", v.segments.size(),
+                 m.position_us / 1e6, edge / 1e6, seg / 1e6);
     } else if (m.pres.duration_us == kNoTime) {
         int64_t total = 0;
         for (const MediaSegment &s : v.segments) total = std::max(total, s.start_us + s.duration_us);

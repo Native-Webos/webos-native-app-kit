@@ -323,7 +323,7 @@ class PlayerScreen : public Screen {
             ++next_cap_;
         }
         const PlaybackSnapshot s = controller_->snapshot();
-        const bool busy = s.state == PlayState::Opening || s.state == PlayState::Seeking;
+        const bool busy = s.state == PlayState::Opening || s.state == PlayState::Seeking || s.buffering;
         // The screensaver may start when paused, ended or failed, never while the video moves.
         if (busy || s.state == PlayState::Playing) {
             if (!screen_on_.held()) screen_on_ = ctx_.keep_screen_on("video playing");
@@ -331,7 +331,7 @@ class PlayerScreen : public Screen {
             screen_on_.release();
         }
         spinner_->set_visible(busy);
-        status_->set_text(s.state == PlayState::Error ? "Error" : play_state_name(s.state));
+        status_->set_text(s.state == PlayState::Error ? "Error" : s.buffering ? "Buffering" : play_state_name(s.state));
         // A stream without a duration (live DASH/HLS) shows LIVE instead.
         const bool live = s.duration_us == kNoTime && (s.info.container == "dash" || s.info.container == "hls");
         time_->set_text(clock_text(s.position_us) + " / " + (live ? std::string("LIVE") : clock_text(s.duration_us)) +

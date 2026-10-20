@@ -24,6 +24,11 @@
 //   {"licenseUrl": "https://..."}          ClearKey licence server (else the one the manifest names)
 //   {"seeks": "15:+10,17:+10"}             scripted relative seeks (seconds after the player opens:
 //                                          seconds to seek), for reproducing seek bugs without a remote
+//   {"startKbps": 1000}                    DASH/HLS: throughput assumed before the first measurement
+//                                          (default 6000), to start low and watch the bitrate climb
+//   {"capKbps": "0:800,20:0"}              scripted video bandwidth caps (seconds after the player opens:
+//                                          kb/s, 0 lifts the cap), to force bitrate switches on demand
+//   {"codecs": "h264"}                     DASH/HLS: only renditions of this video codec (h264, hevc)
 //   {"audio": "5:2,9:1"}                   scripted audio track changes (seconds after the player opens:
 //                                          stream index), for checking the switch without a remote
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
@@ -102,6 +107,9 @@ struct Settings {
     std::string language;  // preferred audio language for DASH/HLS
     std::vector<std::pair<double, double>> seeks;  // scripted: (seconds after opening, relative seek)
     std::vector<std::pair<double, double>> audio_switches;  // scripted: (seconds after opening, audio track)
+    std::vector<std::pair<double, double>> caps;  // scripted: (seconds after opening, video cap in kb/s)
+    int64_t start_bps = 0;                        // AdaptiveSourceOptions::initial_bandwidth; 0: default
+    std::string codecs;                           // "h264" or "hevc": only that video codec; empty: by the TV
     DeviceMediaCaps device;
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
     ContentKeys keys;         // ClearKey content keys ({"keys": ...})
@@ -141,7 +149,8 @@ std::unique_ptr<MediaBackend> make_backend(const Settings &s) {
 
 // DASH/HLS manifests go to the AdaptiveSource, everything else to FfmpegSource. Renditions are
 // chosen from what the TV reports: HEVC first when it has HEVC, 2160p only on a UHD panel.
-std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &uri) {
+// `adaptive` (if given) is set to the AdaptiveSource made, for the scripted bandwidth caps.
+std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &uri, AdaptiveSource **adaptive = nullptr) {
     if (AdaptiveSource::handles(uri)) {
         AdaptiveSourceOptions o;
         o.http = s.http;
@@ -152,7 +161,12 @@ std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &u
         o.dolby_vision = s.device.dolby_vision == true;
         o.keys = s.keys;
         o.license_url = s.license_url;
-        return std::make_unique<AdaptiveSource>(o);
+        if (s.start_bps > 0) o.initial_bandwidth = s.start_bps;
+        if (s.codecs == "h264") o.video_codecs = {CodecId::H264};
+        if (s.codecs == "hevc") o.video_codecs = {CodecId::Hevc};
+        auto src = std::make_unique<AdaptiveSource>(o);
+        if (adaptive) *adaptive = src.get();
+        return src;
     }
     FfmpegSourceOptions o;
     o.http = s.http;
@@ -166,7 +180,7 @@ std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &u
 class PlayerScreen : public Screen {
  public:
     PlayerScreen(wnk::app::Context &ctx, const Settings &s, std::string uri, std::string title)
-        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks), audio_switches_(s.audio_switches) {
+        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks), audio_switches_(s.audio_switches), caps_(s.caps) {
         name = "player";
         // Under the controls: subtitles over the whole picture.
         subs_view_ = &add<SubtitleView>();
@@ -196,7 +210,7 @@ class PlayerScreen : public Screen {
         backend_name_ = backend->name();
         PlaybackOptions po;
         po.max_lead_us = static_cast<int64_t>(s.lead_ms) * 1000;
-        controller_ = std::make_unique<PlaybackController>(make_source(s, uri_), std::move(backend), ctx.dispatcher(), po);
+        controller_ = std::make_unique<PlaybackController>(make_source(s, uri_, &adaptive_), std::move(backend), ctx.dispatcher(), po);
         controller_->set_state_callback([this](PlayState from, PlayState to, const PlaybackSnapshot &snap) {
             WNK_LOGI(kCat, "player state %s -> %s%s%s", play_state_name(from), play_state_name(to),
                      snap.error.empty() ? "" : ": ", snap.error.c_str());
@@ -301,6 +315,12 @@ class PlayerScreen : public Screen {
             WNK_LOGI(kCat, "scripted audio track %d", track);
             controller_->set_audio_track(track);
             ++next_audio_;
+        }
+        while (adaptive_ && next_cap_ < caps_.size() && ui.now_ms() - opened_ms_ >= caps_[next_cap_].first * 1000) {
+            const int64_t bps = static_cast<int64_t>(caps_[next_cap_].second * 1000);
+            WNK_LOGI(kCat, "scripted video cap %lld kb/s", static_cast<long long>(bps / 1000));
+            adaptive_->set_bandwidth_limit(bps);
+            ++next_cap_;
         }
         const PlaybackSnapshot s = controller_->snapshot();
         const bool busy = s.state == PlayState::Opening || s.state == PlayState::Seeking;
@@ -483,6 +503,9 @@ class PlayerScreen : public Screen {
     size_t next_seek_ = 0;
     std::vector<std::pair<double, double>> audio_switches_;
     size_t next_audio_ = 0;
+    std::vector<std::pair<double, double>> caps_;
+    size_t next_cap_ = 0;
+    AdaptiveSource *adaptive_ = nullptr;  // owned by controller_; null for files
 };
 
 // ---- experiment: DRM through the platform pipeline -----------------------------------------------
@@ -897,6 +920,11 @@ class Player : public wnk::app::Delegate {
             };
             timed("seeks", &s.seeks);
             timed("audio", &s.audio_switches);
+            timed("capKbps", &s.caps);
+            if (params.contains("codecs") && params["codecs"].is_string()) s.codecs = params["codecs"];
+            if (params.contains("startKbps") && params["startKbps"].is_number_integer()) {
+                s.start_bps = std::clamp<int64_t>(params["startKbps"].get<int64_t>(), 100, 1000000) * 1000;
+            }
         }
         if (wnk::platform::kIsWebOS) {
             s.device = DeviceMediaCaps::detect();

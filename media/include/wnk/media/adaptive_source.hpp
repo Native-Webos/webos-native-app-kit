@@ -36,9 +36,13 @@
 //             (HLS: three target durations; DASH: suggestedPresentationDelay, else three segments) on
 //             a timeline that starts at the window's first segment; duration is unknown and seeks are
 //             clamped to what the server still lists. A refresher thread reloads the playlists in use
-//             (HLS: every target duration) or the MPD (minimumUpdatePeriod) and appends new segments,
-//             by sequence number, to the open-ended readers of every rendition in use, including a
-//             bitrate switch in progress. HLS ENDLIST or an MPD turned static ends the stream.
+//             (HLS: every target duration) or the MPD and appends new segments, by sequence number, to
+//             the open-ended readers of every rendition in use, including a bitrate switch in progress.
+//             DASH: every segment duration it reads the last MPD again against the clock (a
+//             SegmentTemplate@duration makes segments available by time, not with a new MPD) and
+//             fetches the MPD itself every minimumUpdatePeriod; it follows every rendition the bitrate
+//             may switch to, so a switch lands on the segment it was decided at. HLS ENDLIST or an MPD
+//             turned static ends the stream.
 //             Live subtitles are followed too: from shortly before the join point, each list's
 //             new segments as it grows (HLS: the loader reloads the subtitle playlists; DASH: the
 //             refresher merges the subtitle renditions with the MPD).

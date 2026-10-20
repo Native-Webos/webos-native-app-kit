@@ -531,6 +531,7 @@ struct LiveRun {
     bool ordered = true, timed = true;
     MediaSource::Read end = MediaSource::Read::Error;
     double seconds = 0;
+    double max_gap = 0;  // longest wait between two video packets, seconds
 };
 
 LiveRun play_live(AdaptiveSource &s) {
@@ -541,8 +542,12 @@ LiveRun play_live(AdaptiveSource &s) {
     const auto t0 = std::chrono::steady_clock::now();
     Packet p;
     int64_t last = INT64_MIN;
+    auto prev = t0;
     while ((run.end = s.read(&p, &err)) == MediaSource::Read::Packet) {
         if (p.type != TrackType::Video) continue;
+        const auto now = std::chrono::steady_clock::now();
+        if (run.video > 0) run.max_gap = std::max(run.max_gap, std::chrono::duration<double>(now - prev).count());
+        prev = now;
         ++run.video;
         run.timed = run.timed && p.pts_us != kNoTime;
         run.ordered = run.ordered && p.dts_us > last;
@@ -692,6 +697,52 @@ TEST("adaptive source live: dynamic DASH segments become available by the clock;
     CHECK(run.seconds > 4.0);
 }
 
+TEST("adaptive source live: DASH segments are followed by the clock between MPD updates") {
+    SKIP_UNLESS_READY();
+    // minimumUpdatePeriod 8 s over 2 s segments (live services often publish 10-60 s): the MPD
+    // describes the next segments already, so each must be read when it becomes available, not with
+    // the next MPD. Waiting for the MPD starved playback for 8 s here (and the TV dropped every late frame).
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    const auto ast = std::chrono::system_clock::now() - std::chrono::milliseconds(4500);
+    auto mpd = [&](bool dynamic) {
+        const std::string tmpl = "<SegmentTemplate timescale=\"1000000\" duration=\"2000000\" initialization=\"d-init-$RepresentationID$.m4s\" "
+                                 "media=\"d-$RepresentationID$-$Number%05d$.m4s\" startNumber=\"1\"/>";
+        std::string m = "<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" ";
+        m += dynamic ? "type=\"dynamic\" availabilityStartTime=\"" + iso_utc(ast) + "\" minimumUpdatePeriod=\"PT8S\" timeShiftBufferDepth=\"PT30S\""
+                     : "type=\"static\" mediaPresentationDuration=\"PT10S\"";
+        m += "><Period id=\"0\" start=\"PT0S\"><AdaptationSet id=\"0\" contentType=\"video\">" + tmpl +
+             "<Representation id=\"0\" mimeType=\"video/mp4\" codecs=\"avc1.64000d\" bandwidth=\"312164\" width=\"320\" height=\"240\"/>"
+             "</AdaptationSet><AdaptationSet id=\"1\" contentType=\"audio\">" + tmpl +
+             "<Representation id=\"1\" mimeType=\"audio/mp4\" codecs=\"mp4a.40.2\" bandwidth=\"69000\" audioSamplingRate=\"48000\"/>"
+             "</AdaptationSet></Period></MPD>";
+        write_file(d + "/du.mpd", m);
+    };
+    mpd(true);
+    std::atomic<bool> stop{false};
+    std::thread server([&] {
+        while (!stop && std::chrono::system_clock::now() < ast + std::chrono::milliseconds(10600)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!stop) mpd(false);  // the MPD fetched 8 s after opening ends the event
+    });
+    AdaptiveSource s(options());
+    std::string err;
+    const bool opened = s.open(url("du.mpd"), &err);
+    LiveRun run;
+    if (opened) {
+        CHECK_EQ(s.presentation().renditions[0].segments.size(), size_t{2});
+        run = play_live(s);
+    }
+    stop = true;
+    server.join();
+    REQUIRE(opened);
+    CHECK(run.end == MediaSource::Read::EndOfStream);
+    CHECK_EQ(run.video, size_t{250});
+    CHECK(run.ordered && run.timed);
+    std::printf("  longest wait between video packets %.2f s\n", run.max_gap);
+    CHECK(run.max_gap < 3.5);  // a segment every 2 s, not one MPD's worth every 8 s
+}
+
 TEST("adaptive source: HLS behind Referer, Origin and a cookie the playlist sets") {
     SKIP_UNLESS_READY();
     // ts.m3u8 at /guard/: every request needs the site's Referer and Origin, every segment the
@@ -782,6 +833,79 @@ TEST("adaptive source: bitrate switches up on a fast link and down under a limit
     CHECK(s.switches() >= 2);
     CHECK_EQ(height(s.video_rendition()), 120);  // ended on the lowest rung
     CHECK(s.throughput_estimate() > 1500000);   // localhost is fast
+}
+
+TEST("adaptive source live: a DASH bitrate switch lands on the current segment of the new rendition") {
+    SKIP_UNLESS_READY();
+    // The 20 s ladder as a live event already 12.5 s in. The renditions not playing must be followed
+    // too: a switch to one whose list stayed as the MPD had it at open went back to its last listed
+    // segment, and the picture jumped back in time (on the TV: seconds of dropped frames).
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    const auto ast = std::chrono::system_clock::now() - std::chrono::milliseconds(12500);
+    auto mpd = [&](bool dynamic) {
+        const std::string tmpl = "<SegmentTemplate timescale=\"1000000\" duration=\"2000000\" initialization=\"l-init-$RepresentationID$.m4s\" "
+                                 "media=\"l-$RepresentationID$-$Number%05d$.m4s\" startNumber=\"1\"/>";
+        std::string m = "<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" ";
+        m += dynamic ? "type=\"dynamic\" availabilityStartTime=\"" + iso_utc(ast) + "\" minimumUpdatePeriod=\"PT4S\" timeShiftBufferDepth=\"PT30S\""
+                     : "type=\"static\" mediaPresentationDuration=\"PT20S\"";
+        m += "><Period id=\"0\" start=\"PT0S\"><AdaptationSet id=\"0\" contentType=\"video\">" + tmpl +
+             "<Representation id=\"0\" mimeType=\"video/mp4\" codecs=\"avc1.64000c\" bandwidth=\"100000\" width=\"160\" height=\"120\"/>"
+             "<Representation id=\"1\" mimeType=\"video/mp4\" codecs=\"avc1.64000d\" bandwidth=\"400000\" width=\"320\" height=\"240\"/>"
+             "<Representation id=\"2\" mimeType=\"video/mp4\" codecs=\"avc1.64001e\" bandwidth=\"1500000\" width=\"640\" height=\"480\"/>"
+             "</AdaptationSet><AdaptationSet id=\"1\" contentType=\"audio\">" + tmpl +
+             "<Representation id=\"3\" mimeType=\"audio/mp4\" codecs=\"mp4a.40.2\" bandwidth=\"69000\" audioSamplingRate=\"48000\"/>"
+             "</AdaptationSet></Period></MPD>";
+        write_file(d + "/ll.mpd", m);
+    };
+    mpd(true);
+    std::atomic<bool> stop{false};
+    std::thread server([&] {
+        // Static (all ten segments) before the MPD fetch 8 s after opening, which ends the event
+        // before the clock lists an eleventh segment.
+        while (!stop && std::chrono::system_clock::now() < ast + std::chrono::milliseconds(19000)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!stop) mpd(false);
+    });
+    AdaptiveSourceOptions o = options();
+    o.initial_bandwidth = 2000000;  // starts on the top rung
+    o.max_ahead_us = 4000000;
+    AdaptiveSource s(o);
+    std::string err;
+    const bool opened = s.open(url("ll.mpd"), &err);
+    std::vector<int64_t> pts;
+    bool monotonic = true;
+    int64_t last_dts = INT64_MIN;
+    MediaSource::Read end = MediaSource::Read::Error;
+    StreamFormat f;
+    if (opened && s.select(0, 1, starfish_like(), &f, &err)) {
+        const auto t0 = std::chrono::steady_clock::now();
+        bool capped = false;
+        Packet p;
+        while ((end = s.read(&p, &err)) == MediaSource::Read::Packet) {
+            if (p.type != TrackType::Video) continue;
+            monotonic = monotonic && p.dts_us > last_dts;
+            last_dts = p.dts_us;
+            pts.push_back(p.pts_us);
+            // 4 s after opening: the segments since then are ones the MPD did not list at open.
+            if (!capped && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(4)) {
+                s.set_bandwidth_limit(150000);
+                capped = true;
+            }
+        }
+    }
+    stop = true;
+    server.join();
+    REQUIRE(opened);
+    if (end != MediaSource::Read::EndOfStream) std::printf("  live read ended: %s\n", err.c_str());
+    CHECK(end == MediaSource::Read::EndOfStream);
+    CHECK(monotonic);  // no jump back in time at the switch
+    std::sort(pts.begin(), pts.end());
+    CHECK(std::adjacent_find(pts.begin(), pts.end()) == pts.end());  // every frame once
+    REQUIRE(!pts.empty());
+    CHECK(pts.back() - pts.front() == static_cast<int64_t>(pts.size() - 1) * 40000);  // and none missing
+    CHECK(s.switches() >= 1);
+    CHECK_EQ(s.presentation().renditions[static_cast<size_t>(s.video_rendition())].height, 120);
 }
 
 TEST("adaptive source: a backend without adaptive resolution keeps the picture size") {

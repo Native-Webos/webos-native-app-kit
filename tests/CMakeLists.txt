@@ -265,8 +265,10 @@ if (TARGET wnk-shows AND Python3_FOUND)
     wnk_shows_e2e(unreadable_reply "/broken" "${WNK_SHOWS_WAIT}"
             "showing error: The catalogue sent a reply the app cannot read")
     # Back while the details are still loading stops the transfer; the late reply never reaches the UI.
+    # The server answers after 4 s (http_server.py "slow"): any cancel before that passes, since the
+    # timed key script reaches Back later on a slow machine (1.1 s seen on a CI runner).
     wnk_shows_e2e(back_cancels_details "/slow" "${WNK_SHOWS_WAIT},Right,Return,Z,Z,Z,Z,Z,Escape,${WNK_SHOWS_WAIT}"
-            "details 127: closed while loading, cancelling the request.*details 127: request cancelled after 0\\.[0-9]+ s")
+            "details 127: closed while loading, cancelling the request.*details 127: request cancelled after [0-3]\\.[0-9]+ s")
     # Paging: the last rows of page 0 fetch page 1, the end of page 1 meets the 404 that ends the list.
     string(REPEAT ",Down" 50 WNK_SHOWS_DOWN50)
     wnk_shows_e2e(grid_pages_to_the_end "" "${WNK_SHOWS_WAIT},Left,Down,Right${WNK_SHOWS_DOWN50}${WNK_SHOWS_DOWN50},${WNK_SHOWS_WAIT}"

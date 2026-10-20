@@ -94,6 +94,10 @@ bool make_presentations() {
             std::fputs(vtt.c_str(), f);
             std::fclose(f);
         }
+        if (FILE *f = std::fopen((d + "/channels.m3u").c_str(), "w")) {
+            std::fputs("#EXTM3U\n#EXTINF:-1,One\nhttp://h/one.m3u8\n", f);
+            std::fclose(f);
+        }
         const std::string subs =
             "cd '" + d + "' && ffmpeg -hide_banner -loglevel error -y "
             "-f lavfi -i testsrc2=size=320x240:rate=25:duration=10 "
@@ -338,10 +342,23 @@ TEST("adaptive source: missing and malformed manifests, interrupt") {
         AdaptiveSource s(options());
         CHECK(!s.open(url("ts_000.ts"), &err));  // not a manifest
     }
+    {
+        AdaptiveSource s(options());
+        CHECK(!s.open(url("channels.m3u"), &err));  // a channel list is not a playlist
+        CHECK(err.find("parse_iptv_playlist") != std::string::npos);
+    }
     CHECK(AdaptiveSource::handles("https://h/a/b.MPD?x=1"));
     CHECK(AdaptiveSource::handles("http://h/master.m3u8"));
     CHECK(!AdaptiveSource::handles("https://h/a.mp4"));
     CHECK(!AdaptiveSource::handles("file:///a.mpd"));
+    CHECK(AdaptiveSource::handles("http://h/live/x.m3u"));
+    CHECK(AdaptiveSource::handles("http://h/play.php?id=7"));
+    CHECK(AdaptiveSource::handles("http://h/get.php?username=u&password=p"));
+    CHECK(AdaptiveSource::handles("http://h/live?id=7&e=.m3u8"));
+    CHECK(AdaptiveSource::handles("http://h/s?output=M3U8"));
+    CHECK(AdaptiveSource::handles("http://h/s?type=m3u8#t"));
+    CHECK(!AdaptiveSource::handles("http://h/stream.php?id=7"));
+    CHECK(!AdaptiveSource::handles("http://h/a.ts#type=m3u8"));
     AdaptiveSource s(options());
     REQUIRE(s.open(url("d.mpd"), &err));
     StreamFormat f;

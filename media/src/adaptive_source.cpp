@@ -1561,7 +1561,15 @@ AdaptiveSource::~AdaptiveSource() {
 bool AdaptiveSource::handles(const std::string &uri) {
     if (uri.rfind("http://", 0) != 0 && uri.rfind("https://", 0) != 0) return false;
     const std::string path = lower(uri.substr(0, uri.find_first_of("?#")));
-    return ends_with(path, ".mpd") || ends_with(path, ".m3u8");
+    if (ends_with(path, ".mpd") || ends_with(path, ".m3u8") || ends_with(path, ".m3u")) return true;
+    // Provider scripts that answer with a playlist. A wrong guess fails in open() with a reason.
+    if (ends_with(path, "play.php") || ends_with(path, "get.php")) return true;
+    const size_t q = uri.find('?');
+    const std::string query = q == std::string::npos ? std::string() : lower(uri.substr(q, uri.find('#', q) - q));
+    for (const char *p : {"e=.m3u", "output=m3u8", "type=m3u8"}) {
+        if (query.find(p) != std::string::npos) return true;
+    }
+    return false;
 }
 
 const MediaInfo &AdaptiveSource::info() const { return impl_->info; }
@@ -1604,6 +1612,10 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
     if (!m.fetch(uri, nullptr, &body, &final_url, error)) return false;
     const size_t start = body.find_first_not_of(" \t\r\n\xEF\xBB\xBF");
     const bool hls = start != std::string::npos && body.compare(start, 7, "#EXTM3U") == 0;
+    if (hls && body.find("\n#EXT-X-") == std::string::npos) {
+        *error = "an M3U channel list, not an HLS playlist: read it with parse_iptv_playlist()";
+        return false;
+    }
     if (!(hls ? parse_hls(body, final_url, &m.pres, error) : parse_mpd(body, final_url, &m.pres, error, m.now_us()))) {
         return false;
     }

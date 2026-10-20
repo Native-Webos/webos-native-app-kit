@@ -320,7 +320,7 @@ struct AdaptiveSource::Impl {
         bool muxed = false;  // carried in the video rendition's segments
     };
     std::vector<AudioChoice> audio_choices;  // track index 1 + i
-    int video = -1;                          // chosen video rendition
+    int video = -1;                          // chosen video rendition (written under pres_mutex while live)
 
     // One FfmpegSource reading one rendition.
     struct Lane {
@@ -360,9 +360,15 @@ struct AdaptiveSource::Impl {
     int64_t zero_us = 0;                   // DASH: subtracted from presentation times (the window start at open)
     int64_t clock_offset_us = 0;           // server time minus this device's (DASH UTCTiming)
     std::map<long, int64_t> window_first;  // rendition → number of its oldest segment still listed
+    // DASH: the MPD last fetched, re-read against the clock between fetches (refresh thread after open).
+    std::string mpd_body, mpd_url;
+    int64_t mpd_fetched_us = kNoTime;  // steady clock
     std::thread refresh_thread;
-    std::mutex refresh_mutex;              // also guards live_subtitles
+    std::mutex refresh_mutex;              // also guards live_subtitles and live_ladder
     std::vector<long> live_subtitles;      // subtitle renditions the refresher merges too (DASH)
+    // DASH: the video renditions a bitrate switch may go to, merged too, so that the target's list
+    // already holds the segment where the switch lands (HLS reloads the target's playlist instead).
+    std::vector<long> live_ladder;
     std::condition_variable refresh_cv;
     std::vector<int> ladder;        // video renditions that can replace each other, bandwidth ascending
     std::vector<int> active_ladder; // the part of it the backend can follow (select)
@@ -727,12 +733,34 @@ struct AdaptiveSource::Impl {
         return true;
     }
 
-    // DASH: reloads the MPD and merges the renditions in use.
+    static int64_t steady_us() {
+        return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    // DASH: merges the renditions in use from the MPD read at the current time. The MPD itself is
+    // fetched again once minimumUpdatePeriod has passed (every time when it names none); in between,
+    // the last one is read again, which lists the segments a SegmentTemplate@duration has made
+    // available since (they appear on the clock, not with a new MPD). A failed fetch falls back to
+    // the last MPD, so a slow server does not starve playback.
     bool refresh_dash(const std::vector<long> &active, std::string *error) {
-        std::string body, final_url;
-        if (!fetch(pres.url, nullptr, &body, &final_url, error, Ctx::Refresh)) return false;
+        const int64_t update = pres.update_period_us;
+        const bool due = mpd_body.empty() || update == kNoTime || update <= 0 || mpd_fetched_us == kNoTime ||
+                         steady_us() - mpd_fetched_us >= update;
+        bool fetch_failed = false;
+        if (due) {
+            std::string body, final_url;
+            if (fetch(pres.url, nullptr, &body, &final_url, error, Ctx::Refresh)) {
+                mpd_body = std::move(body);
+                mpd_url = std::move(final_url);
+                mpd_fetched_us = steady_us();
+            } else if (mpd_body.empty() || refresh_stop) {
+                return false;
+            } else {
+                fetch_failed = true;
+            }
+        }
         Presentation fresh;
-        if (!parse_mpd(body, final_url, &fresh, error, now_us())) return false;
+        if (!parse_mpd(mpd_body, mpd_url, &fresh, error, now_us())) return false;
         normalize(fresh);
         std::lock_guard<std::mutex> lock(pres_mutex);
         for (long i : active) {
@@ -743,7 +771,7 @@ struct AdaptiveSource::Impl {
             merge(i, std::move(it->segments), !fresh.live);
         }
         if (!fresh.live) live_ended = true;
-        return true;
+        return !fetch_failed;  // *error says why the fetch failed; the last MPD was used
     }
 
     void refresh_loop() {
@@ -758,9 +786,15 @@ struct AdaptiveSource::Impl {
                         seg = pres.renditions[static_cast<size_t>(video)].target_duration_us;
                     }
                 }
-                period = pres.format == Presentation::Format::Dash && pres.update_period_us != kNoTime && pres.update_period_us > 0
-                             ? pres.update_period_us
-                             : (seg > 0 ? seg : 2000000);
+                // DASH: every segment duration (new segments of a @duration template appear on the
+                // clock), the MPD itself fetched again every minimumUpdatePeriod (refresh_dash).
+                const bool dash_update = pres.format == Presentation::Format::Dash && pres.update_period_us != kNoTime &&
+                                         pres.update_period_us > 0;
+                if (dash_update) {
+                    period = seg > 0 ? std::min(seg, pres.update_period_us) : pres.update_period_us;
+                } else {
+                    period = seg > 0 ? seg : 2000000;
+                }
                 period = std::clamp<int64_t>(period, 500000, 30000000);
             }
             {
@@ -779,6 +813,9 @@ struct AdaptiveSource::Impl {
             if (pres.format == Presentation::Format::Dash) {
                 std::lock_guard<std::mutex> lock(refresh_mutex);
                 active.insert(active.end(), live_subtitles.begin(), live_subtitles.end());
+                active.insert(active.end(), live_ladder.begin(), live_ladder.end());
+                std::sort(active.begin(), active.end());
+                active.erase(std::unique(active.begin(), active.end()), active.end());
             }
             std::string error;
             bool ok = true;
@@ -909,6 +946,11 @@ struct AdaptiveSource::Impl {
         if (boundary < from.segments.size() && from.segments[boundary].number >= 0 && pres.live) {
             const int64_t want = from.segments[boundary].number;
             auto it = std::find_if(to.segments.begin(), to.segments.end(), [&](const MediaSegment &s) { return s.number == want; });
+            if (it == to.segments.end()) {
+                // Not expected: the refresher keeps every rendition of the ladder listed.
+                WNK_LOGW(kCat, "switch to %s: segment %lld not listed (last %lld), placed by time", to.id.c_str(),
+                         static_cast<long long>(want), static_cast<long long>(to.segments.empty() ? -1 : to.segments.back().number));
+            }
             first = it != to.segments.end() ? static_cast<size_t>(it - to.segments.begin())
                                             : segment_at(to.segments, from.segments[boundary].start_us + 1000);
         } else if (boundary >= from.segments.size()) {
@@ -962,7 +1004,10 @@ struct AdaptiveSource::Impl {
                     return MediaSource::Read::Error;
                 }
                 ++switch_count;
-                if (lane.want_video) video = sw.rendition;  // a later select() keeps this quality
+                if (lane.want_video) {
+                    std::lock_guard<std::mutex> plock(pres_mutex);  // the refresher reads it
+                    video = sw.rendition;                           // a later select() keeps this quality
+                }
                 if (pres.renditions[static_cast<size_t>(sw.rendition)].period == 0) lane.head = sw.rendition;
                 const Rendition &a = pres.renditions[static_cast<size_t>(from)];
                 const Rendition &b = pres.renditions[static_cast<size_t>(sw.rendition)];
@@ -1543,6 +1588,9 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
     m.zero_us = 0;
     m.clock_offset_us = 0;
     m.window_first.clear();
+    m.mpd_body.clear();
+    m.mpd_url.clear();
+    m.mpd_fetched_us = kNoTime;
     m.pres = Presentation{};
     m.info = MediaInfo{};
     m.video = -1;
@@ -1563,6 +1611,11 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
         // A live MPD is read against the server's clock where it names one.
         m.sync_clock();
         if (m.clock_offset_us != 0 && !parse_mpd(body, final_url, &m.pres, error, m.now_us())) return false;
+    }
+    if (!hls && m.pres.live) {
+        m.mpd_body = body;
+        m.mpd_url = final_url;
+        m.mpd_fetched_us = Impl::steady_us();
     }
     m.resolve_keys();
     m.video = choose_video(m.pres, m.opt);
@@ -1641,6 +1694,10 @@ bool AdaptiveSource::select(int video_track, int audio_track, const BackendCaps 
             const Rendition &r = m.pres.renditions[static_cast<size_t>(k)];
             if (caps.adaptive_resolution || (r.width == cur.width && r.height == cur.height)) m.active_ladder.push_back(k);
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(m.refresh_mutex);
+        m.live_ladder.assign(m.active_ladder.begin(), m.active_ladder.end());
     }
     m.decided_samples = 0;
     m.decided_limit = 0;

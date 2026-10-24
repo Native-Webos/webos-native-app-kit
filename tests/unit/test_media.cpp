@@ -9,13 +9,17 @@
 #define WNK_TEST_MAIN
 #include "wnk_test.hpp"
 
+#include "wnk/log.hpp"
 #include "wnk/media/auto_backend.hpp"
 #include "wnk/media/controller.hpp"
 #include "wnk/media/device_caps.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 using namespace wnk;
 using namespace wnk::media;
@@ -650,6 +654,33 @@ TEST("controller: losing the decoder resource pauses and unloads, even with a pa
     r.pc->stop();
 }
 
+TEST("controller: a backend error ends playback in Error with the reason and gives the decoder back") {
+    Rig r(std::make_unique<ScriptedSource>(20000000), /*can_pause=*/true);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    r.backend->emit(BackendEvent::Error);  // Starfish: "Resource Allocation Error" after a 20 s Load
+    REQUIRE(r.wait_state(PlayState::Error));
+    CHECK_EQ(r.log->unloads.load(), 1);
+    CHECK(r.pc->snapshot().error.find("test") != std::string::npos);
+    CHECK(r.pc->stop());
+}
+
+TEST("controller: a backend error the pipeline repeats fails playback once") {
+    Rig r(std::make_unique<ScriptedSource>(20000000));
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    r.backend->emit(BackendEvent::Error);
+    r.backend->emit(BackendEvent::Error);  // the pipeline repeats it: one failure
+    REQUIRE(r.wait_state(PlayState::Error));
+    std::this_thread::sleep_for(50ms);
+    r.main.drain();
+    int errors = 0;
+    for (const auto &t : r.transitions) errors += t.second == PlayState::Error;
+    CHECK_EQ(errors, 1);
+    CHECK_EQ(r.log->unloads.load(), 1);
+    r.pc->stop();
+}
+
 TEST("controller: audio-only media plays and ends on the audio clock; Ended + play restarts") {
     Rig r(std::make_unique<ScriptedSource>(1000000, /*video=*/false, /*audio=*/true));
     const auto t0 = std::chrono::steady_clock::now();
@@ -890,6 +921,54 @@ TEST("controller: a splicing backend's new content waits for the backlog; the sh
     r.pc->stop();
 }
 
+TEST("controller: a seek on its way is the position at once; a splicing backend keeps it until on screen") {
+    PlaybackOptions o;
+    o.max_lead_us = 600000;
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/true, o);
+    r.log->pause_drains = true;
+    r.log->seek_splices = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.log->splice_settled = false;  // the new content is not on screen yet
+    r.pc->seek(30000000);
+    CHECK_EQ(r.pc->snapshot().position_us, 30000000);  // before the playback thread has even seen it
+    REQUIRE(r.wait([&] { return r.log->flushes.load() == 1 && r.log->first_video_after_flush.load() != kNoTime; }));
+    std::this_thread::sleep_for(200ms);
+    CHECK_EQ(r.pc->snapshot().position_us, 30000000);  // fed, but the backlog still plays
+    r.log->splice_settled = true;
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us != 30000000; }));
+    const int64_t base = r.log->first_video_after_flush.load();
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us > base + 100000; }, 3000ms));
+    CHECK(r.pc->snapshot().position_us < 32000000);
+    r.pc->stop();
+}
+
+TEST("controller: of two seeks the position shows the newer target until its own content is fed") {
+    PlaybackOptions o;
+    o.seek_settle = std::chrono::milliseconds(0);
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/false, o);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.pc->seek(20000000);
+    r.pc->seek(40000000);
+    CHECK_EQ(r.pc->snapshot().position_us, 40000000);
+    REQUIRE(r.wait([&] { return r.log->first_video_after_flush.load() >= 40000000; }));
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us != 40000000; }, 3000ms));
+    CHECK(r.pc->snapshot().position_us >= 40000000);
+    CHECK(r.pc->snapshot().position_us < 42000000);
+    r.pc->stop();
+}
+
+TEST("controller: a seek before anything is open leaves no target behind") {
+    Rig r(std::make_unique<ScriptedSource>(20000000));
+    r.pc->seek(5000000);
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us == kNoTime; }));
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    CHECK(r.pc->snapshot().position_us < 5000000);
+    r.pc->stop();
+}
+
 TEST("adts: headers from AudioSpecificConfig for AAC-LC and HE-AAC; refusals") {
     uint8_t h[7];
     // AAC-LC 48 kHz stereo: object 2, index 3, channels 2 -> 0x11 0x90
@@ -1074,7 +1153,24 @@ std::atomic<bool> StuckBackend::entered{false};
 std::atomic<bool> StuckBackend::release{false};
 }  // namespace
 
+namespace {
+struct LineSink final : log::Sink {
+    std::mutex *m;
+    std::vector<std::string> *lines;
+    LineSink(std::mutex *mu, std::vector<std::string> *l) : m(mu), lines(l) {}
+    void write(const log::Record &, const std::string &line) override {
+        std::lock_guard<std::mutex> lock(*m);
+        lines->push_back(line);
+    }
+};
+}  // namespace
+
 TEST("controller: a playback thread stuck past the stop deadline outlives the controller safely") {
+    std::mutex m;
+    std::vector<std::string> lines;
+    log::Logger logger(log::Level::Info);
+    logger.add_sink(std::make_unique<LineSink>(&m, &lines));
+    log::set_default_logger(&logger);
     async::MainDispatcher main;
     PlaybackOptions o;
     o.stop_deadline = 100ms;
@@ -1085,10 +1181,18 @@ TEST("controller: a playback thread stuck past the stop deadline outlives the co
     while (!StuckBackend::entered && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(2ms);
     REQUIRE(StuckBackend::entered.load());
     CHECK(!pc->stop());  // detached
+    {
+        // The warning says where the thread is stuck.
+        std::lock_guard<std::mutex> lock(m);
+        bool named = false;
+        for (const std::string &l : lines) named = named || l.find("in backend load for") != std::string::npos;
+        CHECK(named);
+    }
     pc.reset();          // the handle goes; the thread still holds the state
     StuckBackend::release = true;
     std::this_thread::sleep_for(300ms);  // the thread finishes, feeds, sees Stop and ends on its own
     main.drain();                        // nothing posted after destruction reaches a callback
+    log::set_default_logger(nullptr);
 }
 
 TEST("device caps: tv.model.edidType names DTS only where it says so") {

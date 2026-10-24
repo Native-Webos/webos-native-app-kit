@@ -6,6 +6,7 @@
 //                  │          │              │  │
 //                  │          └─seek─► Seeking ┘  └─(source ends, buffer drained)─► Ended
 //                  └──────────────(any failure)──────────────────────────────────► Error
+//                                 (a BackendEvent::Error too: the decoder refused the stream)
 //   any state ─stop─► Stopped
 //
 // A reader thread reads packets into one lane per stream (video, audio), up to max_queue_us ahead;
@@ -34,7 +35,9 @@
 //
 // Position: from the backend if it reports one, else estimated on a clock started at the first
 // packet after load/seek (offset by that packet's PTS) and frozen while paused. The estimate is
-// marked as such in the snapshot.
+// marked as such in the snapshot. While a seek is on its way (asked for, and its content not yet
+// fed or, with a splicing backend, not yet on screen) the position is its target, so a time shown
+// from it follows the remote at once instead of the picture that is still being replaced.
 //
 // Subtitles: every cue the source decodes goes into a SubtitleStore (all subtitle tracks, kept across
 // seeks) instead of the backend; subtitles_now() answers what the selected track shows at the
@@ -132,7 +135,8 @@ class PlaybackController {
     void seek_relative(int64_t delta_us);
     // Stops playback, unloads the backend and joins the thread (bounded by stop_deadline).
     // Returns false if the thread did not finish in time: it is then detached and keeps the
-    // controller's internal state alive until it ends, so it never touches freed memory.
+    // controller's internal state alive until it ends, so it never touches freed memory. The
+    // warning logged then names the source/backend call the thread is blocked in.
     bool stop();
 
     void set_video_area(const Rect &pixels);

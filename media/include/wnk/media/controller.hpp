@@ -35,7 +35,9 @@
 //
 // Position: from the backend if it reports one, else estimated on a clock started at the first
 // packet after load/seek (offset by that packet's PTS) and frozen while paused. The estimate is
-// marked as such in the snapshot.
+// marked as such in the snapshot. While a seek is on its way (asked for, and its content not yet
+// fed or, with a splicing backend, not yet on screen) the position is its target, so a time shown
+// from it follows the remote at once instead of the picture that is still being replaced.
 //
 // Subtitles: every cue the source decodes goes into a SubtitleStore (all subtitle tracks, kept across
 // seeks) instead of the backend; subtitles_now() answers what the selected track shows at the

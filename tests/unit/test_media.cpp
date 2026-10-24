@@ -921,6 +921,54 @@ TEST("controller: a splicing backend's new content waits for the backlog; the sh
     r.pc->stop();
 }
 
+TEST("controller: a seek on its way is the position at once; a splicing backend keeps it until on screen") {
+    PlaybackOptions o;
+    o.max_lead_us = 600000;
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/true, o);
+    r.log->pause_drains = true;
+    r.log->seek_splices = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.log->splice_settled = false;  // the new content is not on screen yet
+    r.pc->seek(30000000);
+    CHECK_EQ(r.pc->snapshot().position_us, 30000000);  // before the playback thread has even seen it
+    REQUIRE(r.wait([&] { return r.log->flushes.load() == 1 && r.log->first_video_after_flush.load() != kNoTime; }));
+    std::this_thread::sleep_for(200ms);
+    CHECK_EQ(r.pc->snapshot().position_us, 30000000);  // fed, but the backlog still plays
+    r.log->splice_settled = true;
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us != 30000000; }));
+    const int64_t base = r.log->first_video_after_flush.load();
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us > base + 100000; }, 3000ms));
+    CHECK(r.pc->snapshot().position_us < 32000000);
+    r.pc->stop();
+}
+
+TEST("controller: of two seeks the position shows the newer target until its own content is fed") {
+    PlaybackOptions o;
+    o.seek_settle = std::chrono::milliseconds(0);
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/false, o);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 30; }));
+    r.pc->seek(20000000);
+    r.pc->seek(40000000);
+    CHECK_EQ(r.pc->snapshot().position_us, 40000000);
+    REQUIRE(r.wait([&] { return r.log->first_video_after_flush.load() >= 40000000; }));
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us != 40000000; }, 3000ms));
+    CHECK(r.pc->snapshot().position_us >= 40000000);
+    CHECK(r.pc->snapshot().position_us < 42000000);
+    r.pc->stop();
+}
+
+TEST("controller: a seek before anything is open leaves no target behind") {
+    Rig r(std::make_unique<ScriptedSource>(20000000));
+    r.pc->seek(5000000);
+    REQUIRE(r.wait([&] { return r.pc->snapshot().position_us == kNoTime; }));
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    CHECK(r.pc->snapshot().position_us < 5000000);
+    r.pc->stop();
+}
+
 TEST("adts: headers from AudioSpecificConfig for AAC-LC and HE-AAC; refusals") {
     uint8_t h[7];
     // AAC-LC 48 kHz stereo: object 2, index 3, channels 2 -> 0x11 0x90

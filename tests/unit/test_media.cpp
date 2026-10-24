@@ -9,13 +9,17 @@
 #define WNK_TEST_MAIN
 #include "wnk_test.hpp"
 
+#include "wnk/log.hpp"
 #include "wnk/media/auto_backend.hpp"
 #include "wnk/media/controller.hpp"
 #include "wnk/media/device_caps.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 using namespace wnk;
 using namespace wnk::media;
@@ -1074,7 +1078,24 @@ std::atomic<bool> StuckBackend::entered{false};
 std::atomic<bool> StuckBackend::release{false};
 }  // namespace
 
+namespace {
+struct LineSink final : log::Sink {
+    std::mutex *m;
+    std::vector<std::string> *lines;
+    LineSink(std::mutex *mu, std::vector<std::string> *l) : m(mu), lines(l) {}
+    void write(const log::Record &, const std::string &line) override {
+        std::lock_guard<std::mutex> lock(*m);
+        lines->push_back(line);
+    }
+};
+}  // namespace
+
 TEST("controller: a playback thread stuck past the stop deadline outlives the controller safely") {
+    std::mutex m;
+    std::vector<std::string> lines;
+    log::Logger logger(log::Level::Info);
+    logger.add_sink(std::make_unique<LineSink>(&m, &lines));
+    log::set_default_logger(&logger);
     async::MainDispatcher main;
     PlaybackOptions o;
     o.stop_deadline = 100ms;
@@ -1085,10 +1106,18 @@ TEST("controller: a playback thread stuck past the stop deadline outlives the co
     while (!StuckBackend::entered && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(2ms);
     REQUIRE(StuckBackend::entered.load());
     CHECK(!pc->stop());  // detached
+    {
+        // The warning says where the thread is stuck.
+        std::lock_guard<std::mutex> lock(m);
+        bool named = false;
+        for (const std::string &l : lines) named = named || l.find("in backend load for") != std::string::npos;
+        CHECK(named);
+    }
     pc.reset();          // the handle goes; the thread still holds the state
     StuckBackend::release = true;
     std::this_thread::sleep_for(300ms);  // the thread finishes, feeds, sees Stop and ends on its own
     main.drain();                        // nothing posted after destruction reaches a callback
+    log::set_default_logger(nullptr);
 }
 
 TEST("device caps: tv.model.edidType names DTS only where it says so") {

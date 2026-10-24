@@ -132,7 +132,8 @@ class PlaybackController {
     void seek_relative(int64_t delta_us);
     // Stops playback, unloads the backend and joins the thread (bounded by stop_deadline).
     // Returns false if the thread did not finish in time: it is then detached and keeps the
-    // controller's internal state alive until it ends, so it never touches freed memory.
+    // controller's internal state alive until it ends, so it never touches freed memory. The
+    // warning logged then names the source/backend call the thread is blocked in.
     bool stop();
 
     void set_video_area(const Rect &pixels);

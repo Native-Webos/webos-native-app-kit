@@ -654,6 +654,33 @@ TEST("controller: losing the decoder resource pauses and unloads, even with a pa
     r.pc->stop();
 }
 
+TEST("controller: a backend error ends playback in Error with the reason and gives the decoder back") {
+    Rig r(std::make_unique<ScriptedSource>(20000000), /*can_pause=*/true);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    r.backend->emit(BackendEvent::Error);  // Starfish: "Resource Allocation Error" after a 20 s Load
+    REQUIRE(r.wait_state(PlayState::Error));
+    CHECK_EQ(r.log->unloads.load(), 1);
+    CHECK(r.pc->snapshot().error.find("test") != std::string::npos);
+    CHECK(r.pc->stop());
+}
+
+TEST("controller: a backend error the pipeline repeats fails playback once") {
+    Rig r(std::make_unique<ScriptedSource>(20000000));
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    r.backend->emit(BackendEvent::Error);
+    r.backend->emit(BackendEvent::Error);  // the pipeline repeats it: one failure
+    REQUIRE(r.wait_state(PlayState::Error));
+    std::this_thread::sleep_for(50ms);
+    r.main.drain();
+    int errors = 0;
+    for (const auto &t : r.transitions) errors += t.second == PlayState::Error;
+    CHECK_EQ(errors, 1);
+    CHECK_EQ(r.log->unloads.load(), 1);
+    r.pc->stop();
+}
+
 TEST("controller: audio-only media plays and ends on the audio clock; Ended + play restarts") {
     Rig r(std::make_unique<ScriptedSource>(1000000, /*video=*/false, /*audio=*/true));
     const auto t0 = std::chrono::steady_clock::now();

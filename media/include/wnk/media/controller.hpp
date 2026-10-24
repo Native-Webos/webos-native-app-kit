@@ -6,6 +6,7 @@
 //                  │          │              │  │
 //                  │          └─seek─► Seeking ┘  └─(source ends, buffer drained)─► Ended
 //                  └──────────────(any failure)──────────────────────────────────► Error
+//                                 (a BackendEvent::Error too: the decoder refused the stream)
 //   any state ─stop─► Stopped
 //
 // A reader thread reads packets into one lane per stream (video, audio), up to max_queue_us ahead;

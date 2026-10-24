@@ -68,10 +68,10 @@ struct PlaybackController::Core {
     PlayState state() const;
     const char *backend_name() const { return backend_->name(); }  // may change at open (AutoBackend)
 
-    enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop, Audio };
+    enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop, Audio, Fail };
     struct Command {
         Cmd cmd;
-        std::string uri;
+        std::string uri;     // Fail: the backend's reason
         int64_t pts_us = 0;  // Audio: the track
         bool release = false;  // Pause: unload the decoder even if the backend can pause
     };
@@ -393,6 +393,10 @@ void PlaybackController::Core::on_backend_event(BackendEvent e, const std::strin
     } else if (e == BackendEvent::ResourceLost) {
         // Treat like a pause: the decoder must be loaded again before more packets go in.
         post({Cmd::Pause, {}, 0, true});
+    } else if (e == BackendEvent::Error) {
+        // The decoder refused the stream (Starfish: no decoder resource after a 20 s Load). Carrying
+        // on would show the controls over a black picture for good.
+        post({Cmd::Fail, detail.empty() ? std::string("backend error") : detail, 0});
     }
 }
 
@@ -481,6 +485,13 @@ bool PlaybackController::Core::apply(const Command &c) {
             set_state(PlayState::Stopped);
             return false;
         case Cmd::Audio: do_audio(static_cast<int>(c.pts_us)); break;
+        case Cmd::Fail: {
+            const PlayState s = state();
+            if (s != PlayState::Idle && s != PlayState::Error && s != PlayState::Stopped) {
+                fail(std::string(backend_->name()) + ": " + c.uri);
+            }
+            break;
+        }
     }
     return true;
 }

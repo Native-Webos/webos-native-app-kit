@@ -36,5 +36,5 @@ headers; nothing of their code is in the kit.
 | PlxNative `rust-modules/platform/src/keymanager.rs` | GPL-3.0-or-later | keymanager3 protocol and no-downgrade policy | `storage/src/secret.cpp` |
 | [mariotaku/commons-c](https://github.com/mariotaku/commons-c) `platform/webos/luna-sync` | MIT | synchronous Luna calls through libhelpers | `platform/src/luna.cpp` |
 | commons-c `ExternalSDL2BackportForWebOS.cmake`, SDL-webOS CI | MIT, zlib | SDL-webOS configure flags | `cmake/SdlWebOS.cmake` |
-| [moonlight-tv](https://github.com/mariotaku/moonlight-tv), lgnome, punktfunk client-webos, ss4s | GPL-3.0, MIT, MIT/Apache-2.0, LGPL-3.0 | platform facts (SDL hints, paths, NDL behaviour, SIGPIPE) | comments where used |
+| [moonlight-tv](https://github.com/mariotaku/moonlight-tv), lgnome, punktfunk client-webos, ss4s | GPL-3.0, MIT, MIT/Apache-2.0, LGPL-3.0 | platform facts (SDL hints, paths, NDL behaviour, SIGPIPE; client-webos: the media-role probe in `platform/src/media_role.cpp`, the deferred NDL quit) | comments where used |
 

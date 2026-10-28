@@ -418,4 +418,15 @@ if (NOT WNK_WEBOS)
     add_test(NAME unit.starfish_release COMMAND test_starfish_release)
     set_tests_properties(unit.starfish_release PROPERTIES
             ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/fakes;${WNK_LSAN}")
+    # A stand-in libNDL_directmedia.so.1, for NdlBackend's unload deadline.
+    add_library(fake_ndl SHARED fakes/fake_ndl.c)
+    set_target_properties(fake_ndl PROPERTIES OUTPUT_NAME NDL_directmedia SOVERSION 1
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fakes")
+    add_executable(test_ndl_release unit/test_ndl_release.cpp)
+    target_include_directories(test_ndl_release PRIVATE unit)
+    target_link_libraries(test_ndl_release PRIVATE wnk_media_ndl wnk_platform ${CMAKE_DL_LIBS})
+    add_dependencies(test_ndl_release fake_ndl)
+    add_test(NAME unit.ndl_release COMMAND test_ndl_release)
+    set_tests_properties(unit.ndl_release PROPERTIES
+            ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/fakes;${WNK_LSAN}")
 endif ()

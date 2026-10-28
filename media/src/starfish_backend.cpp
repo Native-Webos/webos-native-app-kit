@@ -11,6 +11,7 @@
 #include "wnk/media/starfish_backend.hpp"
 
 #include "wnk/log.hpp"
+#include "wnk/platform/media_role.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -690,6 +691,12 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         return false;
     }
     unload();
+    // A stale bus role after a firmware update leaves Load hanging in ~StarfishMediaAPIs (client-webos).
+    if (std::string why; !wnk::platform::media_role_ok(&why)) {
+        *error = why;
+        WNK_LOGW(kCat, "%s", why.c_str());
+        return false;
+    }
     // A Load while the last one's decoders are still being given back waited for them forever on
     // webOS 6.5.3; past the deadline the play fails with a reason instead.
     if (!wait_for_releases(error)) {

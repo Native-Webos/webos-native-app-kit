@@ -26,6 +26,7 @@
 #include "wnk/media/media.hpp"
 #include "wnk/media/pts_splice.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -40,6 +41,11 @@ struct NdlOptions {
     // Unload and reload the decoder to pause and to seek, as before pause/splice were measured.
     // The picture goes black each time; kept for comparison and as a fallback.
     bool reload_to_pause_and_seek = false;
+    // How long unload() waits for NDL_DirectMediaUnload, and the next load for an unload still out.
+    // The unload runs on a worker without the NDL lock (NDL has no bound on it: client-webos saw it
+    // never return on webOS 11.2); past the deadline the backend moves on and the next load fails
+    // with release_timeout until it returns, and NDL_DirectMediaQuit waits for it too.
+    std::chrono::milliseconds release_deadline{10000};
 };
 
 class NdlBackend : public MediaBackend {
@@ -67,8 +73,8 @@ class NdlBackend : public MediaBackend {
     static long long convert_pts(int64_t pts_us, PtsUnit unit);
 
  private:
-    bool load_locked(const StreamFormat &format, std::string *error);
-    void unload_locked();
+    bool load_locked(std::unique_lock<std::mutex> &lock, const StreamFormat &format, std::string *error);
+    void unload_locked(std::unique_lock<std::mutex> &lock);  // waits for the unload, at most the deadline
     void emit(BackendEvent e, const std::string &detail);
     static void load_callback(int type, long long num, const char *str);
     static void resource_released(const char *type);

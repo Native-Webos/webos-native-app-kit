@@ -688,7 +688,13 @@ straight to NDL. A refusal after a picture, or one NDL cannot take, still ends i
 `StarfishBackend::unload()` waits at most `StarfishOptions::release_deadline` (10 s) for LG's
 Unload. Past it the object stays with a worker thread and the next Starfish load fails with
 `release_timeout: ...` (shown as the Error reason) until that worker returns, instead of the
-playback thread hanging inside the firmware.
+playback thread hanging inside the firmware. `NdlBackend` does the same for
+`NDL_DirectMediaUnload` (`NdlOptions::release_deadline`): it runs without the NDL lock, so placing
+the video never waits on it, and `NDL_DirectMediaQuit` is put off until it returns.
+
+Both backends refuse a load with "... reinstall the app" when a firmware update left the app's bus
+role without the media player's `com.webos.media.smp.*` name (`platform::media_role_ok`; webOS
+11.2 per client-webos): such a load never returns. Only reinstalling the app rewrites the role.
 
 Source choice:
 

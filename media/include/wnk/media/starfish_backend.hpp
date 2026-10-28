@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// MediaBackend on LG's StarfishMediaAPIs (libplayerAPIs.so.1, webOS 5.3.1+), the buffer-feed pipeline
+// MediaBackend on LG's StarfishMediaAPIs (libplayerAPIs.so.1, webOS 3.4+), the buffer-feed pipeline
 // LG's own apps, Kodi, Moonlight (ss4s) and PlxNative use. Compared with NDL v2 it has a real pause,
 // reports the presented position, applies backpressure ("BufferFull"), takes AAC, AC-3 and E-AC-3
 // directly, and is told the stream's frame rate (adaptiveStreaming.maxFrameRate and esInfo
@@ -15,18 +15,27 @@
 //     and UnloadCompleted (type 23) the destructor runs, which releases the decoders; the block itself
 //     is never freed or reused, as a late callback carries only the object's address.
 //   * Feed returns a std::string through a hidden sret pointer; its char* is at offset 0 (the short
-//     replies "Ok" / "BufferFull" live in the small-string buffer).
-//   * Video binds through an SDL-webOS exported window: created on the main thread, its id goes into
-//     the Load payload as option.windowId, and SDL_webOSSetExportedWindow places it.
+//     replies "Ok" / "BufferFull" live in the small-string buffer). webOS 3.x builds the library with
+//     the pre-C++11 copy-on-write string (Feed without the B5cxx11 tag): its reply is released with
+//     the firmware's own ~basic_string (PlxNative).
+//   * Video binds through an SDL-webOS exported window on webOS 5+: created on the main thread, its
+//     id goes into the Load payload as option.windowId, and SDL_webOSSetExportedWindow places it.
+//     webOS 3.x and 4.x have no exported window; there the video plane is LG's app-switching control
+//     block (libAcbAPI), as Kodi and ss4s do it: an ACB of type MSE gets the pipeline's media id, sink,
+//     state changes and video-info envelopes, and setCustomDisplayWindow places the picture.
 //   * Events: FRAMEREADY (type 0) carries the presented PTS; loadCompleted arrives as a string; type
-//     18 before any picture is a refusal. Types above 0x1c are numbered two higher on webOS 5+ than
-//     on 4 (Kodi, PlxNative), so none of those is relied on.
+//     18 before any picture is a refusal. Types above 0x1c are numbered two lower before webOS 5
+//     (Kodi's `type += 2`): normalise_event_type maps them to the webOS 5+ numbers.
 //   * Pause and Play are real. Seeks splice the timeline like the NDL backend (no flush: PlxNative
 //     found Starfish's flush leaves a stale segment and wedges the sink after ~48 s).
 //
 //   * VP9 and AV1 are offered where getMaxVideoResolution reports a decoder for them; its answer also
 //     bounds the envelope. Container HDR10/HLG metadata goes through setHdrInfo after Load (webOS 5+,
-//     Kodi's payload). E-AC-3 carries ac3PlusInfo (Kodi).
+//     Kodi's payload). E-AC-3 carries ac3PlusInfo (Kodi). On the ACB plane (no setHdrInfo) a PQ
+//     stream the pipeline calls SDR has its video-info envelope rewritten to HDR10 with mediaSei and
+//     mediaVui before it goes to ACB (PlxNative's vp9_hdr.rs).
+//   * Dolby Vision is never declared on webOS 3: PlxNative measured a declared Load that never
+//     started its clock on 3.9.3 although the TV's config said supported.
 //
 // Unverified until measured on a TV (docs/compatibility/records.json): everything specific to this
 // implementation. PlxNative's path was verified on webOS 6.5.2 (2026-08-11, its issue #22).
@@ -52,7 +61,13 @@ struct StarfishOptions {
     // supports them (DeviceMediaCaps: an exact true).
     bool dolby_vision = false;
     bool atmos = false;
+    // The webOS major release (4 for 4.4.2). -1 reads it from /var/run/nyx/os_info.json; 0 is
+    // unknown, which is treated as webOS 5+.
+    int webos_major = -1;
 };
+
+// What shows the decoded picture.
+enum class VideoPlane : uint8_t { None, ExportedWindow, Acb };
 
 // Load payload inputs, for build_load_payload.
 struct StarfishLoad {
@@ -74,7 +89,7 @@ class StarfishBackend : public MediaBackend {
     explicit StarfishBackend(StarfishOptions options = {});
     ~StarfishBackend() override;  // main thread
 
-    // libplayerAPIs.so.1 with every entry point, and SDL-webOS's exported window.
+    // libplayerAPIs.so.1 with every entry point (either Feed ABI).
     static bool available(std::string *why = nullptr);
     // The largest picture this TV's decoder takes for a Starfish codec name ("H264", "H265", "VP9",
     // "AV1"), from libplayerAPIs' smp::util::getMaxVideoResolution. False when Starfish or the
@@ -82,6 +97,8 @@ class StarfishBackend : public MediaBackend {
     static bool max_video_resolution(const char *codec, int *width, int *height, int *frame_rate);
 
     const char *name() const override { return "starfish"; }
+    VideoPlane plane() const { return plane_; }
+    int webos_major() const { return webos_major_; }
     BackendCaps caps() const override;
     void set_event_callback(EventFn fn) override;
     bool load(const StreamFormat &format, std::string *error) override;
@@ -100,7 +117,15 @@ class StarfishBackend : public MediaBackend {
     static int frame_rate_class(double fps);      // 24, 25, 30, 50, 60 or the rate rounded up
     static void frame_rate_fraction(double fps, int64_t *num, int64_t *den);  // 24000/1001, 25/1, ...
     // setHdrInfo payload for the container's HDR10/HLG metadata, or "" when there is none to declare.
-    static std::string build_hdr_payload(const VideoColour &colour);
+    // legacy_keys: mediaSei/mediaVui, the names before webOS 5 (Kodi), instead of sei/vui.
+    static std::string build_hdr_payload(const VideoColour &colour, bool legacy_keys = false);
+    // A pipeline video-info envelope ({"video":{...,"hdrType":"none",...}}) rewritten to declare
+    // HDR10 when the container says PQ and the pipeline said nothing; "" leaves it as it was.
+    static std::string rewrite_video_info(const std::string &envelope, const VideoColour &colour);
+    // The webOS major from os_info.json's webos_release ("4.4.2" -> 4), 0 when it cannot say.
+    static int webos_major_from_os_info(const std::string &json);
+    // The webOS 5+ number for a callback type a firmware of this major sent.
+    static int normalise_event_type(int type, int webos_major);
     // Whether a getMaxVideoResolution answer names a real decoder (larger than the default it gives
     // for any name, 1920x1088).
     static bool decoder_listed(int width, int height);
@@ -110,6 +135,10 @@ class StarfishBackend : public MediaBackend {
 
  private:
     void place_locked();
+    void place_acb_locked();
+    bool open_exported_window();
+    bool open_acb();
+    void acb_state(int play_state);
 
     StarfishOptions options_;
     struct Limit {
@@ -117,7 +146,13 @@ class StarfishBackend : public MediaBackend {
         int width = 0, height = 0, frame_rate = 0;
     };
     Limit limits_[16];  // by CodecId, measured at construction
+    int webos_major_ = 0;
+    VideoPlane plane_ = VideoPlane::None;
     std::string window_id_;
+    long acb_id_ = 0;  // the ACB plane's handle, 0 without one
+    long acb_task_ = 0;
+    std::atomic<void *> loading_object_{nullptr};  // the object of the Load the events belong to
+    VideoColour colour_;                           // the current stream's container colour; mutex_
     mutable std::mutex mutex_;  // format_, area_, object_
     StreamFormat format_;
     Rect area_{0, 0, 1920, 1080};

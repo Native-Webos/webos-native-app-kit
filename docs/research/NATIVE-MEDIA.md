@@ -106,6 +106,27 @@ A/V sync is wrong. **This needs a measured device test.**
   `option.windowId` → `SDL_webOSSetExportedWindow` places it (plx `vp_create_window`, `vp_place`) `[SRC]`.
 - SMP supports seek, pause and richer containers (plx's player) but carries the highest C++/ABI risk.
 
+### webOS 3.x and 4.x (2016-2019 sets) `[FWDB]`, `[SRC]`
+
+Before this change the kit played nothing on these sets: `StarfishBackend` needed the webOS 5
+exported window, and `NdlBackend` needs `NDL_DirectMediaLoad`, which only exists from 5.3.1 (3.9-4.10
+ship the v1 `NDL_DirectVideoOpen` API: H.264 SDR only, no PTS input, per client-webos's `ndl/v1.rs`).
+`StarfishBackend` now follows Kodi's `MediaPipelineWebOS.cpp` there:
+
+| Difference | webOS 3.x / 4.x | webOS 5+ | Source |
+|---|---|---|---|
+| Video plane | ACB (`libAcbAPI.so.1`, type MSE): `setSinkType`, `setMediaId(getMediaID())` and `setState(LOADED)` at loadCompleted, `setState` on PLAYING/PAUSED/UNLOADED, every `STR_VIDEO_INFO` (4) to `setMediaVideoData`, `STR_AUDIO_INFO` (7) to `setMediaAudioData` (absent on 3.4), `setCustomDisplayWindow` places it | SDL exported window, `option.windowId` | Kodi, ss4s `smp_resource_acb.c`, PlxNative |
+| `Feed` reply | 3.x: pre-C++11 copy-on-write string (`_ZN17StarfishMediaAPIs4FeedEPKc`), released with the firmware's `_ZNSsD1Ev`; 4.4.2+: `B5cxx11` | `B5cxx11` | inventory, PlxNative |
+| Callback types above ENDOFSTREAM (0x1c) | two lower (dropped/displayed frames 46/47) | 48/49 | Kodi `type += 2`, PlxNative decompile of 4.10 |
+| HDR10 from the container | no `setHdrInfo` (absent through 4.10.0): a PQ stream the pipeline calls `hdrType none` has its video-info envelope rewritten to HDR10 with `mediaSei`/`mediaVui` before ACB gets it | `setHdrInfo` with `sei`/`vui` | PlxNative `vp9_hdr.rs`, Kodi |
+| Dolby Vision declaration | never on 3.x (a declared Load never started on 3.9.3) | when the TV says supported | PlxNative `caps.rs` |
+
+The release comes from `/var/run/nyx/os_info.json` `webos_release` (`StarfishOptions::webos_major`
+overrides it). 1-4 try ACB first, anything else the exported window first; each falls back to the other.
+Seeks keep the kit's PTS splice (no `Seek`/`flush` call), which is era-independent. Not measured on a
+3.x/4.x TV: the kit's bundled SDL 2.30 on those compositors, and whether the UI plane is transparent
+over the ACB video plane (PlxNative needed SDL's opaque region cleared with LG's system SDL 2.0.4/2.0.5).
+
 ## ss4s module pattern (moonlight-tv) `[SRC]`
 
 Backends are separate `.so` modules (`ndl-webos5`, `ndl-webos4`, `smp`, `lgnc`, `alsa`, `pulse`,

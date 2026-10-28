@@ -185,3 +185,78 @@ TEST("starfish: setHdrInfo payload from container HDR10 metadata, in SEI units a
     c.transfer = 18;
     CHECK(has(StarfishBackend::build_hdr_payload(c), "\"hdrType\":\"HLG\""));
 }
+
+namespace {
+VideoColour hdr10_colour() {
+    VideoColour c;
+    c.transfer = 16;
+    c.primaries = 9;
+    c.matrix = 9;
+    c.has_primaries = true;
+    c.display_primaries[0][0] = 0.708, c.display_primaries[0][1] = 0.292;  // R
+    c.display_primaries[1][0] = 0.170, c.display_primaries[1][1] = 0.797;  // G
+    c.display_primaries[2][0] = 0.131, c.display_primaries[2][1] = 0.046;  // B
+    c.white_point[0] = 0.3127, c.white_point[1] = 0.3290;
+    c.has_luminance = true;
+    c.min_luminance = 0.0001, c.max_luminance = 1000;
+    c.has_light_level = true;
+    c.max_cll = 1000, c.max_fall = 400;
+    return c;
+}
+}  // namespace
+
+TEST("starfish: setHdrInfo before webOS 5 names its objects mediaSei and mediaVui") {
+    const std::string p = StarfishBackend::build_hdr_payload(hdr10_colour(), true);
+    CHECK(has(p, "\"hdrType\":\"HDR10\",\"mediaSei\":{\"displayPrimariesX0\":8500"));
+    CHECK(has(p, "\"mediaVui\":{\"transferCharacteristics\":16"));
+    CHECK(!has(p, "\"sei\""));
+    CHECK(!has(p, "\"vui\""));
+}
+
+TEST("starfish: webOS major from os_info.json") {
+    CHECK_EQ(StarfishBackend::webos_major_from_os_info(R"({"webos_release":"4.4.2","core_os_release":"4.4.2-22"})"), 4);
+    CHECK_EQ(StarfishBackend::webos_major_from_os_info(R"({"webos_release":"3.9.3"})"), 3);
+    CHECK_EQ(StarfishBackend::webos_major_from_os_info(R"({"webos_release":"10.2.0"})"), 10);
+    CHECK_EQ(StarfishBackend::webos_major_from_os_info(R"({"core_os_release":"6.5.3-47"})"), 0);
+    CHECK_EQ(StarfishBackend::webos_major_from_os_info(R"({"webos_release":"x"})"), 0);
+    CHECK_EQ(StarfishBackend::webos_major_from_os_info("not json"), 0);
+}
+
+TEST("starfish: event types above ENDOFSTREAM are two lower before webOS 5") {
+    // webOS 4.10's libpf sends dropped/displayed frames as 46/47 (PlxNative's decompile).
+    CHECK_EQ(StarfishBackend::normalise_event_type(46, 4), 48);
+    CHECK_EQ(StarfishBackend::normalise_event_type(47, 3), 49);
+    CHECK_EQ(StarfishBackend::normalise_event_type(48, 6), 48);
+    CHECK_EQ(StarfishBackend::normalise_event_type(48, 0), 48);  // unknown: webOS 5+ numbering
+    // At and below ENDOFSTREAM (0x1c) nothing moves.
+    CHECK_EQ(StarfishBackend::normalise_event_type(0x1c, 4), 0x1c);
+    CHECK_EQ(StarfishBackend::normalise_event_type(0x16, 4), 0x16);
+    CHECK_EQ(StarfishBackend::normalise_event_type(0, 4), 0);
+}
+
+TEST("starfish: a PQ stream's SDR video-info envelope is rewritten to HDR10 for ACB") {
+    // The envelope a webOS 4.5 TV produced for a VP9 PQ file (PlxNative's vp9_hdr.rs fixture).
+    const std::string vp9 =
+        R"({"context":"_x","content":"movie","video":{"frameRate":0,"width":1920,"height":1080,"hdrType":"none",)"
+        R"("mediaVui":{"transferCharacteristics":2,"colorPrimaries":2,"matrixCoeffs":2}}})";
+    const std::string out = StarfishBackend::rewrite_video_info(vp9, hdr10_colour());
+    CHECK(has(out, "\"hdrType\":\"HDR10\""));
+    CHECK(has(out, "\"transferCharacteristics\":16"));
+    CHECK(has(out, "\"displayPrimariesX0\":8500"));  // G first
+    CHECK(has(out, "\"maxContentLightLevel\":1000"));
+    CHECK(has(out, "\"context\":\"_x\""));  // the rest stays
+    CHECK(has(out, "\"width\":1920"));
+    // The TV's own word wins; SDR content, other shapes and junk are left alone.
+    const std::string hevc = R"({"video":{"hdrType":"HDR10","mediaVui":{"transferCharacteristics":16}}})";
+    CHECK(StarfishBackend::rewrite_video_info(hevc, hdr10_colour()).empty());
+    VideoColour sdr;
+    CHECK(StarfishBackend::rewrite_video_info(vp9, sdr).empty());
+    CHECK(StarfishBackend::rewrite_video_info(R"({"audio":{}})", hdr10_colour()).empty());
+    CHECK(StarfishBackend::rewrite_video_info("garbage", hdr10_colour()).empty());
+    // Without mastering metadata: HDR10 with the VUI only, and no stale SEI.
+    VideoColour bare;
+    bare.transfer = 16, bare.primaries = 9, bare.matrix = 9;
+    const std::string b = StarfishBackend::rewrite_video_info(R"({"video":{"mediaSei":{"x":1}}})", bare);
+    CHECK(has(b, "\"hdrType\":\"HDR10\""));
+    CHECK(!has(b, "mediaSei"));
+}

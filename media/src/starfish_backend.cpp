@@ -4,10 +4,15 @@
 // PlxNative authors, GPL-3.0-or-later): the mangled entry points, the in-place object, the sret
 // Feed reply, the BUFFERSTREAM payload, the exported-window binding and the frame-rate envelope.
 // The setHdrInfo payload, ac3PlusInfo, the VP9/AV1 names and the getMaxVideoResolution envelope follow
-// Kodi's xbmc/cores/VideoPlayer/MediaPipelineWebOS.cpp (Team Kodi, GPL-2.0-or-later).
+// Kodi's xbmc/cores/VideoPlayer/MediaPipelineWebOS.cpp (Team Kodi, GPL-2.0-or-later), and so do the
+// ACB video plane, the mediaSei/mediaVui names and the pre-webOS-5 event numbering. The copy-on-write
+// Feed ABI and the video-info HDR10 rewrite follow PlxNative's src/starfish.c and
+// rust-modules/media/src/player/vp9_hdr.rs.
 #include "wnk/media/starfish_backend.hpp"
 
 #include "wnk/log.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -15,7 +20,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <map>
+#include <sstream>
+#include <type_traits>
 
 #include <dlfcn.h>
 
@@ -28,6 +36,13 @@ constexpr int64_t kSpliceGapUs = 200000;
 // New content after a seek lands at least this far ahead of the decoder's clock (see PtsSplice).
 constexpr int64_t kSpliceClockLeadUs = 600000;
 
+// PF_EVENT_T as webOS 5+ numbers it (the NDK's StarfishMediaAPIs.h).
+constexpr int kEvVideoInfo = 0x4, kEvAudioInfo = 0x7, kEvUnloadCompleted = 0x17, kEvPlaying = 0x1a,
+              kEvPaused = 0x1b, kEvEndOfStream = 0x1c, kEvDropped = 0x30, kEvDisplayed = 0x31;
+// AcbAPI.h: PLAYER_TYPE_MSE, SINK_TYPE_MAIN, APPSTATE_FOREGROUND, PLAYSTATE_*.
+constexpr int kAcbPlayerMse = 10, kAcbSinkMain = 0, kAcbForeground = 1;
+constexpr int kAcbUnloaded = 0, kAcbLoaded = 1, kAcbPlaying = 2, kAcbPaused = 3;
+
 using EventCb = void (*)(int type, long long num, const char *str, void *ctx);
 
 struct Api {
@@ -36,6 +51,11 @@ struct Api {
     void (*dtor)(void *self) = nullptr;
     int (*load)(void *self, const char *payload, EventCb cb, void *ctx) = nullptr;
     void (*feed)(void *sret, void *self, const char *payload) = nullptr;  // returns std::string via sret
+    // webOS 3.x: Feed returns the pre-C++11 copy-on-write string, released with the firmware's own
+    // ~basic_string (its rep is refcounted heap; the kit's static libstdc++ must not touch it).
+    bool feed_cow = false;
+    void (*cow_string_dtor)(void *str) = nullptr;  // null on a COW build: every reply leaks its rep
+    const char *(*get_media_id)(void *self) = nullptr;  // for ACB's setMediaId
     int (*play)(void *self) = nullptr;
     int (*pause)(void *self) = nullptr;
     int (*unload)(void *self) = nullptr;
@@ -45,7 +65,7 @@ struct Api {
     // parameter is by value up to webOS 10 and const& from 11; both pass the string's address.
     bool (*max_video_resolution)(const std::string &codec, int32_t *w, int32_t *h, int32_t *fps) = nullptr;
     int (*set_hdr_info)(void *self, const char *payload) = nullptr;  // optional: webOS 5+
-    // SDL-webOS exported window (already loaded with the app's SDL).
+    // SDL-webOS exported window (already loaded with the app's SDL); optional, webOS 5+ only works.
     const char *(*create_window)(int type) = nullptr;
     int (*set_window)(const char *id, void *src, void *dst) = nullptr;  // SDL_bool, SDL_Rect*
     void (*destroy_window)(const char *id) = nullptr;
@@ -76,7 +96,24 @@ const Api &api() {
     bool ok = sym(h, g_api.ctor, "_ZN17StarfishMediaAPIsC1EPKc");
     ok = sym(h, g_api.dtor, "_ZN17StarfishMediaAPIsD1Ev") && ok;
     ok = sym(h, g_api.load, "_ZN17StarfishMediaAPIs4LoadEPKcPFvixS1_PvES2_") && ok;
-    ok = sym(h, g_api.feed, "_ZN17StarfishMediaAPIs4FeedB5cxx11EPKc") && ok;
+    // Both Feed names are looked up, never linked: a strong reference to the cxx11 one killed the
+    // process at the first Feed on 3.4.0 (PlxNative).
+    g_api.feed = reinterpret_cast<decltype(g_api.feed)>(dlsym(h, "_ZN17StarfishMediaAPIs4FeedB5cxx11EPKc"));
+    if (g_api.feed == nullptr) {
+        g_api.feed = reinterpret_cast<decltype(g_api.feed)>(dlsym(h, "_ZN17StarfishMediaAPIs4FeedEPKc"));
+        if (g_api.feed != nullptr) {
+            g_api.feed_cow = true;
+            // The firmware's libstdc++ (a dependency of libplayerAPIs), not RTLD_DEFAULT: the empty
+            // rep a COW string may point at is that library's.
+            if (void *cxx = dlopen("libstdc++.so.6", RTLD_NOW | RTLD_NOLOAD)) {
+                g_api.cow_string_dtor = reinterpret_cast<decltype(g_api.cow_string_dtor)>(dlsym(cxx, "_ZNSsD1Ev"));
+            }
+        } else {
+            ok = false;
+            if (g_api.why.empty()) g_api.why = "missing StarfishMediaAPIs::Feed";
+        }
+    }
+    g_api.get_media_id = reinterpret_cast<decltype(g_api.get_media_id)>(dlsym(h, "_ZN17StarfishMediaAPIs10getMediaIDEv"));
     ok = sym(h, g_api.play, "_ZN17StarfishMediaAPIs4PlayEv") && ok;
     ok = sym(h, g_api.pause, "_ZN17StarfishMediaAPIs5PauseEv") && ok;
     ok = sym(h, g_api.unload, "_ZN17StarfishMediaAPIs6UnloadEv") && ok;
@@ -89,15 +126,90 @@ const Api &api() {
             h, "_ZN3smp4util21getMaxVideoResolutionERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEPiS8_S8_"));
     }
     g_api.set_hdr_info = reinterpret_cast<decltype(g_api.set_hdr_info)>(dlsym(h, "_ZN17StarfishMediaAPIs10setHdrInfoEPKc"));
-    ok = sym(RTLD_DEFAULT, g_api.create_window, "SDL_webOSCreateExportedWindow") && ok;
-    ok = sym(RTLD_DEFAULT, g_api.set_window, "SDL_webOSSetExportedWindow") && ok;
-    ok = sym(RTLD_DEFAULT, g_api.destroy_window, "SDL_webOSDestroyExportedWindow") && ok;
+    g_api.create_window = reinterpret_cast<decltype(g_api.create_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSCreateExportedWindow"));
+    g_api.set_window = reinterpret_cast<decltype(g_api.set_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSSetExportedWindow"));
+    g_api.destroy_window = reinterpret_cast<decltype(g_api.destroy_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSDestroyExportedWindow"));
+    if (g_api.create_window == nullptr || g_api.set_window == nullptr || g_api.destroy_window == nullptr) {
+        g_api.create_window = nullptr;
+        g_api.set_window = nullptr;
+        g_api.destroy_window = nullptr;
+    }
     if (!ok) {
         dlclose(h);
         return g_api;
     }
     g_api.handle = h;
+    WNK_LOGI(kCat, "feed abi: %s%s", g_api.feed_cow ? "cow" : "cxx11",
+             g_api.feed_cow && g_api.cow_string_dtor == nullptr ? " (no ~basic_string: replies leak)" : "");
     return g_api;
+}
+
+// libAcbAPI.so.1: the video plane before webOS 5 (absent from 5.3.1 on). Looked up, never linked:
+// naming it kills the process on webOS 5 (PlxNative).
+using AcbCallback = void (*)(long acb, long task, long event, long app_state, long play_state, const char *reply);
+struct AcbApi {
+    void *handle = nullptr;
+    long (*create)() = nullptr;
+    bool (*initialize)(long acb, int player_type, const char *app_id, AcbCallback cb) = nullptr;
+    int (*set_media_video_data)(long acb, const char *payload, long *task) = nullptr;
+    int (*set_media_audio_data)(long acb, const char *payload, long *task) = nullptr;  // optional: absent on 3.4
+    int (*set_state)(long acb, int app_state, int play_state, long *task) = nullptr;
+    bool (*set_media_id)(long acb, const char *media_id) = nullptr;
+    bool (*set_sink_type)(long acb, int sink) = nullptr;
+    int (*set_custom_display_window)(long acb, long in_x, long in_y, long in_w, long in_h, long out_x, long out_y,
+                                     long out_w, long out_h, bool full_screen, long *task) = nullptr;
+    int (*finalize)(long acb) = nullptr;
+    void (*destroy)(long acb) = nullptr;
+    std::string why;
+    bool tried = false;
+};
+
+AcbApi g_acb;
+
+const AcbApi &acb_api() {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    if (g_acb.tried) return g_acb;
+    g_acb.tried = true;
+    void *h = dlopen("libAcbAPI.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (h == nullptr) {
+        const char *e = dlerror();
+        g_acb.why = e != nullptr ? e : "dlopen libAcbAPI.so.1 failed";
+        return g_acb;
+    }
+    auto get = [h](auto &out, const char *name) {
+        out = reinterpret_cast<std::remove_reference_t<decltype(out)>>(dlsym(h, name));
+        if (out == nullptr && g_acb.why.empty()) g_acb.why = std::string("missing ") + name;
+        return out != nullptr;
+    };
+    bool ok = get(g_acb.create, "AcbAPI_create");
+    ok = get(g_acb.initialize, "AcbAPI_initialize") && ok;
+    ok = get(g_acb.set_media_video_data, "AcbAPI_setMediaVideoData") && ok;
+    ok = get(g_acb.set_state, "AcbAPI_setState") && ok;
+    ok = get(g_acb.set_media_id, "AcbAPI_setMediaId") && ok;
+    ok = get(g_acb.set_sink_type, "AcbAPI_setSinkType") && ok;
+    ok = get(g_acb.set_custom_display_window, "AcbAPI_setCustomDisplayWindow") && ok;
+    ok = get(g_acb.finalize, "AcbAPI_finalize") && ok;
+    ok = get(g_acb.destroy, "AcbAPI_destroy") && ok;
+    g_acb.set_media_audio_data = reinterpret_cast<decltype(g_acb.set_media_audio_data)>(dlsym(h, "AcbAPI_setMediaAudioData"));
+    if (!ok) {
+        dlclose(h);
+        return g_acb;
+    }
+    g_acb.handle = h;
+    return g_acb;
+}
+
+void acb_callback(long acb, long task, long event, long app_state, long play_state, const char *reply) {
+    WNK_LOGI(kCat, "acb %ld task %ld event %ld app %ld play %ld %s", acb, task, event, app_state, play_state,
+             reply != nullptr ? reply : "");
+}
+
+int detect_webos_major() {
+    std::ifstream f("/var/run/nyx/os_info.json");
+    if (!f) return 0;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return StarfishBackend::webos_major_from_os_info(ss.str());
 }
 
 bool usable() { return api().handle != nullptr; }
@@ -242,7 +354,7 @@ bool StarfishBackend::max_video_resolution(const char *codec, int *width, int *h
     return true;
 }
 
-std::string StarfishBackend::build_hdr_payload(const VideoColour &c) {
+std::string StarfishBackend::build_hdr_payload(const VideoColour &c, bool legacy_keys) {
     const char *type = c.transfer == 16 ? "HDR10" : c.transfer == 18 ? "HLG" : nullptr;
     if (type == nullptr) return "";
     // SEI units: chromaticity in 1/50000, luminance in 1/10000 cd/m2, primaries in G, B, R order
@@ -271,10 +383,59 @@ std::string StarfishBackend::build_hdr_payload(const VideoColour &c) {
         add("maxPicAverageLightLevel", c.max_fall);
     }
     if (sei.empty()) return "";
-    return std::string("{\"hdrType\":\"") + type + "\",\"sei\":{" + sei + "},\"vui\":{\"transferCharacteristics\":" +
+    const char *sei_key = legacy_keys ? "mediaSei" : "sei";
+    const char *vui_key = legacy_keys ? "mediaVui" : "vui";
+    return std::string("{\"hdrType\":\"") + type + "\",\"" + sei_key + "\":{" + sei + "},\"" + vui_key +
+           "\":{\"transferCharacteristics\":" +
            std::to_string(c.transfer) + ",\"colorPrimaries\":" + std::to_string(c.primaries) +
            ",\"matrixCoeffs\":" + std::to_string(c.matrix) + ",\"videoFullRangeFlag\":" +
            (c.full_range ? "true" : "false") + "}}";
+}
+
+std::string StarfishBackend::rewrite_video_info(const std::string &envelope, const VideoColour &c) {
+    if (c.transfer != 16) return "";  // HDR10 only: the envelope's name for HLG was never observed
+    nlohmann::json v = nlohmann::json::parse(envelope, nullptr, false);
+    if (v.is_discarded() || !v.is_object()) return "";
+    const auto video = v.find("video");
+    if (video == v.end() || !video->is_object()) return "";
+    if (const auto t = video->find("hdrType"); t != video->end() && !(t->is_string() && *t == "none")) return "";
+    (*video)["hdrType"] = "HDR10";
+    (*video)["mediaVui"] = {{"transferCharacteristics", c.transfer}, {"colorPrimaries", c.primaries}, {"matrixCoeffs", c.matrix}};
+    // The SEI the TV's own HEVC envelope carries: G, B, R primaries in 1/50000, luminance in 1/10000.
+    if (c.has_primaries && c.has_luminance) {
+        nlohmann::json sei = nlohmann::json::object();
+        static constexpr int kOrder[3] = {1, 2, 0};
+        for (int i = 0; i < 3; ++i) {
+            sei["displayPrimariesX" + std::to_string(i)] = std::llround(c.display_primaries[kOrder[i]][0] * 50000);
+            sei["displayPrimariesY" + std::to_string(i)] = std::llround(c.display_primaries[kOrder[i]][1] * 50000);
+        }
+        sei["whitePointX"] = std::llround(c.white_point[0] * 50000);
+        sei["whitePointY"] = std::llround(c.white_point[1] * 50000);
+        sei["minDisplayMasteringLuminance"] = std::llround(c.min_luminance * 10000);
+        sei["maxDisplayMasteringLuminance"] = std::llround(c.max_luminance * 10000);
+        sei["maxContentLightLevel"] = c.has_light_level ? c.max_cll : 0;
+        sei["maxPicAverageLightLevel"] = c.has_light_level ? c.max_fall : 0;
+        (*video)["mediaSei"] = sei;
+    } else {
+        video->erase("mediaSei");
+    }
+    return v.dump();
+}
+
+int StarfishBackend::webos_major_from_os_info(const std::string &json) {
+    const nlohmann::json j = nlohmann::json::parse(json, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return 0;
+    const auto it = j.find("webos_release");
+    if (it == j.end() || !it->is_string()) return 0;
+    const std::string r = it->get<std::string>();
+    int major = 0;
+    size_t i = 0;
+    for (; i < r.size() && r[i] >= '0' && r[i] <= '9' && major < 1000; ++i) major = major * 10 + (r[i] - '0');
+    return i > 0 ? major : 0;
+}
+
+int StarfishBackend::normalise_event_type(int type, int webos_major) {
+    return webos_major >= 1 && webos_major <= 4 && type > kEvEndOfStream ? type + 2 : type;
 }
 
 bool StarfishBackend::decoder_listed(int width, int height) {
@@ -298,6 +459,7 @@ StarfishBackend::StarfishBackend(StarfishOptions options)
         const char *id = std::getenv("APPID");
         options_.app_id = id != nullptr ? id : "";
     }
+    webos_major_ = options_.webos_major >= 0 ? options_.webos_major : detect_webos_major();
     if (!usable()) return;
     for (const CodecId c : {CodecId::H264, CodecId::Hevc, CodecId::Vp9, CodecId::Av1}) {
         Limit &l = limits_[static_cast<size_t>(c)];
@@ -306,18 +468,64 @@ StarfishBackend::StarfishBackend(StarfishOptions options)
                  l.known ? (std::to_string(l.width) + "x" + std::to_string(l.height) + "@" + std::to_string(l.frame_rate)).c_str()
                          : "not reported");
     }
+    // webOS 5+ has the exported window and no ACB; webOS 3.x and 4.x the other way round. The
+    // release picks which to try first and the other is the fallback (Kodi asks the compositor).
+    const bool legacy = webos_major_ >= 1 && webos_major_ <= 4;
+    const bool placed = legacy ? open_acb() || open_exported_window() : open_exported_window() || open_acb();
+    WNK_LOGI(kCat, "webOS %d: video plane %s", webos_major_,
+             plane_ == VideoPlane::Acb ? "ACB" : plane_ == VideoPlane::ExportedWindow ? "exported window" : "none");
+    if (!placed) WNK_LOGW(kCat, "no video plane: the video will not be visible");
+}
+
+bool StarfishBackend::open_exported_window() {
+    if (api().create_window == nullptr) return false;
     // Type 0 is the video window (LG's header spells the constant EXPORED).
-    if (const char *id = api().create_window(0)) {
-        window_id_ = id;  // SDL's string has no documented lifetime: copy it
-        WNK_LOGI(kCat, "exported window %s", window_id_.c_str());
-    } else {
-        WNK_LOGW(kCat, "SDL_webOSCreateExportedWindow failed: the video will not be visible");
+    const char *id = api().create_window(0);
+    if (id == nullptr || *id == '\0') {
+        WNK_LOGW(kCat, "SDL_webOSCreateExportedWindow failed");
+        return false;
     }
+    window_id_ = id;  // SDL's string has no documented lifetime: copy it
+    plane_ = VideoPlane::ExportedWindow;
+    WNK_LOGI(kCat, "exported window %s", window_id_.c_str());
+    return true;
+}
+
+bool StarfishBackend::open_acb() {
+    const AcbApi &a = acb_api();
+    if (a.handle == nullptr) {
+        WNK_LOGI(kCat, "no ACB: %s", a.why.c_str());
+        return false;
+    }
+    const long id = a.create();
+    if (id == 0) {
+        WNK_LOGW(kCat, "AcbAPI_create failed");
+        return false;
+    }
+    if (!a.initialize(id, kAcbPlayerMse, options_.app_id.c_str(), &acb_callback)) {
+        WNK_LOGW(kCat, "AcbAPI_initialize failed");
+        a.destroy(id);
+        return false;
+    }
+    acb_id_ = id;
+    plane_ = VideoPlane::Acb;
+    WNK_LOGI(kCat, "ACB %ld (MSE)", id);
+    return true;
+}
+
+void StarfishBackend::acb_state(int play_state) {
+    if (acb_id_ == 0) return;
+    const int rc = acb_api().set_state(acb_id_, kAcbForeground, play_state, &acb_task_);
+    WNK_LOGI(kCat, "AcbAPI_setState(%d) -> %d", play_state, rc);
 }
 
 StarfishBackend::~StarfishBackend() {
     unload();
     if (!window_id_.empty() && usable()) api().destroy_window(window_id_.c_str());
+    if (acb_id_ != 0) {
+        acb_api().finalize(acb_id_);
+        acb_api().destroy(acb_id_);
+    }
 }
 
 BackendCaps StarfishBackend::caps() const {
@@ -343,8 +551,10 @@ void StarfishBackend::set_event_callback(EventFn fn) {
     events_ = std::move(fn);
 }
 
-void StarfishBackend::on_event(int type, long long num, const char *str) {
-    if (type == 23) {  // unload completed: the destructor may run
+void StarfishBackend::on_event(int raw_type, long long num, const char *str) {
+    const int type = normalise_event_type(raw_type, webos_major_);
+    if (type == kEvUnloadCompleted) {
+        acb_state(kAcbUnloaded);  // unload completed: the destructor may run
         std::lock_guard<std::mutex> lock(unload_mutex_);
         unload_completed_ = true;
         unload_cv_.notify_all();
@@ -367,10 +577,30 @@ void StarfishBackend::on_event(int type, long long num, const char *str) {
     const std::string s = str != nullptr ? str : "";
     // 48/49 are the sink's dropped and displayed frames per 200 ms poll (webOS 5+ numbering,
     // PlxNative's decompile): summed into one line every 5 s; everything else is rare and logged.
-    if (type == 48 || type == 49) {
-        (type == 48 ? dropped_ : displayed_) += num;
+    if (type == kEvDropped || type == kEvDisplayed) {
+        (type == kEvDropped ? dropped_ : displayed_) += num;
     } else {
-        WNK_LOGI(kCat, "event type=%d num=%lld %s", type, num, s.substr(0, 300).c_str());
+        WNK_LOGI(kCat, "event type=%d num=%lld %s", raw_type, num, s.substr(0, 300).c_str());
+    }
+    if (acb_id_ != 0) {
+        // The ACB plane learns the stream from the pipeline's own envelopes (Kodi).
+        if (type == kEvVideoInfo && !s.empty()) {
+            VideoColour colour;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                colour = colour_;
+            }
+            std::string info = rewrite_video_info(s, colour);
+            if (!info.empty()) WNK_LOGI(kCat, "video info: hdrType none -> HDR10 from the container");
+            if (info.empty()) info = s;
+            WNK_LOGI(kCat, "AcbAPI_setMediaVideoData -> %d", acb_api().set_media_video_data(acb_id_, info.c_str(), &acb_task_));
+        } else if (type == kEvAudioInfo && !s.empty() && acb_api().set_media_audio_data != nullptr) {
+            acb_api().set_media_audio_data(acb_id_, s.c_str(), &acb_task_);
+        } else if (type == kEvPlaying) {
+            acb_state(kAcbPlaying);
+        } else if (type == kEvPaused) {
+            acb_state(kAcbPaused);
+        }
     }
     EventFn fn;
     {
@@ -379,6 +609,16 @@ void StarfishBackend::on_event(int type, long long num, const char *str) {
     }
     if (!load_completed_ && (s.find("loadCompleted") != std::string::npos || s.find("\"loaded\"") != std::string::npos)) {
         load_completed_ = true;
+        if (acb_id_ != 0) {
+            void *object = loading_object_.load();
+            const char *media_id = object != nullptr && api().get_media_id != nullptr ? api().get_media_id(object) : nullptr;
+            acb_api().set_sink_type(acb_id_, kAcbSinkMain);
+            if (media_id != nullptr) acb_api().set_media_id(acb_id_, media_id);
+            WNK_LOGI(kCat, "ACB media id %s", media_id != nullptr ? media_id : "(none)");
+            acb_state(kAcbLoaded);
+            std::lock_guard<std::mutex> lock(mutex_);
+            place_acb_locked();
+        }
         if (fn) fn(BackendEvent::Loaded, "");
     } else if (s.find("endOfStream") != std::string::npos) {
         if (fn) fn(BackendEvent::EndOfStream, "");
@@ -419,7 +659,10 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         l.decoder_max_width = lim.width;
         l.decoder_max_height = lim.height;
     }
-    if (options_.dolby_vision) l.dolby_vision_profile = format.video->dolby_vision_profile;
+    // Not on webOS 3: a declared Load never started its clock on 3.9.3 (PlxNative).
+    if (options_.dolby_vision && !(webos_major_ >= 1 && webos_major_ <= 3)) {
+        l.dolby_vision_profile = format.video->dolby_vision_profile;
+    }
     l.atmos = options_.atmos && format.audio && format.audio->atmos;
     const std::string payload = build_load_payload(l);
     WNK_LOGI(kCat, "Load %s", payload.c_str());
@@ -436,6 +679,13 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         unload_completed_ = false;
     }
     presented_out_us_ = kNoTime;
+    {
+        // Before Load: its events (the ACB placement at loadCompleted, the video info) read them.
+        std::lock_guard<std::mutex> lock(mutex_);
+        colour_ = format.video->colour;
+        format_ = format;
+    }
+    loading_object_ = object;
     // uid NULL: the pipeline registers on the pre-authorised media namespace (PlxNative).
     api().ctor(object, nullptr);
     api().notify_foreground(object);
@@ -453,7 +703,11 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
     // Static HDR metadata only the container states (VP9 has no SEI of its own): after Load, as Kodi.
     if (const std::string hdr = build_hdr_payload(format.video->colour); !hdr.empty()) {
         if (api().set_hdr_info != nullptr) {
-            WNK_LOGI(kCat, "setHdrInfo %s -> %d", hdr.c_str(), api().set_hdr_info(object, hdr.c_str()) & 0xFF);
+            const std::string payload =
+                webos_major_ >= 1 && webos_major_ <= 4 ? build_hdr_payload(format.video->colour, true) : hdr;
+            WNK_LOGI(kCat, "setHdrInfo %s -> %d", payload.c_str(), api().set_hdr_info(object, payload.c_str()) & 0xFF);
+        } else if (acb_id_ != 0) {
+            WNK_LOGI(kCat, "no setHdrInfo: container HDR10 goes into the ACB video info");
         } else {
             WNK_LOGI(kCat, "no setHdrInfo on this firmware: container HDR metadata not declared");
         }
@@ -514,11 +768,18 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
     alignas(8) unsigned char reply[32] = {};
     api().feed(reply, object, json);
     const char *s = *reinterpret_cast<const char *const *>(reply);
-    if (s == nullptr) return Feed::Error;
-    if (std::strstr(s, "BufferFull") != nullptr) return Feed::Full;
-    if (std::strstr(s, "Ok") != nullptr) return Feed::Accepted;
-    WNK_LOGW(kCat, "Feed reply \"%s\"", s);
-    return Feed::Error;
+    Feed result = Feed::Error;
+    if (s == nullptr) {
+        return Feed::Error;
+    } else if (std::strstr(s, "BufferFull") != nullptr) {
+        result = Feed::Full;
+    } else if (std::strstr(s, "Ok") != nullptr) {
+        result = Feed::Accepted;
+    } else {
+        WNK_LOGW(kCat, "Feed reply \"%s\"", s);
+    }
+    if (api().feed_cow && api().cow_string_dtor != nullptr) api().cow_string_dtor(reply);
+    return result;
 }
 
 bool StarfishBackend::splice_settled() const {
@@ -615,6 +876,10 @@ void StarfishBackend::set_area(const Rect &pixels) {
 }
 
 void StarfishBackend::place_locked() {
+    if (plane_ == VideoPlane::Acb) {
+        if (loaded_ && load_completed_) place_acb_locked();
+        return;
+    }
     if (window_id_.empty() || !usable()) return;
     // Source: the coded picture (or the area until the stream is known); destination: the area.
     SdlRect src{0, 0, format_.video ? format_.video->width : static_cast<int>(area_.w),
@@ -622,6 +887,16 @@ void StarfishBackend::place_locked() {
     SdlRect dst{static_cast<int>(area_.x), static_cast<int>(area_.y), static_cast<int>(area_.w), static_cast<int>(area_.h)};
     const int rc = api().set_window(window_id_.c_str(), &src, &dst);
     WNK_LOGI(kCat, "place %dx%d -> %d,%d %dx%d rv=%d", src.w, src.h, dst.x, dst.y, dst.w, dst.h, rc);
+}
+
+void StarfishBackend::place_acb_locked() {
+    if (acb_id_ == 0 || area_.w <= 0 || area_.h <= 0) return;
+    // Source: the coded picture; destination: the area, in the 1920x1080 app space ACB uses (Kodi).
+    const long src_w = format_.video ? format_.video->width : 1920, src_h = format_.video ? format_.video->height : 1080;
+    const int rc = acb_api().set_custom_display_window(acb_id_, 0, 0, src_w, src_h, static_cast<long>(area_.x),
+                                                       static_cast<long>(area_.y), static_cast<long>(area_.w),
+                                                       static_cast<long>(area_.h), false, &acb_task_);
+    WNK_LOGI(kCat, "ACB place %ldx%ld -> %.0f,%.0f %.0fx%.0f rv=%d", src_w, src_h, area_.x, area_.y, area_.w, area_.h, rc);
 }
 
 }  // namespace wnk::media

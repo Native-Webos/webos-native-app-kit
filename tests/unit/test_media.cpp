@@ -199,6 +199,8 @@ class PacedBackend : public MediaBackend {
         std::atomic<int> pauses{0}, unpauses{0};  // pause(true) / pause(false) on a pausing backend
         std::atomic<int64_t> max_video_gap_us{0};  // longest wall-clock wait between two video packets
         std::atomic<bool> in_order{true};  // video PTS only ever went up (between flushes)
+        std::atomic<bool> refuse_load{false};          // load() fails, as a refusing decoder does
+        std::atomic<int64_t> position{kNoTime};        // what position_us() answers (kNoTime: no picture yet)
         AudioFormat audio_format;
         std::mutex m;
     };
@@ -218,8 +220,12 @@ class PacedBackend : public MediaBackend {
     }
     void set_event_callback(EventFn fn) override { events_ = std::move(fn); }
     bool splice_settled() const override { return log_->splice_settled; }
-    bool load(const StreamFormat &f, std::string *) override {
+    bool load(const StreamFormat &f, std::string *error) override {
         ++log_->loads;
+        if (log_->refuse_load) {
+            *error = "refused";
+            return false;
+        }
         if (f.audio) {
             std::lock_guard<std::mutex> lock(log_->m);
             log_->audio_format = *f.audio;
@@ -264,6 +270,7 @@ class PacedBackend : public MediaBackend {
     }
     void unload() override { ++log_->unloads; }
     void set_area(const Rect &) override {}
+    int64_t position_us() const override { return log_->position; }
     bool pause(bool paused) override {
         if (can_pause_) ++(paused ? log_->pauses : log_->unpauses);
         return can_pause_;
@@ -1220,4 +1227,89 @@ TEST("audio output: parses getARCState from an eARC soundbar (OLED65C1PTB, 2026-
     CHECK_EQ(a.summary(), std::string("eARC: AAC DTS PCM DD DD+ TrueHD MAT2PCM, atmos yes, pcm 8 ch"));
     CHECK_EQ(AudioOutputCaps::parse(R"({"returnValue":true,"arcActivation":""})").summary(), std::string("no ARC device"));
     CHECK(!AudioOutputCaps::parse(R"({"returnValue":false})").measured);
+}
+
+namespace {
+// A controller over AutoBackend(preferred, fallback), both PacedBackends with their own logs, on
+// video-only media (both take H.264; neither takes the scripted AAC).
+struct AutoRig {
+    async::MainDispatcher main;
+    std::shared_ptr<PacedBackend::Log> pref = std::make_shared<PacedBackend::Log>();
+    std::shared_ptr<PacedBackend::Log> fall = std::make_shared<PacedBackend::Log>();
+    PacedBackend *pref_backend = nullptr;
+    std::unique_ptr<PlaybackController> pc;
+    explicit AutoRig(int64_t duration_us = 2000000) {
+        auto p = std::make_unique<PacedBackend>(pref);
+        pref_backend = p.get();
+        auto f = std::make_unique<PacedBackend>(fall);
+        pc = std::make_unique<PlaybackController>(std::make_unique<ScriptedSource>(duration_us, true, false),
+                                                  std::make_unique<AutoBackend>(std::move(p), std::move(f)), main);
+    }
+    template <typename P>
+    bool wait(P pred, std::chrono::milliseconds timeout = 5000ms) {
+        const auto end = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < end) {
+            main.drain();
+            if (pred()) return true;
+            std::this_thread::sleep_for(2ms);
+        }
+        main.drain();
+        return pred();
+    }
+};
+}  // namespace
+
+TEST("controller: a load the preferred decoder refuses plays on the fallback, which keeps that media") {
+    AutoRig r;
+    r.pref->refuse_load = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.fall->video.load() > 10; }));
+    CHECK_EQ(r.pref->loads.load(), 1);
+    CHECK(r.pc->state() != PlayState::Error);
+    REQUIRE(r.wait([&] { return r.pc->state() == PlayState::Ended; }));
+    // The same media again goes straight to the fallback; another one tries the preferred decoder.
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.pc->state() == PlayState::Playing || r.pc->state() == PlayState::Ended; }));
+    CHECK_EQ(r.pref->loads.load(), 1);
+    r.pc->open("y");
+    REQUIRE(r.wait([&] { return r.pref->loads.load() == 2; }));
+    REQUIRE(r.wait([&] { return r.fall->loads.load() >= 3; }));  // refused again, rescued again
+    CHECK(r.pc->stop());
+}
+
+TEST("controller: a pipeline error before the first picture reopens on the fallback at the position") {
+    AutoRig r(20000000);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.pref->video.load() > 10; }));
+    r.pc->seek(5000000);
+    REQUIRE(r.wait([&] { return r.pref->first_video_after_flush.load() >= 4000000; }));
+    r.pref_backend->emit(BackendEvent::Error);  // position_us() is still kNoTime: nothing was shown
+    REQUIRE(r.wait([&] { return r.fall->video.load() > 10; }));
+    CHECK(r.pc->state() == PlayState::Playing);
+    CHECK(r.fall->first_video_after_flush.load() >= 4000000);  // carried on near the seek target
+    CHECK(r.fall->first_video_after_flush.load() <= 5000000);
+    CHECK(r.pc->stop());
+}
+
+TEST("controller: a pipeline error after a picture still ends in Error") {
+    AutoRig r(20000000);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.pref->video.load() > 10; }));
+    r.pref->position = 400000;  // a picture was presented
+    r.pref_backend->emit(BackendEvent::Error);
+    REQUIRE(r.wait([&] { return r.pc->state() == PlayState::Error; }));
+    CHECK_EQ(r.fall->loads.load(), 0);
+    CHECK(r.pc->stop());
+}
+
+TEST("controller: when the fallback refuses too, playback ends in Error naming the load") {
+    AutoRig r;
+    r.pref->refuse_load = true;
+    r.fall->refuse_load = true;
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.pc->state() == PlayState::Error; }));
+    CHECK_EQ(r.pref->loads.load(), 1);
+    CHECK_EQ(r.fall->loads.load(), 1);
+    CHECK(r.pc->snapshot().error.find("load failed: refused") != std::string::npos);
+    CHECK(r.pc->stop());
 }

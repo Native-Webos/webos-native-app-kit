@@ -97,6 +97,9 @@ struct PlaybackController::Core {
     void do_audio(int track);
     bool load_backend();
     void unload_backend();
+    // A refusal before the first picture: the backend switches decoders and the media opens again
+    // where it was going to start. False when there is nothing to switch to.
+    bool rescue(const std::string &error);
     bool pause_backend(bool paused);
     void seek_landed();  // a seek's content reached the decoder (and, splicing, the screen)
     void feed_one();
@@ -508,7 +511,7 @@ bool PlaybackController::Core::apply(const Command &c) {
         case Cmd::Audio: do_audio(static_cast<int>(c.pts_us)); break;
         case Cmd::Fail: {
             const PlayState s = state();
-            if (s != PlayState::Idle && s != PlayState::Error && s != PlayState::Stopped) {
+            if (s != PlayState::Idle && s != PlayState::Error && s != PlayState::Stopped && !rescue(c.uri)) {
                 fail(std::string(backend_->name()) + ": " + c.uri);
             }
             break;
@@ -596,10 +599,32 @@ bool PlaybackController::Core::load_backend() {
         loaded = backend_->load(format, &err);
     }
     if (!loaded) {
-        fail(std::string(backend_->name()) + " load failed: " + err);
+        if (!rescue(err)) fail(std::string(backend_->name()) + " load failed: " + err);
         return false;
     }
     loaded_ = true;
+    return true;
+}
+
+bool PlaybackController::Core::rescue(const std::string &error) {
+    std::string uri;
+    int64_t at;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        uri = snap_.info.uri;
+        at = seek_target_us_ != kNoTime ? seek_target_us_ : paused_at_us_ != kNoTime ? paused_at_us_ : clock_base_us_;
+    }
+    if (uri.empty() || !backend_->fall_back(error)) return false;
+    const PlayState before = state();
+    const bool play = before == PlayState::Playing || before == PlayState::Seeking || before == PlayState::Opening;
+    WNK_LOGW(kCat, "rescue: reopening %s at %.3f s with %s", uri.c_str(), at == kNoTime ? 0.0 : at / 1e6, backend_->name());
+    do_open(uri);  // prepare() keeps the other decoder for this URI
+    if (play && state() == PlayState::Ready) {
+        feeding_ = true;
+        set_state(PlayState::Playing);
+    }
+    const PlayState now = state();
+    if (at != kNoTime && at > 0 && (now == PlayState::Playing || now == PlayState::Ready)) do_seek(at);
     return true;
 }
 

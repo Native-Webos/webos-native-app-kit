@@ -14,6 +14,8 @@
 #include "wnk/media/media.hpp"
 
 #include <atomic>
+#include <deque>
+#include <optional>
 #include <memory>
 #include <string>
 
@@ -36,6 +38,9 @@ class AutoBackend : public MediaBackend {
     bool pause(bool paused) override { return active().pause(paused); }
     void end_of_stream() override { active().end_of_stream(); }
     bool splice_settled() const override { return active().splice_settled(); }
+    // The preferred backend refused this media before its first picture: the fallback takes it, now
+    // and whenever the same URI is prepared again (PlxNative learns refusals the same way).
+    bool fall_back(const std::string &why) override;
 
     // Whether `b` can be given this media's tracks (exposed for tests and logs).
     static bool takes(const MediaBackend &b, const TrackInfo *video, const TrackInfo *audio, std::string *why);
@@ -45,6 +50,10 @@ class AutoBackend : public MediaBackend {
     MediaBackend &active() const { return use_fallback_.load() ? *fallback_ : *preferred_; }
     std::unique_ptr<MediaBackend> preferred_, fallback_;
     std::atomic<bool> use_fallback_{false};  // written at prepare (playback thread), read anywhere
+    // Playback thread: the media prepared last and the URIs the preferred backend refused.
+    std::string uri_;
+    std::optional<TrackInfo> video_, audio_;
+    std::deque<std::string> refused_;
 };
 
 }  // namespace wnk::media

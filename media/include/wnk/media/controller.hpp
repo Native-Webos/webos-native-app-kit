@@ -7,6 +7,10 @@
 //                  │          └─seek─► Seeking ┘  └─(source ends, buffer drained)─► Ended
 //                  └──────────────(any failure)──────────────────────────────────► Error
 //                                 (a BackendEvent::Error too: the decoder refused the stream)
+//   A refusal before the first picture (a failed load, or an Error while nothing is shown) first
+//   asks the backend to fall back (MediaBackend::fall_back; AutoBackend switches to its other
+//   decoder for that URI): the media opens again there, at the position it was going to start
+//   from, and plays on if it was meant to. Only when nothing takes it does it end in Error.
 //   any state ─stop─► Stopped
 //
 // A reader thread reads packets into one lane per stream (video, audio), up to max_queue_us ahead;

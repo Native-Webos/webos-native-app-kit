@@ -675,6 +675,11 @@ re-encode). NDL is the fallback (AV1, VP9, and audio the source cannot decode). 
 TV, Starfish plays 24 fps without the NDL judder and can pause for real. NDL is fed with a 1 s
 lead because it was measured accepting a whole clip without backpressure.
 
+When Starfish refuses a stream before its first picture (its Load fails, or the pipeline reports
+an error while nothing is on screen), the controller reopens it on NDL at the same position
+instead of failing, and `AutoBackend` remembers the URI (the last 32) so the next open goes
+straight to NDL. A refusal after a picture, or one NDL cannot take, still ends in `Error`.
+
 `StarfishBackend::unload()` waits at most `StarfishOptions::release_deadline` (10 s) for LG's
 Unload. Past it the object stays with a worker thread and the next Starfish load fails with
 `release_timeout: ...` (shown as the Error reason) until that worker returns, instead of the

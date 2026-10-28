@@ -233,6 +233,10 @@ class MediaBackend {
     // Another splice before that stacks one seek on another, which Starfish does not survive (every
     // frame dropped for the rest of playback, OLED65C1PTB), so the controller holds the next seek.
     virtual bool splice_settled() const { return true; }
+    // This backend refused the media prepared last before showing a picture (a failed load, or an
+    // Error event): switch to another decoder for it if there is one that takes its tracks. True
+    // means the controller should open the media again; prepare() then keeps the other decoder.
+    virtual bool fall_back(const std::string & /*why*/) { return false; }
 };
 
 }  // namespace wnk::media

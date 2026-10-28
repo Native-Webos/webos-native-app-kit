@@ -617,7 +617,7 @@ bool PlaybackController::Core::rescue(const std::string &error) {
     if (uri.empty() || !backend_->fall_back(error)) return false;
     const PlayState before = state();
     const bool play = before == PlayState::Playing || before == PlayState::Seeking || before == PlayState::Opening;
-    WNK_LOGW(kCat, "rescue: reopening %s at %.3f s with %s", uri.c_str(), at == kNoTime ? 0.0 : at / 1e6, backend_->name());
+    WNK_LOGW(kCat, "rescue: reopening %s at %.3f s on the other decoder", uri.c_str(), at == kNoTime ? 0.0 : at / 1e6);
     do_open(uri);  // prepare() keeps the other decoder for this URI
     if (play && state() == PlayState::Ready) {
         feeding_ = true;

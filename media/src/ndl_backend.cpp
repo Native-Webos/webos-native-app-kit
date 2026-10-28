@@ -45,6 +45,11 @@ bool g_initialized = false;
 int g_backends = 0;
 bool g_foreground = true;
 std::atomic<NdlBackend *> g_active{nullptr};  // receives load-callback events
+// Steady-clock ns of the last NDL_DirectMediaLoad: an error callback this soon after it is the
+// decoder refusing the stream (H.264 High 10 on the OLED65C1PTB: "Playing error" 100, 27 ms after
+// the load). Later ones are only logged: none was seen in 78 loads of playable media.
+std::atomic<int64_t> g_loaded_at_ns{0};
+constexpr int64_t kRefusalWindowNs = 5000000000LL;
 
 template <typename F>
 bool sym(F &out, const char *name) {
@@ -204,6 +209,14 @@ void NdlBackend::load_callback(int type, long long num, const char *str) {
         case 0x16: b->emit(BackendEvent::Loaded, ""); break;
         case 0x1a: b->emit(BackendEvent::Playing, ""); break;
         case 0x1c: b->emit(BackendEvent::EndOfStream, ""); break;
+        case 0x12: {  // the pipeline's error, as Starfish numbers it
+            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (now - g_loaded_at_ns.load() < kRefusalWindowNs) {
+                b->emit(BackendEvent::Error, "NDL refused the stream (" + std::to_string(num) + ")");
+            }
+            break;
+        }
         default: break;
     }
 }
@@ -276,6 +289,7 @@ bool NdlBackend::load_locked(const StreamFormat &format, std::string *error) {
     }
     g_active = this;
     const auto t = std::chrono::steady_clock::now();
+    g_loaded_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
     const int rc = g_api.load(&info, &NdlBackend::load_callback);
     WNK_LOGI(kCat, "NDL_DirectMediaLoad(video %s %dx%d, audio %s %d Hz) -> %d (%.1f ms)",
              format.video ? codec_name(format.video->codec) : "-", info.video.width, info.video.height,

@@ -17,13 +17,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <sstream>
+#include <thread>
 #include <type_traits>
+#include <vector>
 
 #include <dlfcn.h>
 
@@ -215,15 +219,54 @@ int detect_webos_major() {
 bool usable() { return api().handle != nullptr; }
 
 // Callbacks carry an epoch, never a pointer: a late event after the backend is gone finds nothing.
-std::mutex g_registry_mutex;
-std::map<unsigned, StarfishBackend *> g_registry;
+// The registries are never destroyed: a release worker still inside the firmware at exit uses them.
+std::mutex &g_registry_mutex = *new std::mutex;
+std::map<unsigned, StarfishBackend *> &g_registry = *new std::map<unsigned, StarfishBackend *>;
 unsigned g_next_epoch = 0;
+
+// One Unload in flight: Unload, the wait for UnloadCompleted and the destructor run on a worker, so
+// a firmware call that never returns costs the caller its deadline, not the thread (PlxNative #1116).
+struct Release {
+    std::mutex m;
+    std::condition_variable cv;
+    bool completed = false;  // UnloadCompleted (type 23) arrived
+    bool done = false;       // the worker finished
+    std::chrono::steady_clock::time_point started;
+    std::chrono::milliseconds deadline{0};
+};
+std::map<unsigned, std::shared_ptr<Release>> &g_releases = *new std::map<unsigned, std::shared_ptr<Release>>;
 
 void event_trampoline(int type, long long num, const char *str, void *ctx) {
     const auto epoch = static_cast<unsigned>(reinterpret_cast<uintptr_t>(ctx));
     std::lock_guard<std::mutex> lock(g_registry_mutex);
+    if (type == 0x17) {  // UNLOADCOMPLETED, the same number on every release
+        if (const auto r = g_releases.find(epoch); r != g_releases.end()) {
+            std::lock_guard<std::mutex> rl(r->second->m);
+            r->second->completed = true;
+            r->second->cv.notify_all();
+        }
+    }
     const auto it = g_registry.find(epoch);
     if (it != g_registry.end()) it->second->on_event(type, num, str);
+}
+
+// Waits for every Unload still in flight, each until its own deadline. False with *error naming the
+// oldest one when one is past it: the decoders it holds may never come back.
+bool wait_for_releases(std::string *error) {
+    std::vector<std::pair<unsigned, std::shared_ptr<Release>>> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_registry_mutex);
+        pending.assign(g_releases.begin(), g_releases.end());
+    }
+    for (auto &[epoch, r] : pending) {
+        std::unique_lock<std::mutex> lock(r->m);
+        if (r->cv.wait_until(lock, r->started + r->deadline, [&r] { return r->done; })) continue;
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - r->started).count();
+        *error = "release_timeout: the previous player's Unload has not returned for " + std::to_string(ms) + " ms";
+        return false;
+    }
+    return true;
 }
 
 struct SdlRect {
@@ -553,12 +596,7 @@ void StarfishBackend::set_event_callback(EventFn fn) {
 
 void StarfishBackend::on_event(int raw_type, long long num, const char *str) {
     const int type = normalise_event_type(raw_type, webos_major_);
-    if (type == kEvUnloadCompleted) {
-        acb_state(kAcbUnloaded);  // unload completed: the destructor may run
-        std::lock_guard<std::mutex> lock(unload_mutex_);
-        unload_completed_ = true;
-        unload_cv_.notify_all();
-    }
+    if (type == kEvUnloadCompleted) acb_state(kAcbUnloaded);  // the release worker hears it too
     if (type == 0) {  // FRAMEREADY: the presented PTS, in ns
         presented_out_us_ = num / 1000;
         const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -637,6 +675,12 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         return false;
     }
     unload();
+    // A Load while the last one's decoders are still being given back waited for them forever on
+    // webOS 6.5.3; past the deadline the play fails with a reason instead.
+    if (!wait_for_releases(error)) {
+        WNK_LOGW(kCat, "%s", error->c_str());
+        return false;
+    }
     void *object = nullptr;
     if (posix_memalign(&object, 16, kObjectSize) != 0) {
         *error = "out of memory";
@@ -674,10 +718,6 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
     }
     load_completed_ = false;
     seen_frame_ = false;
-    {
-        std::lock_guard<std::mutex> lock(unload_mutex_);
-        unload_completed_ = false;
-    }
     presented_out_us_ = kNoTime;
     {
         // Before Load: its events (the ACB placement at loadCompleted, the video info) read them.
@@ -819,22 +859,49 @@ void StarfishBackend::unload() {
         epoch = epoch_;
         object_ = nullptr;
     }
-    const auto t = std::chrono::steady_clock::now();
-    const int rc = api().unload(object);
-    // The destructor is what gives the decoders back (a Load after an Unload without it waited for
-    // them forever on webOS 6.5.3), and PlxNative runs it only after UnloadCompleted (type 23).
-    bool completed;
-    {
-        std::unique_lock<std::mutex> lock(unload_mutex_);
-        completed = unload_cv_.wait_for(lock, std::chrono::seconds(3), [this] { return unload_completed_; });
-    }
+    auto r = std::make_shared<Release>();
+    r->started = std::chrono::steady_clock::now();
+    r->deadline = options_.release_deadline;
     {
         std::lock_guard<std::mutex> lock(g_registry_mutex);
-        g_registry.erase(epoch);  // later callbacks are dropped
+        g_releases[epoch] = r;
     }
-    if (completed) api().dtor(object);
-    WNK_LOGI(kCat, "Unload -> %d, %s (%.1f ms)", rc, completed ? "destroyed" : "no UnloadCompleted: object kept",
-             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count());
+    std::thread([r, object, epoch] {
+        const int rc = api().unload(object);
+        const double unload_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r->started).count();
+        // The destructor is what gives the decoders back (a Load after an Unload without it waited for
+        // them forever on webOS 6.5.3), and PlxNative runs it only after UnloadCompleted (type 23).
+        bool completed;
+        {
+            std::unique_lock<std::mutex> lock(r->m);
+            completed = r->cv.wait_for(lock, std::chrono::seconds(3), [&r] { return r->completed; });
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_registry_mutex);
+            g_registry.erase(epoch);  // later callbacks are dropped
+        }
+        if (completed) api().dtor(object);
+        WNK_LOGI(kCat, "Unload -> %d after %.1f ms, %s (%.1f ms)", rc, unload_ms,
+                 completed ? "destroyed" : "no UnloadCompleted: object kept",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r->started).count());
+        {
+            std::lock_guard<std::mutex> lock(r->m);
+            r->done = true;
+        }
+        r->cv.notify_all();
+        std::lock_guard<std::mutex> lock(g_registry_mutex);
+        g_releases.erase(epoch);
+    }).detach();
+    std::unique_lock<std::mutex> lock(r->m);
+    if (!r->cv.wait_until(lock, r->started + r->deadline, [&r] { return r->done; })) {
+        lock.unlock();
+        // The object stays with the worker; this backend no longer hears its events, so it may go.
+        std::lock_guard<std::mutex> rl(g_registry_mutex);
+        g_registry.erase(epoch);
+        WNK_LOGW(kCat, "Unload overdue: still in the firmware after %lld ms; the object is parked",
+                 static_cast<long long>(r->deadline.count()));
+    }
     // The memory block itself is never freed or reused: a late callback carries only its address.
 }
 

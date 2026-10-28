@@ -9,3 +9,8 @@ leak:libSDL2-2.0.so.0
 leak:libdrm.so.2
 leak:libEGL_mesa.so.0
 leak:libgallium
+
+# StarfishBackend never frees the 64 KiB block it constructs LG's StarfishMediaAPIs in: a late
+# firmware callback carries only its address (media/src/starfish_backend.cpp). Reached on the host
+# by unit.starfish_release through tests/fakes/fake_player_apis.cpp.
+leak:wnk::media::StarfishBackend::load

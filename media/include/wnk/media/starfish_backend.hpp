@@ -26,6 +26,10 @@
 //   * Events: FRAMEREADY (type 0) carries the presented PTS; loadCompleted arrives as a string; type
 //     18 before any picture is a refusal. Types above 0x1c are numbered two lower before webOS 5
 //     (Kodi's `type += 2`): normalise_event_type maps them to the webOS 5+ numbers.
+//   * Unload runs on a release worker (Unload, UnloadCompleted, destructor). unload() waits at most
+//     StarfishOptions::release_deadline (10 s); past it the object is parked with the worker and the
+//     next Load fails with release_timeout until the worker returns (PlxNative #1116: an Unload that
+//     never returned froze its UI for good).
 //   * Pause and Play are real. Seeks splice the timeline like the NDL backend (no flush: PlxNative
 //     found Starfish's flush leaves a stale segment and wedges the sink after ~48 s).
 //
@@ -45,7 +49,7 @@
 #include "wnk/media/pts_splice.hpp"
 
 #include <atomic>
-#include <condition_variable>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -64,6 +68,9 @@ struct StarfishOptions {
     // The webOS major release (4 for 4.4.2). -1 reads it from /var/run/nyx/os_info.json; 0 is
     // unknown, which is treated as webOS 5+.
     int webos_major = -1;
+    // How long unload() waits for LG's Unload and the destructor before it parks the object, and how
+    // long the next Load waits for such a release before it fails with release_timeout.
+    std::chrono::milliseconds release_deadline{10000};
 };
 
 // What shows the decoded picture.
@@ -175,9 +182,6 @@ class StarfishBackend : public MediaBackend {
     bool log_next_video_ = false;  // guarded by mutex_
     std::mutex events_mutex_;
     EventFn events_;
-    std::mutex unload_mutex_;
-    std::condition_variable unload_cv_;
-    bool unload_completed_ = false;  // UnloadCompleted (type 23) for the current object
 };
 
 }  // namespace wnk::media

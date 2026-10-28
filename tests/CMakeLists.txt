@@ -403,3 +403,17 @@ if (TARGET wnk-player)
             "open failed: No such file")
     set_tests_properties(e2e.player.missing_file_reports_error PROPERTIES FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}")
 endif ()
+
+if (NOT WNK_WEBOS)
+    # A stand-in libplayerAPIs.so.1, so StarfishBackend's release path runs on the host.
+    add_library(fake_player_apis SHARED fakes/fake_player_apis.cpp)
+    set_target_properties(fake_player_apis PROPERTIES OUTPUT_NAME playerAPIs SOVERSION 1
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fakes")
+    add_executable(test_starfish_release unit/test_starfish_release.cpp)
+    target_include_directories(test_starfish_release PRIVATE unit)
+    target_link_libraries(test_starfish_release PRIVATE wnk_media_starfish ${CMAKE_DL_LIBS})
+    add_dependencies(test_starfish_release fake_player_apis)
+    add_test(NAME unit.starfish_release COMMAND test_starfish_release)
+    set_tests_properties(unit.starfish_release PROPERTIES
+            ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/fakes;${WNK_LSAN}")
+endif ()

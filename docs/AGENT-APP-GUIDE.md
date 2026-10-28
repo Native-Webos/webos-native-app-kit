@@ -675,6 +675,11 @@ re-encode). NDL is the fallback (AV1, VP9, and audio the source cannot decode). 
 TV, Starfish plays 24 fps without the NDL judder and can pause for real. NDL is fed with a 1 s
 lead because it was measured accepting a whole clip without backpressure.
 
+Dolby Vision Profile 7 (UHD Blu-ray remuxes) plays as Profile 8.1 when the kit was built with
+libdovi (`cmake/LibDovi.cmake`: cargo plus `rustup target add armv7-unknown-linux-gnueabi`;
+`tools/doctor.sh` checks both). Built with `-DWNK_DOVI=OFF` it plays as its HDR10 base layer.
+Nothing in the app changes: `FfmpegSource` converts and declares profile 8.
+
 When Starfish refuses a stream before its first picture (its Load fails, or the pipeline reports
 an error while nothing is on screen), the controller reopens it on NDL at the same position
 instead of failing, and `AutoBackend` remembers the URI (the last 32) so the next open goes

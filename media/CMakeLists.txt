@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Media model and playback controller. SDL-free; backends and sources live in their own targets.
 add_library(wnk_media STATIC src/media.cpp src/controller.cpp src/subtitles.cpp src/device_caps.cpp src/auto_backend.cpp
-        src/xml.cpp src/manifest.cpp src/webvtt.cpp src/bitstream.cpp src/playback_headers.cpp src/iptv.cpp)
+        src/xml.cpp src/manifest.cpp src/webvtt.cpp src/bitstream.cpp src/playback_headers.cpp src/iptv.cpp src/dovi.cpp)
 target_include_directories(wnk_media PUBLIC include)
+target_compile_definitions(wnk_media PRIVATE WNK_HAVE_DOVI=${WNK_HAVE_DOVI})
+if (WNK_HAVE_DOVI)
+    target_link_libraries(wnk_media PRIVATE wnk_dovi)
+endif ()
 target_include_directories(wnk_media SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_link_libraries(wnk_media PUBLIC wnk_core wnk_async wnk_logging wnk_net PRIVATE wnk_platform)  # wnk_net for net::Headers
 

@@ -3,6 +3,7 @@
 
 #include "wnk/log.hpp"
 #include "wnk/media/bitstream.hpp"
+#include "wnk/media/dovi.hpp"
 #include "wnk/media/subtitles.hpp"
 
 extern "C" {
@@ -192,6 +193,10 @@ struct FfmpegSource::Impl {
     CodecId video_codec = CodecId::Unknown;
     std::vector<uint8_t> av1_config;  // AV1: the av1C record, for keyframes without a sequence header
     int64_t hdr10plus_stripped = 0;   // HEVC access units that lost an HDR10+ message
+    bool dovi_p7 = false;             // Dolby Vision Profile 7 fed as 8.1 (wnk/media/dovi.hpp)
+    DoviStats dovi;
+    bool dovi_logged_first = false;
+    uint64_t dovi_logged_drops = 0;
     bool decode_audio = false;
     // AudioPath::Ac3: decoded audio is converted by `swr` (made for the first frame and remade when
     // the frames change) into planar float at the encoder's layout and rate, collected in `fifo` and
@@ -767,6 +772,20 @@ struct FfmpegSource::Impl {
         if (video_codec == CodecId::Hevc && hevc_strip_hdr10plus(&v.data) && hdr10plus_stripped++ == 0) {
             WNK_LOGI(kCat, "removing HDR10+ metadata from the HEVC stream (webOS decoders stall on it)");
         }
+        if (dovi_p7) {
+            hevc_dovi_p7_to_p81(&v.data, dovi_available() ? RpuRewrite(&dovi_rpu_to_p81) : RpuRewrite(), &dovi);
+            if (!dovi_logged_first) {
+                dovi_logged_first = true;
+                WNK_LOGI(kCat, "Dolby Vision 7 -> 8.1: first unit %llu RPU converted, %llu dropped, %llu EL NAL units dropped",
+                         static_cast<unsigned long long>(dovi.rpu_converted), static_cast<unsigned long long>(dovi.rpu_dropped),
+                         static_cast<unsigned long long>(dovi.el_dropped));
+            }
+            if (dovi_available() && dovi.rpu_dropped > dovi_logged_drops && (dovi_logged_drops == 0 || dovi.rpu_dropped % 1000 == 0)) {
+                dovi_logged_drops = dovi.rpu_dropped;
+                WNK_LOGW(kCat, "Dolby Vision RPU dropped (%llu so far): %s", static_cast<unsigned long long>(dovi.rpu_dropped),
+                         dovi.last_error.c_str());
+            }
+        }
         v.pts_us = to_us(p->pts != AV_NOPTS_VALUE ? p->pts : p->dts, tb);
         v.dts_us = to_us(p->dts, tb);
         v.duration_us = p->duration > 0 ? av_rescale_q(p->duration, tb, kMicros) : 0;
@@ -989,15 +1008,25 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
         }
         out->video = VideoFormat{t->codec, t->width, t->height, t->frame_rate};
         out->video->colour = colour_of(par);
+        m.dovi_p7 = false;
         // Dolby Vision configuration record (MP4 dvcC/dvvC, Matroska block addition mapping).
         if (const AVPacketSideData *sd = av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data,
                                                                  AV_PKT_DATA_DOVI_CONF)) {
             const auto *dv = reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(sd->data);
+            m.dovi_p7 = t->codec == CodecId::Hevc && dv->rpu_present_flag != 0 &&
+                        dovi_converts_to_p81(dv->dv_profile, dv->el_present_flag != 0, dv->dv_bl_signal_compatibility_id);
+            m.dovi = DoviStats{};
+            m.dovi_logged_first = false;
+            m.dovi_logged_drops = 0;
             if (t->codec == CodecId::Hevc && dv->rpu_present_flag != 0 && dv->el_present_flag == 0) {
                 out->video->dolby_vision_profile = dv->dv_profile;
+            } else if (m.dovi_p7 && dovi_available()) {
+                out->video->dolby_vision_profile = 8;  // what is fed: 8.1, single layer
             }
             WNK_LOGI(kCat, "Dolby Vision profile %d, compatibility %d%s", dv->dv_profile, dv->dv_bl_signal_compatibility_id,
-                     dv->el_present_flag != 0 ? ", enhancement layer (base layer only)" : "");
+                     !m.dovi_p7 ? (dv->el_present_flag != 0 ? ", enhancement layer (base layer only)" : "")
+                     : dovi_available() ? ", enhancement layer: fed as Profile 8.1"
+                                        : ", enhancement layer: fed as its HDR10 base layer (no libdovi)");
         }
     }
 

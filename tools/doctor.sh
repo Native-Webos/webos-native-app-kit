@@ -29,6 +29,18 @@ else
     row "webOS NDK" MISSING "https://github.com/openlgtv/buildroot-nc4/releases (then relocate-sdk.sh; set WEBOS_NDK)"
 fi
 if have git; then row "git" ok "$(ver git --version)"; else row "git" MISSING "needed to fetch SDL-webOS"; fi
+# libdovi (Dolby Vision Profile 7 -> 8.1, cmake/LibDovi.cmake). Optional: without it WNK_DOVI turns off.
+cargo_bin="$(command -v cargo || echo "$HOME/.cargo/bin/cargo")"
+if [[ -x "$cargo_bin" ]]; then
+    row "cargo (libdovi)" ok "$(ver "$cargo_bin" --version)"
+    if "${cargo_bin%/cargo}/rustup" target list --installed 2>/dev/null | grep -qx armv7-unknown-linux-gnueabi; then
+        row "  armv7 Rust target" ok "armv7-unknown-linux-gnueabi"
+    else
+        row "  armv7 Rust target" MISSING "rustup target add armv7-unknown-linux-gnueabi (else build with -DWNK_DOVI=OFF)"
+    fi
+else
+    row "cargo (libdovi)" MISSING "optional: https://rustup.rs (else Dolby Vision Profile 7 plays as HDR10)"
+fi
 
 note ""
 note "Packaging checks"

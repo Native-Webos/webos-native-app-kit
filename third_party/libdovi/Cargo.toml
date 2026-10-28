@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A static libdovi (quietvoid's dolby_vision crate with its C API) for the kit: media/src/dovi.cpp
+# calls six of its functions through third_party/libdovi/include/wnk_dovi.h. Built by cmake/LibDovi.cmake.
+[package]
+name = "wnk-dovi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+dolby_vision = { version = "=3.4.0", default-features = false, features = ["capi"] }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = false
+strip = "debuginfo"

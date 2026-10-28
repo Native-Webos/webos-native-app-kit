@@ -106,6 +106,25 @@ A/V sync is wrong. **This needs a measured device test.**
   `option.windowId` → `SDL_webOSSetExportedWindow` places it (plx `vp_create_window`, `vp_place`) `[SRC]`.
 - SMP supports seek, pause and richer containers (plx's player) but carries the highest C++/ABI risk.
 
+### Dolby Vision Profile 7 `[HW]`
+
+UHD Blu-ray remuxes carry Profile 7: an HDR10 base layer, an enhancement layer and RPUs. LG's
+pipeline takes single-layer DV only, so `FfmpegSource` feeds such a stream as Profile 8.1, as
+`dovi_tool -m 2` and PlxNative (#825) do (`wnk/media/dovi.hpp`): every enhancement-layer NAL unit
+(UNSPEC63, or nuh_layer_id > 0) is dropped and every RPU (UNSPEC62) is rewritten by libdovi
+(quietvoid, MIT; `cmake/LibDovi.cmake` builds the pinned crate with cargo). Starfish is told
+`DolbyHdrInfo` profileId 8. Only records with an enhancement layer and a base layer compatible with
+HDR10 (`dv_bl_signal_compatibility_id` 6) convert; an RPU that fails to convert is dropped, never
+passed on as Profile 7. Lost: the enhancement layer's detail above the base layer. Without libdovi
+(`-DWNK_DOVI=OFF`) the same stream plays as its HDR10 base layer.
+
+Measured on the OLED65C1PTB (webOS 6.5.3, 2026-10-29) with a 60 s cut of a 4K Profile 7 remux
+(compatibility 6, TrueHD 7.1): the panel reports `dynamicRange dolbyHdr` in `dolbyHdrCinema`, 24 fps
+with 0 dropped frames over 1066 frames and a seek, one RPU converted and 18 enhancement-layer units
+dropped per frame. The player used 38% of one core with the conversion and 38% with the RPU and
+enhancement-layer units removed beforehand, so the conversion's cost is below what `top` resolves
+(the rest is the remux's HTTP read, demux and the TrueHD -> AC-3 re-encode).
+
 ### webOS 3.x and 4.x (2016-2019 sets) `[FWDB]`, `[SRC]`
 
 Before this change the kit played nothing on these sets: `StarfishBackend` needed the webOS 5

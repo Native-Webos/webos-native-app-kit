@@ -65,6 +65,7 @@ struct Api {
     int (*unload)(void *self) = nullptr;
     int (*push_eos)(void *self) = nullptr;
     void (*notify_foreground)(void *self) = nullptr;
+    int (*seek)(void *self, const char *millis) = nullptr;  // bool Seek(const char*), on every release
     // Optional (absent on webOS 1.x-3.x images): smp::util::getMaxVideoResolution. Its std::string
     // parameter is by value up to webOS 10 and const& from 11; both pass the string's address.
     bool (*max_video_resolution)(const std::string &codec, int32_t *w, int32_t *h, int32_t *fps) = nullptr;
@@ -123,6 +124,7 @@ const Api &api() {
     ok = sym(h, g_api.unload, "_ZN17StarfishMediaAPIs6UnloadEv") && ok;
     ok = sym(h, g_api.push_eos, "_ZN17StarfishMediaAPIs7pushEOSEv") && ok;
     ok = sym(h, g_api.notify_foreground, "_ZN17StarfishMediaAPIs16notifyForegroundEv") && ok;
+    g_api.seek = reinterpret_cast<decltype(g_api.seek)>(dlsym(h, "_ZN17StarfishMediaAPIs4SeekEPKc"));
     g_api.max_video_resolution = reinterpret_cast<decltype(g_api.max_video_resolution)>(dlsym(
         h, "_ZN3smp4util21getMaxVideoResolutionENSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEPiS7_S7_"));
     if (g_api.max_video_resolution == nullptr) {
@@ -518,6 +520,16 @@ StarfishBackend::StarfishBackend(StarfishOptions options)
     WNK_LOGI(kCat, "webOS %d: video plane %s", webos_major_,
              plane_ == VideoPlane::Acb ? "ACB" : plane_ == VideoPlane::ExportedWindow ? "exported window" : "none");
     if (!placed) WNK_LOGW(kCat, "no video plane: the video will not be visible");
+    // PlxNative uses Seek on the exported-window plane and on a known webOS 3; webOS 4 has a private
+    // segment seek the kit does not use, so it splices.
+    native_seek_ = options_.native_seek && api().seek != nullptr &&
+                   (plane_ == VideoPlane::ExportedWindow || webos_major_ == 3);
+    WNK_LOGI(kCat, "seeks: %s", native_seek_ ? "LG's Seek" : "splice");
+}
+
+bool StarfishBackend::native_seek() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return native_seek_ && !native_seek_refused_;
 }
 
 bool StarfishBackend::open_exported_window() {
@@ -584,8 +596,8 @@ BackendCaps StarfishBackend::caps() const {
     c.adaptive_resolution = true;  // Load declares adaptiveResolution and the 4K/FHD envelope
     c.pause = true;
     c.position = true;
-    c.seek_splices = true;
-    c.splice_gap_us = kSpliceGapUs;
+    c.seek_splices = !native_seek();
+    c.splice_gap_us = c.seek_splices ? kSpliceGapUs : 0;
     return c;
 }
 
@@ -603,6 +615,9 @@ void StarfishBackend::on_event(int raw_type, long long num, const char *str) {
                                 std::chrono::steady_clock::now().time_since_epoch()).count();
         presented_at_ns_ = now;
         ++frameready_;
+        if (const int64_t at = seek_issued_ns_.exchange(0); at != 0) {
+            WNK_LOGI(kCat, "seek landed: first frame pts %.3f s, %.0f ms after Seek", num / 1e9, (now - at) / 1e6);
+        }
         // Every 5 s: the sink's own counters and how many FRAMEREADY callbacks came.
         if (now - summary_at_ns_.load() >= 5000000000LL) {
             summary_at_ns_ = now;
@@ -762,6 +777,7 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         paused_ = false;
         splice_.reset();
         replayed_ = false;
+        native_seek_pending_ = false;
         splice_first_out_us_ = kNoTime;
     }
     // Placing the window is an SDL call: the main thread does it through set_area().
@@ -773,11 +789,20 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
     void *object;
     int64_t out_us;
     bool play = false, replay = false;
+    int64_t seek_out_us = kNoTime;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!loaded_) return Feed::Error;
         if (p.type == TrackType::Audio && !format_.audio) return Feed::Accepted;
         object = object_;
+        if (native_seek_pending_ && p.pts_us != kNoTime) {
+            // Content time from here on (kept non-negative: Feed reads pts as unsigned), and the
+            // pipeline's new segment starts at this packet.
+            native_seek_pending_ = false;
+            splice_.reanchor(p.pts_us < 0 ? -p.pts_us : 0);
+            seek_out_us = p.pts_us + splice_.shift_us();
+            presented_out_us_ = kNoTime;  // until the new segment presents a frame
+        }
         // After a seek the new content goes after the decoder's clock if it ran past what was fed.
         const int64_t before = splice_.shift_us();
         const int64_t clock = clock_out_us(paused_);
@@ -798,6 +823,33 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
         // Play issued before loadCompleted is queued; it is issued once more after it (samples README).
         if (!paused_ && !play_issued_) play = play_issued_ = true;
         if (!paused_ && load_completed_ && !replayed_) replay = replayed_ = true;
+    }
+    if (seek_out_us != kNoTime) {
+        // On the feeding thread, before the packet: Feed takes no lock and would race the flush.
+        const std::string millis = std::to_string(seek_out_us / 1000);
+        const auto t = std::chrono::steady_clock::now();
+        seek_issued_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+        const bool ok = (api().seek(object, millis.c_str()) & 0xFF) != 0;
+        WNK_LOGI(kCat, "Seek(%s) -> %d (%.1f ms; %s pts %.3f s)", millis.c_str(), ok ? 1 : 0,
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count(),
+                 p.type == TrackType::Video ? "video" : "audio", p.pts_us / 1e6);
+        if (!ok) {
+            // A refused Seek can leave every later Feed rejected (PlxNative's decompile): reload, and
+            // splice for the rest of this backend's life.
+            StreamFormat format;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                native_seek_refused_ = true;
+                format = format_;
+            }
+            WNK_LOGW(kCat, "Seek refused: reloading, and splicing seeks from now on");
+            std::string err;
+            if (!load(format, &err)) {
+                WNK_LOGW(kCat, "reload after a refused Seek failed: %s", err.c_str());
+                return Feed::Error;
+            }
+            return feed(p);
+        }
     }
     if (play) WNK_LOGI(kCat, "Play -> %d", api().play(object));
     if (replay && !play) WNK_LOGI(kCat, "Play after loadCompleted -> %d", api().play(object));
@@ -844,7 +896,11 @@ int64_t StarfishBackend::clock_out_us(bool paused) const {
 bool StarfishBackend::flush(std::string *) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!loaded_) return true;
-    splice_.splice();  // later packets continue the timeline; nothing is dropped
+    if (native_seek_ && !native_seek_refused_) {
+        native_seek_pending_ = true;  // the next packet issues Seek at its own timestamp
+    } else {
+        splice_.splice();  // later packets continue the timeline; nothing is dropped
+    }
     return true;
 }
 

@@ -34,6 +34,7 @@
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"backend": "ndl"}                     force NDL (default: Starfish when the codecs suit it, else NDL)
 //   {"backend": "starfish"}                force LG's Starfish pipeline
+//   {"seekMode": "splice"}                 Starfish seeks by splicing the timeline instead of LG's Seek
 //   {"ndlReload": 1}                       pause and seek by reloading NDL (black picture; comparison)
 //   {"leadMs": 400}                        feed at most this far ahead of the clock (default 1000)
 //   {"ac3": false}                         never re-encode audio to AC-3 (audio Starfish cannot take
@@ -102,6 +103,7 @@ struct Settings {
     PtsUnit pts_unit = PtsUnit::Microseconds;
     bool ndl_reload = false;
     std::string backend = "auto";  // auto (Starfish when the codecs suit it, else NDL), starfish, ndl
+    bool native_seek = true;       // {"seekMode":"splice"}: Starfish splices instead of LG's Seek
     int lead_ms = 1000;
     bool ac3 = true;  // re-encode audio Starfish cannot take to AC-3
     std::string language;  // preferred audio language for DASH/HLS
@@ -139,6 +141,7 @@ std::unique_ptr<MediaBackend> make_backend(const Settings &s) {
     StarfishOptions so;
     so.dolby_vision = s.device.dolby_vision == true;
     so.atmos = s.device.dolby_atmos == true;
+    so.native_seek = s.native_seek;
     if (starfish && ndl) return std::make_unique<AutoBackend>(std::make_unique<StarfishBackend>(so), make_ndl());
     if (starfish) return std::make_unique<StarfishBackend>(so);
     if (ndl) return make_ndl();
@@ -895,6 +898,7 @@ class Player : public wnk::app::Delegate {
             if (params.contains("ptsUnit") && params["ptsUnit"] == "ms") s.pts_unit = PtsUnit::Milliseconds;
             if (params.contains("ndlReload") && params["ndlReload"] == 1) s.ndl_reload = true;
             if (params.contains("backend") && params["backend"].is_string()) s.backend = params["backend"];
+            if (params.contains("seekMode") && params["seekMode"] == "splice") s.native_seek = false;
             if (params.contains("leadMs") && params["leadMs"].is_number_integer()) {
                 s.lead_ms = std::clamp(params["leadMs"].get<int>(), 100, 5000);
             }

@@ -122,7 +122,7 @@ bool adts_header(const std::vector<uint8_t> &asc, size_t payload_size, uint8_t o
 int64_t PtsSplice::map(int64_t pts_us, int64_t clock_out_us) {
     if (pts_us == kNoTime) return kNoTime;
     if (pending_ || segments_.empty()) {
-        if (segments_.empty() && !pending_ && start_us_ != kNoTime) shift_us_ = start_us_ - pts_us;
+        if (segments_.empty() && !pending_ && !anchored_ && start_us_ != kNoTime) shift_us_ = start_us_ - pts_us;
         if (pending_) {
             // After what was fed (plus the gap), and at least clock_lead ahead of the decoder.
             int64_t at = max_out_us_ == kNoTime ? kNoTime : max_out_us_ + gap_us_;

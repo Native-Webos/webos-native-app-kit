@@ -27,6 +27,13 @@ class PtsSplice {
         : gap_us_(gap_us), start_us_(start_us), clock_lead_us_(clock_lead_us) {}
     void reset() { *this = PtsSplice(gap_us_, start_us_, clock_lead_us_); }
     void splice() { pending_ = true; }
+    // After the decoder re-anchored its own timeline (Starfish's native Seek): forget every earlier
+    // segment and map with this fixed shift from now on (no start offset, no splice gap).
+    void reanchor(int64_t shift_us) {
+        reset();
+        shift_us_ = shift_us;
+        anchored_ = true;
+    }
     // kNoTime stays kNoTime. `clock_out_us`: where the decoder's clock is now, if known (only used
     // for the first packet after a splice).
     int64_t map(int64_t pts_us, int64_t clock_out_us = kNoTime);
@@ -43,6 +50,7 @@ class PtsSplice {
     int64_t clock_lead_us_;
     int64_t shift_us_ = 0;
     bool pending_ = false;
+    bool anchored_ = false;  // reanchor(): the shift is fixed, the start offset does not apply
     int64_t max_out_us_ = kNoTime;
     std::vector<Segment> segments_;  // the most recent few, oldest first
 };

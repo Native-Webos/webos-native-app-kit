@@ -30,8 +30,13 @@
 //     StarfishOptions::release_deadline (10 s); past it the object is parked with the worker and the
 //     next Load fails with release_timeout until the worker returns (PlxNative #1116: an Unload that
 //     never returned froze its UI for good).
-//   * Pause and Play are real. Seeks splice the timeline like the NDL backend (no flush: PlxNative
-//     found Starfish's flush leaves a stale segment and wedges the sink after ~48 s).
+//   * Pause and Play are real. Seeks go through LG's public Seek(millis) where it is known to work
+//     (webOS 5+, webOS 3; PlxNative #568, decompiled on 4.5): flush() marks one pending, and the first
+//     packet after it issues Seek at its own timestamp, on the feeding thread, before it is fed; the
+//     timeline is then content time (PtsSplice::reanchor). A refused Seek reloads the decoder and the
+//     backend splices from then on. Splicing (webOS 4, or StarfishOptions::native_seek off) moves the
+//     timeline like the NDL backend instead (no flush: PlxNative found Starfish's flush leaves a stale
+//     segment and wedges the sink after ~48 s).
 //
 //   * VP9 and AV1 are offered where getMaxVideoResolution reports a decoder for them; its answer also
 //     bounds the envelope. Container HDR10/HLG metadata goes through setHdrInfo after Load (webOS 5+,
@@ -71,6 +76,10 @@ struct StarfishOptions {
     // How long unload() waits for LG's Unload and the destructor before it parks the object, and how
     // long the next Load waits for such a release before it fails with release_timeout.
     std::chrono::milliseconds release_deadline{10000};
+    // Seek with LG's public StarfishMediaAPIs::Seek (it flushes and re-anchors the pipeline, PlxNative
+    // #568) where that is known to work: webOS 5+ (the exported-window plane) and webOS 3. Off, or on
+    // webOS 4, or once a Seek is refused, seeks splice the timeline instead.
+    bool native_seek = true;
 };
 
 // What shows the decoded picture.
@@ -105,6 +114,7 @@ class StarfishBackend : public MediaBackend {
 
     const char *name() const override { return "starfish"; }
     VideoPlane plane() const { return plane_; }
+    bool native_seek() const;  // seeks use LG's Seek now
     int webos_major() const { return webos_major_; }
     BackendCaps caps() const override;
     void set_event_callback(EventFn fn) override;
@@ -169,11 +179,15 @@ class StarfishBackend : public MediaBackend {
     bool play_issued_ = false;
     bool replayed_ = false;  // Play issued again after loadCompleted
     bool paused_ = false;
+    bool native_seek_ = false;          // chosen at construction
+    bool native_seek_refused_ = false;  // a Seek returned false: splice from then on (mutex_)
+    bool native_seek_pending_ = false;  // flush() asked; the next packet issues it (mutex_)
     PtsSplice splice_;
     std::atomic<bool> load_completed_{false};
     std::atomic<bool> seen_frame_{false};
     std::atomic<int64_t> presented_out_us_{kNoTime};
     std::atomic<int64_t> presented_at_ns_{0};  // steady clock when presented_out_us_ arrived
+    std::atomic<int64_t> seek_issued_ns_{0};   // steady clock of the last native Seek until its first frame
     std::atomic<int64_t> splice_first_out_us_{kNoTime};  // where the content after the last splice starts
     // Where the decoder's clock is now: the last presented PTS plus the time since (when playing).
     int64_t clock_out_us(bool paused) const;

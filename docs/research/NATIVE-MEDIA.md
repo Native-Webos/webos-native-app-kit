@@ -106,6 +106,27 @@ A/V sync is wrong. **This needs a measured device test.**
   `option.windowId` → `SDL_webOSSetExportedWindow` places it (plx `vp_create_window`, `vp_place`) `[SRC]`.
 - SMP supports seek, pause and richer containers (plx's player) but carries the highest C++/ABI risk.
 
+### Seeking with LG's Seek `[HW]`
+
+`StarfishMediaAPIs::Seek(const char *millis)` (exported on every release 1.2-11.2) runs a
+`FLUSH | KEY_UNIT` seek and starts a new segment at the milliseconds passed (PlxNative's decompile of
+webOS 4.5, its #568). `StarfishBackend` uses it on webOS 5+ and webOS 3 (PlxNative: 80 seeks on
+3.9.3); webOS 4 keeps splicing. `flush()` marks a Seek pending; the first packet after it issues
+`Seek(<its own ms>)` on the feeding thread before it is fed, and the timeline becomes content time
+(`PtsSplice::reanchor`, kept non-negative). A refused Seek reloads the decoder and the backend splices
+from then on. `{"seekMode":"splice"}` in Example D compares the two.
+
+Measured on the OLED65C1PTB (webOS 6.5.3, player 0.24.0, 2026-10-29), the same 90 s H.264+AAC clip and
+five scripted seeks (+20, -10, +30, -25, +40 s):
+
+| | First new frame after the request | Dropped frames |
+|---|---|---|
+| LG's Seek | 0.17-0.33 s (100-270 ms after the call) | 0 of 911 |
+| Splice | 1.0-1.9 s (seek settle, then the decoder's backlog: 0.6-1.45 s) | 2 of 1026 |
+
+A 4K Dolby Vision Profile 7 clip (fed as 8.1) kept the panel in `dolbyHdr` through five native seeks,
+three of them 0.4 s apart (each landed in 127-206 ms), with 0 of 930 frames dropped.
+
 ### Dolby Vision Profile 7 `[HW]`
 
 UHD Blu-ray remuxes carry Profile 7: an HDR10 base layer, an enhancement layer and RPUs. LG's

@@ -106,6 +106,30 @@ A/V sync is wrong. **This needs a measured device test.**
   `option.windowId` → `SDL_webOSSetExportedWindow` places it (plx `vp_create_window`, `vp_place`) `[SRC]`.
 - SMP supports seek, pause and richer containers (plx's player) but carries the highest C++/ABI risk.
 
+### Decoded audio: stereo PCM on Starfish, AC-3 for more channels `[HW]`
+
+Audio Starfish cannot take as it is (FLAC, ALAC, LPCM, Opus, MP3, Vorbis, TrueHD, DTS) is decoded in
+the app. A mono or stereo track is fed as PCM (`"audio":"PCM"` with `contents.pcmInfo`: S16LE,
+interleaved, `channelMode` mono or stereo, `sampleRate` in kHz); a wider track is re-encoded to AC-3
+5.1, as before, because libpf takes PCM's channel count from `channelMode` alone. Measured on the
+OLED65C1PTB (webOS 6.5.3, 2026-10-29): `channelMode` stereo and dual give 2 channels, mono, multi,
+5.1 and 6 give 1, and a `channels` key is ignored, so 5.1 and 7.1 PCM cannot be declared; NDL's PCM
+has only the same `channelMode` (its `NDL_DirectAudioSupportMultiChannel` answers 1, "no device
+takes multichannel PCM", with an eARC soundbar). A PCM Load runs on a `PCMMC` mixer channel, AC-3 on
+`ADEC`.
+
+`BackendCaps::pcm_rates` lists the rates a backend can be told (Starfish: libpf's 8-48 kHz table plus
+44.1; NDL: its enum); the source resamples anything else with libswresample to 44.1 kHz (multiples of
+it) or 48 kHz (`pcm_output_rate`), so 96 kHz FLAC now plays on NDL too, which refused it.
+
+A PCM Load skips the decoder path's lip-sync stage, so PCM plays about 0.4 s ahead of the picture
+unless it is stamped later (PlxNative #1087, filmed on webOS 4.10 TV speakers). `StarfishBackend`
+adds a lead by the audio stack (its sink plugin) and the sound output (settingsservice
+`soundOutput`): liblxa TV speakers 400 ms, Bluetooth 250 ms, other outputs 400; lgaudiosink 400;
+adecsink and unknown stacks 0 (`StarfishOptions::pcm_lead_ms` overrides; Example D
+`{"pcmLeadMs":N}`). The OLED65C1PTB is liblxa and its soundbar reports `external_arc`: 400 ms by
+default, not yet judged by ear.
+
 ### Seeking with LG's Seek `[HW]`
 
 `StarfishMediaAPIs::Seek(const char *millis)` (exported on every release 1.2-11.2) runs a

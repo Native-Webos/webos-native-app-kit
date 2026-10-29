@@ -32,7 +32,7 @@ TEST("starfish: codec names follow LG's vocabulary") {
     CHECK_EQ(std::string(StarfishBackend::codec_string(CodecId::Hevc)), std::string("H265"));
     CHECK_EQ(std::string(StarfishBackend::codec_string(CodecId::Eac3)), std::string("AC3 PLUS"));
     CHECK(StarfishBackend::codec_string(CodecId::Mp3) == nullptr);
-    CHECK(StarfishBackend::codec_string(CodecId::PcmS16) == nullptr);
+    CHECK_EQ(std::string(StarfishBackend::codec_string(CodecId::PcmS16)), std::string("PCM"));
 }
 
 TEST("starfish: Load payload for 1080p24 H.264 + AAC declares FHD at 24 with the window and fps") {
@@ -127,7 +127,9 @@ TEST("starfish: unavailable on the host, with a reason; caps") {
     const BackendCaps c = b.caps();
     CHECK(c.pause && c.position && c.seek_splices && c.aac_adts);
     CHECK(!c.pause_drains);
-    CHECK(c.accepts(CodecId::Aac) && !c.accepts(CodecId::PcmS16));
+    CHECK(c.accepts(CodecId::Aac) && c.accepts(CodecId::PcmS16));
+    CHECK_EQ(c.pcm_max_channels, 2);  // stereo PCM; wider tracks go to AC-3
+    CHECK(c.pcm_rates.size() == 8 && c.pcm_rates.back() == 48000);
 }
 
 TEST("starfish: VP9 and AV1 names; only answers above the 1920x1088 default name a decoder") {
@@ -259,4 +261,38 @@ TEST("starfish: a PQ stream's SDR video-info envelope is rewritten to HDR10 for 
     const std::string b = StarfishBackend::rewrite_video_info(R"({"video":{"mediaSei":{"x":1}}})", bare);
     CHECK(has(b, "\"hdrType\":\"HDR10\""));
     CHECK(!has(b, "mediaSei"));
+}
+
+TEST("starfish: decoded PCM is declared with pcmInfo, its rate in kHz") {
+    StarfishLoad l;
+    l.app_id = "a";
+    l.video = CodecId::H264;
+    l.audio = CodecId::PcmS16;
+    l.audio_channels = 2;
+    l.audio_rate = 44100;
+    const std::string p = StarfishBackend::build_load_payload(l);
+    CHECK(has(p, "\"codec\":{\"video\":\"H264\",\"audio\":\"PCM\"}"));
+    CHECK(has(p, "\"pcmInfo\":{\"format\":\"S16LE\",\"channelMode\":\"stereo\",\"layout\":\"interleaved\","
+                 "\"sampleRate\":44.1,\"bitsPerSample\":16}"));
+    l.audio_channels = 1;
+    l.audio_rate = 48000;
+    CHECK(has(StarfishBackend::build_load_payload(l), "\"channelMode\":\"mono\",\"layout\":\"interleaved\",\"sampleRate\":48,"));
+    l.audio = CodecId::Aac;
+    CHECK(!has(StarfishBackend::build_load_payload(l), "pcmInfo"));
+}
+
+TEST("starfish: the PCM lead follows the audio stack and the sound output") {
+    CHECK_EQ(StarfishBackend::pcm_lead_ms_for(AudioStack::Liblxa, "tv_speaker"), 400);
+    CHECK_EQ(StarfishBackend::pcm_lead_ms_for(AudioStack::Liblxa, "bt_soundbar"), 250);
+    CHECK_EQ(StarfishBackend::pcm_lead_ms_for(AudioStack::Liblxa, "external_arc"), 400);
+    CHECK_EQ(StarfishBackend::pcm_lead_ms_for(AudioStack::Liblxa, ""), 400);
+    CHECK_EQ(StarfishBackend::pcm_lead_ms_for(AudioStack::AudioSinkNew, "bt_soundbar"), 250);
+    CHECK_EQ(StarfishBackend::pcm_lead_ms_for(AudioStack::LgAudioSink, "bt_soundbar"), 400);
+    CHECK_EQ(StarfishBackend::pcm_lead_ms_for(AudioStack::AdecSink, "tv_speaker"), 0);
+    CHECK_EQ(StarfishBackend::pcm_lead_ms_for(AudioStack::Other, "tv_speaker"), 0);
+    CHECK_EQ(StarfishBackend::sound_output_from_reply(
+                 R"({"category":"sound","method":"getSystemSettings","settings":{"soundOutput":"tv_speaker"},"returnValue":true})"),
+             std::string("tv_speaker"));
+    CHECK_EQ(StarfishBackend::sound_output_from_reply(R"({"returnValue":false})"), std::string());
+    CHECK_EQ(StarfishBackend::sound_output_from_reply("junk"), std::string());
 }

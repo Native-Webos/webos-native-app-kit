@@ -1313,3 +1313,38 @@ TEST("controller: when the fallback refuses too, playback ends in Error naming t
     CHECK(r.pc->snapshot().error.find("load failed: refused") != std::string::npos);
     CHECK(r.pc->stop());
 }
+
+TEST("audio path: stereo audio a backend cannot take is decoded to PCM; wider audio goes to AC-3 where PCM is stereo") {
+    BackendCaps sf;  // Starfish
+    sf.audio_codecs = {CodecId::Aac, CodecId::Ac3, CodecId::Eac3, CodecId::PcmS16};
+    sf.pcm_max_channels = 2;
+    TrackInfo flac = track(TrackType::Audio, CodecId::Unknown, "flac");
+    flac.decodable = flac.ac3_encodable = true;
+    flac.channels = 2;
+    CHECK(audio_path(sf, flac) == AudioPath::Pcm);
+    TrackInfo truehd = flac;
+    truehd.channels = 8;
+    CHECK(audio_path(sf, truehd) == AudioPath::Ac3);  // not mixed to stereo
+    truehd.ac3_encodable = false;
+    CHECK(audio_path(sf, truehd) == AudioPath::Pcm);  // stereo rather than silence
+    BackendCaps ndl;
+    ndl.audio_codecs = {CodecId::PcmS16};
+    CHECK(audio_path(ndl, truehd) == AudioPath::Pcm);  // NDL takes no AC-3
+    TrackInfo aac = track(TrackType::Audio, CodecId::Aac, "aac");
+    CHECK(audio_path(sf, aac) == AudioPath::Passthrough);
+}
+
+TEST("pcm output rate: the source's when the backend can be told it, else 44.1 or 48 kHz") {
+    const std::vector<int> sf = {8000, 12000, 16000, 22050, 24000, 32000, 44100, 48000};
+    CHECK_EQ(pcm_output_rate(48000, sf), 48000);
+    CHECK_EQ(pcm_output_rate(44100, sf), 44100);
+    CHECK_EQ(pcm_output_rate(22050, sf), 22050);
+    CHECK_EQ(pcm_output_rate(96000, sf), 48000);
+    CHECK_EQ(pcm_output_rate(192000, sf), 48000);
+    CHECK_EQ(pcm_output_rate(88200, sf), 44100);
+    CHECK_EQ(pcm_output_rate(176400, sf), 44100);
+    CHECK_EQ(pcm_output_rate(11025, sf), 48000);
+    CHECK_EQ(pcm_output_rate(96000, {}), 96000);  // a backend that takes any rate
+    CHECK_EQ(pcm_output_rate(96000, {44100, 32000}), 44100);
+    CHECK_EQ(pcm_output_rate(96000, {32000, 24000}), 32000);
+}

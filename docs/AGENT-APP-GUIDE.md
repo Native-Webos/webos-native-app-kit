@@ -670,8 +670,9 @@ that can be up to one segment earlier. The state goes `Seeking` → `Playing`; a
 paused and loads the new track on play. A track the source refuses is logged and the current one
 keeps playing.
 
-`AutoBackend` keeps Starfish when it can take the video codec and the audio (as-is, or AC-3
-re-encode). NDL is the fallback (AV1, VP9, and audio the source cannot decode). On the measured
+`AutoBackend` keeps Starfish when it can take the video codec and the audio (as-is, decoded to
+stereo PCM, or AC-3 re-encode: mono and stereo go to PCM, wider tracks to AC-3 5.1; see
+docs/research/NATIVE-MEDIA.md "Decoded audio"). NDL is the fallback (AV1, VP9, and audio the source cannot decode). On the measured
 TV, Starfish plays 24 fps without the NDL judder and can pause for real. NDL is fed with a 1 s
 lead because it was measured accepting a whole clip without backpressure.
 

@@ -160,11 +160,23 @@ struct BackendCaps {
     // The decoder follows a change of picture size mid-stream (new parameter sets at a keyframe), so
     // an adaptive source may switch between renditions of different resolutions.
     bool adaptive_resolution = false;
+    // PcmS16: the most channels the backend keeps (0: the source's stereo mix is all it gets anyway).
+    // A wider track that can be re-encoded to AC-3 goes that way instead of being mixed to stereo.
+    int pcm_max_channels = 0;
+    // PcmS16: the sample rates it can be told, in Hz (empty: any). The source resamples the rest
+    // (pcm_output_rate).
+    std::vector<int> pcm_rates;
     bool accepts(CodecId c) const;
 };
 
+// The rate decoded PCM is delivered at for a backend that takes `rates` (empty: any): the source's
+// own when listed, else 44.1 kHz for a multiple of it (88.2, 176.4 kHz), else 48 kHz, else the
+// highest listed (PlxNative's pcm_load_rate).
+int pcm_output_rate(int source_hz, const std::vector<int> &rates);
+
 // How an audio track reaches a backend: as it is, decoded to PCM, or decoded and re-encoded to AC-3,
-// in that order of preference; None if the backend can take it in no way. The source applies this in
+// in that order of preference, except that a track with more channels than the backend's PCM keeps
+// (pcm_max_channels) is re-encoded to AC-3 when it can be; None if the backend can take it in no way. The source applies this in
 // select() and AutoBackend uses it to choose a backend.
 enum class AudioPath : uint8_t { None, Passthrough, Pcm, Ac3 };
 AudioPath audio_path(const BackendCaps &caps, const TrackInfo &track);

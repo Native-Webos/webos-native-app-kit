@@ -226,6 +226,14 @@ struct FfmpegSource::Impl {
     std::deque<AVPacket *> replay;  // demuxed by seek() while looking for a keyframe; read() goes first
     std::atomic<bool> interrupted{false};
     std::vector<float> planar_tmp;
+    // AudioPath::Pcm at a rate the backend cannot be told: `pcm_swr` resamples planar float to
+    // pcm_rate (same layout); pcm_next_us is the time of its next output sample and pcm_in_us where
+    // the next decoded frame should start (a jump of more than 20 ms restarts the timeline there).
+    int pcm_rate = 0;
+    SwrContext *pcm_swr = nullptr;
+    int pcm_swr_rate = 0, pcm_swr_channels = 0;
+    int64_t pcm_next_us = kNoTime, pcm_in_us = kNoTime;
+    std::vector<float> pcm_out;
     std::map<int, AVCodecContext *> subs;  // stream index → decoder, for every decodable subtitle track
 
     void free_subtitle_decoders() {
@@ -246,8 +254,15 @@ struct FfmpegSource::Impl {
         reset_ac3();
     }
 
+    void reset_pcm() {
+        swr_free(&pcm_swr);  // remade with an empty history by the next frame
+        pcm_swr_rate = pcm_swr_channels = 0;
+        pcm_next_us = pcm_in_us = kNoTime;
+    }
+
     // Forgets the audio waiting to be encoded (seek, discontinuity).
     void reset_ac3() {
+        reset_pcm();
         if (fifo != nullptr) av_audio_fifo_reset(fifo);
         swr_free(&swr);  // remade with an empty history by the next frame
         enc_base_us = kNoTime;
@@ -559,6 +574,42 @@ struct FfmpegSource::Impl {
                 planes[c] = dst;
             }
         }
+        int64_t pts_us = to_us(f->best_effort_timestamp != AV_NOPTS_VALUE ? f->best_effort_timestamp : f->pts, tb);
+        int out_ns = ns;
+        if (pcm_rate > 0 && f->sample_rate > 0 && pcm_rate != f->sample_rate) {
+            if (pcm_swr == nullptr || pcm_swr_rate != f->sample_rate || pcm_swr_channels != ch) {
+                swr_free(&pcm_swr);
+                AVChannelLayout layout{};
+                av_channel_layout_default(&layout, ch);  // planes are passed in the frame's order
+                if (swr_alloc_set_opts2(&pcm_swr, &layout, AV_SAMPLE_FMT_FLTP, pcm_rate, &layout, AV_SAMPLE_FMT_FLTP,
+                                        f->sample_rate, 0, nullptr) < 0 ||
+                    swr_init(pcm_swr) < 0) {
+                    swr_free(&pcm_swr);
+                    av_channel_layout_uninit(&layout);
+                    WNK_LOGW(kCat, "cannot resample %d Hz to %d Hz: audio dropped", f->sample_rate, pcm_rate);
+                    return;
+                }
+                av_channel_layout_uninit(&layout);
+                pcm_swr_rate = f->sample_rate;
+                pcm_swr_channels = ch;
+                pcm_next_us = pcm_in_us = kNoTime;
+            }
+            if (pts_us != kNoTime && (pcm_in_us == kNoTime || std::llabs(pts_us - pcm_in_us) > 20000)) {
+                pcm_next_us = pts_us;  // first frame, or a gap: the output timeline restarts here
+            }
+            if (pts_us != kNoTime) pcm_in_us = pts_us + static_cast<int64_t>(ns) * 1000000 / f->sample_rate;
+            if (pcm_next_us == kNoTime) return;  // wait for a timed frame
+            const int max = swr_get_out_samples(pcm_swr, ns);
+            pcm_out.resize(static_cast<size_t>(std::max(0, max)) * ch);
+            std::vector<uint8_t *> outp(static_cast<size_t>(ch));
+            for (int c = 0; c < ch; ++c) outp[c] = reinterpret_cast<uint8_t *>(pcm_out.data() + static_cast<size_t>(c) * max);
+            const int got = swr_convert(pcm_swr, outp.data(), max, reinterpret_cast<const uint8_t **>(planes.data()), ns);
+            if (got <= 0) return;
+            for (int c = 0; c < ch; ++c) planes[c] = pcm_out.data() + static_cast<size_t>(c) * max;
+            out_ns = got;
+            pts_us = pcm_next_us;
+            pcm_next_us += static_cast<int64_t>(got) * 1000000 / pcm_rate;
+        }
         std::vector<int> order(static_cast<size_t>(ch));
         for (int c = 0; c < ch; ++c) {
             order[c] = f->ch_layout.order == AV_CHANNEL_ORDER_NATIVE || f->ch_layout.order == AV_CHANNEL_ORDER_CUSTOM
@@ -568,10 +619,10 @@ struct FfmpegSource::Impl {
         Packet p;
         p.type = TrackType::Audio;
         p.key = true;
-        p.data.resize(static_cast<size_t>(ns) * 4);
-        mix_to_stereo_s16(planes.data(), ch, ns, order.data(), reinterpret_cast<int16_t *>(p.data.data()));
-        p.pts_us = to_us(f->best_effort_timestamp != AV_NOPTS_VALUE ? f->best_effort_timestamp : f->pts, tb);
-        p.duration_us = static_cast<int64_t>(ns) * 1000000 / std::max(1, f->sample_rate);
+        p.data.resize(static_cast<size_t>(out_ns) * 4);
+        mix_to_stereo_s16(planes.data(), ch, out_ns, order.data(), reinterpret_cast<int16_t *>(p.data.data()));
+        p.pts_us = pts_us;
+        p.duration_us = static_cast<int64_t>(out_ns) * 1000000 / std::max(1, pcm_rate > 0 ? pcm_rate : f->sample_rate);
         ready.push_back(std::move(p));
     }
 
@@ -947,7 +998,8 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
     m.clear_replay();
     m.free_subtitle_decoders();
     av_bsf_free(&m.bsf);
-    m.free_ac3();
+    m.free_ac3();  // and the PCM resampler
+    m.pcm_rate = 0;
     avcodec_free_context(&m.dec);
     m.video = m.audio = -1;
     for (const TrackInfo &t : m.info.tracks) {
@@ -1077,7 +1129,10 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
                          t->channels, t->sample_rate, out->audio->channels, out->audio->sample_rate,
                          static_cast<long long>(m.enc->bit_rate / 1000));
             } else {
-                out->audio = AudioFormat{CodecId::PcmS16, t->sample_rate, 2, {}};
+                m.pcm_rate = pcm_output_rate(t->sample_rate, caps.pcm_rates);
+                out->audio = AudioFormat{CodecId::PcmS16, m.pcm_rate, 2, {}};
+                WNK_LOGI(kCat, "audio %s %d ch %d Hz decoded to PCM stereo %d Hz%s", t->codec_label.c_str(), t->channels,
+                         t->sample_rate, m.pcm_rate, m.pcm_rate != t->sample_rate ? " (resampled)" : "");
             }
             m.decode_audio = true;
             m.audio = audio_track;

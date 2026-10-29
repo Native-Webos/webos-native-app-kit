@@ -8,6 +8,7 @@
 
 #include "wnk/media/ffmpeg_source.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -363,6 +364,14 @@ BackendCaps starfish_like_caps() {
     c.video_codecs = {CodecId::H264, CodecId::Hevc};
     c.audio_codecs = {CodecId::Aac, CodecId::Ac3, CodecId::Eac3};
     c.aac_adts = true;
+    return c;
+}
+// What StarfishBackend::caps() says now: stereo PCM at libpf's rates as well.
+BackendCaps starfish_pcm_caps() {
+    BackendCaps c = starfish_like_caps();
+    c.audio_codecs.push_back(CodecId::PcmS16);
+    c.pcm_max_channels = 2;
+    c.pcm_rates = {8000, 12000, 16000, 22050, 24000, 32000, 44100, 48000};
     return c;
 }
 
@@ -723,4 +732,78 @@ TEST("stereo mix: 5.1 downmix keeps left/right apart, adds centre to both, drops
     const float *m[1] = {&mono};
     mix_to_stereo_s16(m, 1, 1, nullptr, out);
     CHECK_EQ(out[0], out[1]);
+}
+
+TEST("ffmpeg source: stereo FLAC at 96 kHz -> stereo PCM at 48 kHz for Starfish, continuous, tone intact") {
+    SKIP_WITHOUT_FFMPEG();
+    if (!make_clip("h264_flac20_96k.mkv", "libx264", "flac", "-ac 2 -ar 96000")) {
+        std::printf("  SKIP: no flac encoder\n");
+        return;
+    }
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/h264_flac20_96k.mkv", &err));
+    const TrackInfo *v = s.info().best(TrackType::Video);
+    const TrackInfo *a = s.info().best(TrackType::Audio);
+    REQUIRE(v && a);
+    StreamFormat f;
+    REQUIRE(s.select(v->index, a->index, starfish_pcm_caps(), &f, &err));
+    REQUIRE(f.audio.has_value());
+    CHECK(f.audio->codec == CodecId::PcmS16);
+    CHECK_EQ(f.audio->sample_rate, 48000);
+    CHECK_EQ(f.audio->channels, 2);
+    const Drained d = drain(s);
+    REQUIRE(!d.audio.empty());
+    int64_t samples = 0;
+    double peak = 0;
+    for (size_t i = 0; i < d.audio.size(); ++i) {
+        const auto &p = d.audio[i];
+        const size_t frames = p.data.size() / 4;
+        samples += static_cast<int64_t>(frames);
+        CHECK_EQ(p.duration_us, static_cast<int64_t>(frames) * 1000000 / 48000);
+        if (i > 0) {
+            // Each packet starts where the last one ended (within the integer rounding of a duration).
+            CHECK(std::llabs(p.pts_us - (d.audio[i - 1].pts_us + d.audio[i - 1].duration_us)) <= 1000);
+        }
+        const auto *pcm = reinterpret_cast<const int16_t *>(p.data.data());
+        for (size_t k = 0; k < frames * 2; ++k) peak = std::max(peak, std::abs(pcm[k] / 32768.0));
+    }
+    CHECK(std::llabs(samples - 96000) < 2400);  // 2 s at 48 kHz, within 50 ms
+    CHECK(d.audio[0].pts_us >= 0 && d.audio[0].pts_us < 50000);
+    CHECK(peak > 0.05);  // the sine survives the resampler
+
+    // After a seek the resampler starts again from the new position.
+    REQUIRE(s.seek(1000000, &err));
+    Packet pk;
+    int64_t first = kNoTime;
+    while (first == kNoTime && s.read(&pk, &err) == MediaSource::Read::Packet) {
+        if (pk.type == TrackType::Audio) first = pk.pts_us;
+    }
+    CHECK(first != kNoTime && std::llabs(first - 1000000) < 100000);
+}
+
+TEST("ffmpeg source: 7.1 still goes to AC-3 5.1 for Starfish's stereo PCM; 48 kHz stereo keeps its rate") {
+    SKIP_WITHOUT_FFMPEG();
+    if (!make_clip("h264_flac71.mkv", "libx264", "flac", "-ac 8 -ar 96000") ||
+        !make_clip("h264_flac20_48k.mkv", "libx264", "flac", "-ac 2 -ar 48000")) {
+        std::printf("  SKIP: no flac encoder\n");
+        return;
+    }
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/h264_flac71.mkv", &err));
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, s.info().best(TrackType::Audio)->index, starfish_pcm_caps(), &f, &err));
+    CHECK(f.audio->codec == CodecId::Ac3);
+    CHECK_EQ(f.audio->channels, 6);
+    FfmpegSource t;
+    REQUIRE(t.open(dir() + "/h264_flac20_48k.mkv", &err));
+    StreamFormat g;
+    REQUIRE(t.select(t.info().best(TrackType::Video)->index, t.info().best(TrackType::Audio)->index, starfish_pcm_caps(), &g, &err));
+    CHECK(g.audio->codec == CodecId::PcmS16);
+    CHECK_EQ(g.audio->sample_rate, 48000);
+    const Drained d = drain(t);
+    int64_t samples = 0;
+    for (const auto &p : d.audio) samples += static_cast<int64_t>(p.data.size() / 4);
+    CHECK(std::llabs(samples - 96000) < 2400);
 }

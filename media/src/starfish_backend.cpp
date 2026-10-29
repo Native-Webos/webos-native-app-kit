@@ -11,6 +11,7 @@
 #include "wnk/media/starfish_backend.hpp"
 
 #include "wnk/log.hpp"
+#include "wnk/platform/luna.hpp"
 #include "wnk/platform/media_role.hpp"
 
 #include <nlohmann/json.hpp>
@@ -31,6 +32,7 @@
 #include <vector>
 
 #include <dlfcn.h>
+#include <unistd.h>
 
 namespace wnk::media {
 namespace {
@@ -296,6 +298,7 @@ const char *StarfishBackend::codec_string(CodecId c) {
         case CodecId::Aac: return "AAC";
         case CodecId::Ac3: return "AC3";
         case CodecId::Eac3: return "AC3 PLUS";  // LG's name; "EAC3" is not in its vocabulary
+        case CodecId::PcmS16: return "PCM";
         default: return nullptr;
     }
 }
@@ -366,6 +369,17 @@ std::string StarfishBackend::build_load_payload(const StarfishLoad &l) {
                  std::to_string(l.dolby_vision_profile) + "}";
     }
     if (l.atmos && l.audio == CodecId::Eac3) extra += ",\"immersive\":\"ATMOS\"";
+    // Decoded PCM (PlxNative's pcmInfo): libpf takes the channel count from channelMode alone (mono,
+    // stereo, dual: 5.1 and 7.1 cannot be declared, measured on the OLED65C1PTB) and matches
+    // sampleRate in kHz (hertz silently plays at 44.1).
+    if (l.audio == CodecId::PcmS16 && l.audio_rate > 0) {
+        char info[192];
+        std::snprintf(info, sizeof info,
+                      ",\"pcmInfo\":{\"format\":\"S16LE\",\"channelMode\":\"%s\",\"layout\":\"interleaved\","
+                      "\"sampleRate\":%g,\"bitsPerSample\":16}",
+                      l.audio_channels == 1 ? "mono" : "stereo", l.audio_rate / 1000.0);
+        extra += info;
+    }
     // E-AC-3 as it is: its channels (two more for Atmos) and rate in kHz, as Kodi declares it.
     if (l.audio == CodecId::Eac3 && l.audio_channels > 0 && l.audio_rate > 0) {
         char info[96];
@@ -484,6 +498,47 @@ int StarfishBackend::normalise_event_type(int type, int webos_major) {
     return webos_major >= 1 && webos_major <= 4 && type > kEvEndOfStream ? type + 2 : type;
 }
 
+int StarfishBackend::pcm_lead_ms_for(AudioStack stack, const std::string &output) {
+    switch (stack) {
+        case AudioStack::Liblxa:
+        case AudioStack::AudioSinkNew: return output == "bt_soundbar" ? 250 : 400;
+        case AudioStack::LgAudioSink: return 400;
+        case AudioStack::AdecSink:
+        case AudioStack::Other: return 0;
+    }
+    return 0;
+}
+
+AudioStack StarfishBackend::detect_audio_stack() {
+    auto present = [](const char *path) { return access(path, F_OK) == 0; };
+    if (present("/usr/lib/gstreamer-1.0/libgstlxaudiosink.so")) return AudioStack::Liblxa;
+    if (present("/usr/lib/gstreamer-1.0/libgstlgaudiosink.so")) return AudioStack::LgAudioSink;
+    if (present("/usr/lib/liblxa.so.2")) return AudioStack::Liblxa;
+    if (present("/usr/lib/gstreamer-1.0/libgstaudiosink_new-1.0.so")) return AudioStack::AudioSinkNew;
+    if (present("/usr/lib/gstreamer-1.0/libgstaudiosink-1.0.so")) return AudioStack::AdecSink;
+    return AudioStack::Other;
+}
+
+const char *StarfishBackend::audio_stack_name(AudioStack s) {
+    switch (s) {
+        case AudioStack::Liblxa: return "liblxa";
+        case AudioStack::LgAudioSink: return "lgaudiosink";
+        case AudioStack::AudioSinkNew: return "audiosink_new";
+        case AudioStack::AdecSink: return "adecsink";
+        case AudioStack::Other: return "other";
+    }
+    return "?";
+}
+
+std::string StarfishBackend::sound_output_from_reply(const std::string &json) {
+    const nlohmann::json j = nlohmann::json::parse(json, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return "";
+    const auto s = j.find("settings");
+    if (s == j.end() || !s->is_object()) return "";
+    const auto o = s->find("soundOutput");
+    return o != s->end() && o->is_string() ? o->get<std::string>() : "";
+}
+
 bool StarfishBackend::decoder_listed(int width, int height) {
     // An unknown name gets 1920x1088@60 back (measured on the OLED65C1PTB with "NOSUCH"), so only a
     // larger answer says the TV has that decoder.
@@ -592,7 +647,9 @@ BackendCaps StarfishBackend::caps() const {
         const Limit &l = limits_[static_cast<size_t>(v)];
         if (l.known && decoder_listed(l.width, l.height)) c.video_codecs.push_back(v);
     }
-    c.audio_codecs = {CodecId::Aac, CodecId::Ac3, CodecId::Eac3};
+    c.audio_codecs = {CodecId::Aac, CodecId::Ac3, CodecId::Eac3, CodecId::PcmS16};
+    c.pcm_max_channels = 2;  // channelMode has no wider value: 5.1 goes to AC-3
+    c.pcm_rates = {8000, 12000, 16000, 22050, 24000, 32000, 44100, 48000};  // libpf's LUT_SampleRateType + 44.1
     c.aac_adts = true;
     c.adaptive_resolution = true;  // Load declares adaptiveResolution and the 4K/FHD envelope
     c.pause = true;
@@ -730,6 +787,24 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         l.dolby_vision_profile = format.video->dolby_vision_profile;
     }
     l.atmos = options_.atmos && format.audio && format.audio->atmos;
+    int64_t pcm_lead_us = 0;
+    if (format.audio && format.audio->codec == CodecId::PcmS16) {
+        int ms = options_.pcm_lead_ms;
+        std::string why = "option";
+        if (ms < 0) {
+            const AudioStack stack = detect_audio_stack();
+            std::string output;
+            if (stack == AudioStack::Liblxa || stack == AudioStack::AudioSinkNew) {
+                const auto r = wnk::platform::luna_call_sync("luna://com.webos.settingsservice/getSystemSettings",
+                                                             R"({"category":"sound","keys":["soundOutput"]})", 1000);
+                if (r.status == wnk::platform::LunaStatus::Ok) output = sound_output_from_reply(r.payload);
+            }
+            ms = pcm_lead_ms_for(stack, output);
+            why = std::string("stack ") + audio_stack_name(stack) + ", output " + (output.empty() ? "unknown" : output);
+        }
+        pcm_lead_us = static_cast<int64_t>(ms) * 1000;
+        WNK_LOGI(kCat, "pcm: audio stamped +%d ms (%s)", ms, why.c_str());
+    }
     const std::string payload = build_load_payload(l);
     WNK_LOGI(kCat, "Load %s", payload.c_str());
     unsigned epoch;
@@ -785,6 +860,7 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
         splice_.reset();
         replayed_ = false;
         native_seek_pending_ = false;
+        pcm_lead_us_ = pcm_lead_us;
         splice_first_out_us_ = kNoTime;
     }
     // Placing the window is an SDL call: the main thread does it through set_area().
@@ -814,6 +890,9 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
         const int64_t before = splice_.shift_us();
         const int64_t clock = clock_out_us(paused_);
         out_us = splice_.map(p.pts_us, clock);
+        // The PCM lead applies to what the sink is given only (PlxNative): not to the splice or the
+        // native seek's target, and the position is read from the presented video.
+        if (p.type == TrackType::Audio && out_us != kNoTime) out_us += pcm_lead_us_;
         if (splice_.shift_us() != before) {
             log_next_video_ = true;
             splice_first_out_us_ = out_us;

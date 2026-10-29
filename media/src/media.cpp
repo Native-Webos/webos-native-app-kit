@@ -68,9 +68,20 @@ bool BackendCaps::accepts(CodecId c) const {
 
 AudioPath audio_path(const BackendCaps &caps, const TrackInfo &t) {
     if (t.codec != CodecId::Unknown && caps.accepts(t.codec)) return AudioPath::Passthrough;
-    if (t.decodable && caps.accepts(CodecId::PcmS16)) return AudioPath::Pcm;
-    if (t.ac3_encodable && caps.accepts(CodecId::Ac3)) return AudioPath::Ac3;
+    const bool pcm = t.decodable && caps.accepts(CodecId::PcmS16);
+    const bool ac3 = t.ac3_encodable && caps.accepts(CodecId::Ac3);
+    const bool wider = caps.pcm_max_channels > 0 && t.channels > caps.pcm_max_channels;
+    if (pcm && !(wider && ac3)) return AudioPath::Pcm;
+    if (ac3) return AudioPath::Ac3;
     return AudioPath::None;
+}
+
+int pcm_output_rate(int source_hz, const std::vector<int> &rates) {
+    if (rates.empty() || std::find(rates.begin(), rates.end(), source_hz) != rates.end()) return source_hz;
+    auto has = [&rates](int hz) { return std::find(rates.begin(), rates.end(), hz) != rates.end(); };
+    if (source_hz > 0 && source_hz % 44100 == 0 && has(44100)) return 44100;
+    if (has(48000)) return 48000;
+    return *std::max_element(rates.begin(), rates.end());
 }
 
 const char *audio_path_name(AudioPath p) {

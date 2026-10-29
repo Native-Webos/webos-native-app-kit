@@ -184,6 +184,7 @@ BackendCaps NdlBackend::caps() const {
     // PCM only: MP3 passed through loaded fine but played silently on an OLED65C1PTB (webOS 6.5.3,
     // mono 48 kHz), so sources decode MP3 to PCM like everything else.
     c.audio_codecs = {CodecId::PcmS16};
+    c.pcm_rates = {48000, 44100, 32000, 24000, 22050, 16000, 12000, 8000};  // pcm_rate_enum
     const bool hold = !options_.reload_to_pause_and_seek;
     c.pause = hold;
     c.pause_drains = hold;

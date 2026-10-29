@@ -80,7 +80,14 @@ struct StarfishOptions {
     // #568) where that is known to work: webOS 5+ (the exported-window plane) and webOS 3. Off, or on
     // webOS 4, or once a Seek is refused, seeks splice the timeline instead.
     bool native_seek = true;
+    // How much later decoded PCM is stamped than the picture, in ms; -1 picks it by the TV's audio
+    // stack and sound output (pcm_lead_ms_for). A PCM Load plays on a mixer channel (PCMMC) that skips
+    // the decoder path's lip-sync delay, so it is heard about 0.4 s early without it (PlxNative #1087).
+    int pcm_lead_ms = -1;
 };
+
+// LG's audio stacks, told apart by their sink plugin (PlxNative devcaps::audio_stack_from).
+enum class AudioStack : uint8_t { Liblxa, LgAudioSink, AudioSinkNew, AdecSink, Other };
 
 // What shows the decoded picture.
 enum class VideoPlane : uint8_t { None, ExportedWindow, Acb };
@@ -143,6 +150,14 @@ class StarfishBackend : public MediaBackend {
     static int webos_major_from_os_info(const std::string &json);
     // The webOS 5+ number for a callback type a firmware of this major sent.
     static int normalise_event_type(int type, int webos_major);
+    // PCM: what PlxNative filmed and read from the firmware. liblxa (and 2018's audiosink_new, by the
+    // same code) follows the sound output: TV speakers 400 ms, Bluetooth 250 ms, any other output 400;
+    // lgaudiosink 400 on every output; adecsink (2016/2017) and unknown stacks 0.
+    static int pcm_lead_ms_for(AudioStack stack, const std::string &sound_output);
+    static AudioStack detect_audio_stack();  // by the plugin files present
+    static const char *audio_stack_name(AudioStack s);
+    // settingsservice getSystemSettings {"category":"sound","keys":["soundOutput"]} -> "tv_speaker", or "".
+    static std::string sound_output_from_reply(const std::string &json);
     // Whether a getMaxVideoResolution answer names a real decoder (larger than the default it gives
     // for any name, 1920x1088).
     static bool decoder_listed(int width, int height);
@@ -182,6 +197,7 @@ class StarfishBackend : public MediaBackend {
     bool native_seek_ = false;          // chosen at construction
     bool native_seek_refused_ = false;  // a Seek returned false: splice from then on (mutex_)
     bool native_seek_pending_ = false;  // flush() asked; the next packet issues it (mutex_)
+    int64_t pcm_lead_us_ = 0;           // this Load's PCM lead (mutex_)
     PtsSplice splice_;
     std::atomic<bool> load_completed_{false};
     std::atomic<bool> seen_frame_{false};

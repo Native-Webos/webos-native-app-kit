@@ -409,7 +409,7 @@ class HomeScreen : public Screen {
             icon.name = "widgets.svg" + std::to_string(static_cast<int>(side));
         }
         auto &webp = images.add<ImageView>(media + "poster.webp");
-        webp.set_size(107, 160);
+        webp.set_size(284, 160);  // the picture is 16:9
         webp.name = "widgets.webp";
         return col;
     }

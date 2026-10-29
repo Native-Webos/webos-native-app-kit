@@ -521,6 +521,9 @@ class Shell final : public Context {
             });
         }
         pool_ = std::make_unique<async::WorkerPool>(config_.worker_threads);
+        // The shell's own short jobs (font search, Luna requests, speech) get a thread of their own: on
+        // the app's pool they queued behind poster downloads, and Japanese text stayed blank for 2 s.
+        shell_pool_ = std::make_unique<async::WorkerPool>(1);
         if (config_.http) {
             http_ = net::make_curl_transport({}, &err);
             if (!http_) WNK_LOGW("net", "no HTTP transport: %s", err.c_str());
@@ -604,7 +607,7 @@ class Shell final : public Context {
         caps_.set("lifecycle.background", Support::Unknown, "no background event yet");
         caps_.set("lifecycle.relaunch_params", take_relaunch_ != nullptr ? Support::Supported : Support::Unsupported,
                   take_relaunch_ != nullptr ? "SDL_webOSTakeRelaunchMessage" : "SDL build without the kit's relaunch patch");
-        caps_.set("media.playback", Support::Unknown, "not implemented in the kit yet", "not-implemented");
+        caps_.set("media.playback", Support::Unknown, "not probed by the shell (wnk_media checks per file)", "not-probed");
         for (const auto &c : caps_.all()) {
             WNK_LOGI("caps", "%-26s %-11s %s", c.id.c_str(), diagnostics::support_name(c.support), c.detail.c_str());
         }
@@ -931,7 +934,7 @@ class Shell final : public Context {
             std::vector<std::string> paths;
         };
         async::run_then_post<Found>(
-            *pool_, *dispatcher_, life_.weak(), {},
+            *shell_pool_, *dispatcher_, life_.weak(), {},
             [finder, dirs, preferred, wanted](const async::CancellationToken &) {
                 auto f = finder ? finder : std::make_shared<render::FontFinder>(dirs);
                 return Found{f, f->find(wanted, preferred)};
@@ -1023,7 +1026,7 @@ class Shell final : public Context {
     // One Luna request on a worker; the outcome is logged and handed to `done` on the main thread.
     void system_call(std::string what, std::function<platform::LunaReply()> call, std::function<void(bool)> done) {
         async::run_then_post<std::pair<bool, std::string>>(
-            *pool_, *dispatcher_, life_.weak(), {},
+            *shell_pool_, *dispatcher_, life_.weak(), {},
             [call = std::move(call)](const async::CancellationToken &) {
                 const platform::LunaReply r = call();
                 std::string why = r.detail;
@@ -1082,7 +1085,7 @@ class Shell final : public Context {
         auto latest = speech_latest_;
         latest->store(seq);
         const std::string language = catalog_.locale().tag();
-        pool_->submit([text, language, seq, latest](const async::CancellationToken &) {
+        shell_pool_->submit([text, language, seq, latest](const async::CancellationToken &) {
             if (latest->load() != seq) return;
             const auto r = platform::speak(text, language, true);
             std::string why;
@@ -1292,6 +1295,7 @@ class Shell final : public Context {
             run_step("join workers", [this] {
                 const int budget = std::max(200, config_.shutdown_deadline_ms - 1000);
                 if (!pool_->shutdown(std::chrono::milliseconds(budget))) WNK_LOGW("shutdown", "a worker ignored cancellation");
+                if (!shell_pool_->shutdown(std::chrono::milliseconds(200))) WNK_LOGW("shutdown", "a shell worker ignored cancellation");
             });
         }
         run_step("destroy UI", [this] {
@@ -1321,6 +1325,7 @@ class Shell final : public Context {
         gamepads_.close_all();
         if (sdl_) run_step("SDL_Quit", [] { SDL_Quit(); });
         pool_.reset();
+        shell_pool_.reset();
         dispatcher_.reset();
         watchdog.cancel();
         lifecycle_.dispatch(Event::Stopped, SDL_GetTicks());
@@ -1364,6 +1369,7 @@ class Shell final : public Context {
     std::unique_ptr<render::Gles2Renderer> renderer_;
     std::unique_ptr<async::MainDispatcher> dispatcher_;
     std::unique_ptr<async::WorkerPool> pool_;
+    std::unique_ptr<async::WorkerPool> shell_pool_;  // font search, Luna requests, speech
     std::shared_ptr<net::HttpTransport> http_;
     std::unique_ptr<storage::KeyValueStore> store_;
     std::unique_ptr<image::ImageService> images_;

@@ -70,9 +70,9 @@ Sources:
 
 | Gap | Evidence | What the kit would add |
 |---|---|---|
-| **LAN discovery**. **Done:** `net::mdns_browse` (DNS-SD over legacy unicast mDNS), verified on the host against real Cast/AirPlay devices; not yet run from the TV's jail. SSDP not done. | moonlight-tv (libmicrodns), client-webos (`services/discovery.rs`) `[SRC]`. | mDNS and SSDP browsing. |
+| **LAN discovery**. **Done:** `net::mdns_browse` (DNS-SD over legacy unicast mDNS), verified on the host against real Cast/AirPlay devices and from the TV's jail. `net::ssdp_search` and `fetch_upnp_description` (`wnk/net/ssdp.hpp`), verified on the host against a router and a Chromecast; not yet run from the TV's jail. | moonlight-tv (libmicrodns), client-webos (`services/discovery.rs`) `[SRC]`. | mDNS and SSDP browsing. |
 | **Wake-on-LAN**. **Done:** `net::wake_on_lan`, packet verified on a local socket. | moonlight-tv, client-webos (`services/wol.rs`) `[SRC]`. | Magic-packet sender. |
-| **Phone-to-TV** (DIAL) | client-webos `core/dial.rs` `[SRC]`. | Later; depends on finding 2. |
+| **Phone-to-TV** (DIAL). **Not doing:** the TV's own DIAL server answers for apps LG registers, so a Developer Mode app can be neither launched through it nor take its place. (client-webos `core/dial.rs`, cited here before, is an on-screen quick-action dial for pads, not the DIAL protocol.) | None in the reference apps. | Nothing; relaunch parameters (finding 2) cover deep links. |
 
 ### Accessibility and store readiness
 

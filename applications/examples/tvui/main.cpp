@@ -25,6 +25,7 @@
 #include "wnk/audio/audio.hpp"
 #include "wnk/log.hpp"
 #include "wnk/net/lan.hpp"
+#include "wnk/net/ssdp.hpp"
 #include "wnk/ui/collection.hpp"
 #include "wnk/ui/forms.hpp"
 #include "wnk/ui/navigation.hpp"
@@ -414,25 +415,46 @@ class HomeScreen : public Screen {
         return col;
     }
 
-    // DNS-SD: which kinds of service answer on this network (Cast, AirPlay, printers...), on a worker.
+    // What answers on this network, on a worker: DNS-SD service types (Cast, AirPlay, printers...)
+    // and UPnP root devices by their description's name (routers, media servers, speakers).
     void find_devices(Ui &ui) {
         ui.toast("Looking for devices…");
-        wnk::async::run_then_post<std::vector<std::string>>(
+        struct Found {
+            std::vector<std::string> kinds, upnp;
+        };
+        wnk::async::run_then_post<Found>(
             ctx_.pool(), ctx_.dispatcher(), life_.weak(), {},
-            [](const wnk::async::CancellationToken &t) {
-                std::vector<std::string> kinds;
+            [http = ctx_.http()](const wnk::async::CancellationToken &t) {
+                Found f;
                 std::string err;
                 for (const auto &s : wnk::net::mdns_browse("_services._dns-sd._udp.local", std::chrono::milliseconds(1500), t, &err)) {
-                    kinds.push_back(s.name);
+                    f.kinds.push_back(s.name);
                 }
-                if (!err.empty()) WNK_LOGW(kCat, "find devices: %s", err.c_str());
-                return kinds;
+                if (!err.empty()) WNK_LOGW(kCat, "find devices: mdns: %s", err.c_str());
+                err.clear();
+                for (const auto &r : wnk::net::ssdp_search("upnp:rootdevice", std::chrono::milliseconds(1500), t, &err)) {
+                    wnk::net::UpnpDevice d;
+                    std::string why;
+                    if (http && wnk::net::fetch_upnp_description(*http, r.location, &d, t, &why)) {
+                        f.upnp.push_back(d.friendly_name.empty() ? d.model_name : d.friendly_name);
+                    } else {
+                        WNK_LOGW(kCat, "find devices: %s: %s", r.location.c_str(), why.c_str());
+                        f.upnp.push_back(r.address);
+                    }
+                }
+                if (!err.empty()) WNK_LOGW(kCat, "find devices: ssdp: %s", err.c_str());
+                return f;
             },
-            [this](std::vector<std::string> kinds) {
-                WNK_LOGI(kCat, "find devices: %zu service types", kinds.size());
+            [this](Found f) {
+                WNK_LOGI(kCat, "find devices: %zu service types, %zu UPnP devices", f.kinds.size(), f.upnp.size());
+                for (const auto &u : f.upnp) WNK_LOGI(kCat, "find devices: upnp %s", u.c_str());
                 std::string list;
-                for (const auto &k : kinds) list += (list.empty() ? "" : ", ") + k;
-                auto d = std::make_unique<Dialog>("On this network", kinds.empty() ? "Nothing answered." : list);
+                for (const auto &k : f.kinds) list += (list.empty() ? "" : ", ") + k;
+                if (!f.upnp.empty()) {
+                    list += std::string(list.empty() ? "" : "\n\n") + "UPnP:";
+                    for (const auto &u : f.upnp) list += " " + u + (&u == &f.upnp.back() ? "" : ",");
+                }
+                auto d = std::make_unique<Dialog>("On this network", list.empty() ? "Nothing answered." : list);
                 d->add_button("Close");
                 ctx_.ui().show_dialog(std::move(d));
             });
@@ -631,6 +653,7 @@ int main(int argc, char **argv) {
     config.title = "wnk tvui";
     config.script_env_prefix = "WNK_TVUI";
     config.audio = true;  // interface sounds (Settings) and the Widgets chord
+    config.http = true;   // UPnP device descriptions (find devices)
     config.metrics_toggle = wnk::input::Action::Blue;  // the blue colour key shows frame timing on screen
     return wnk::app::run(argc, argv, config, [] { return std::make_unique<TvUi>(); });
 }

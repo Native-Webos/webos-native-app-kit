@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // net/lan: the mDNS query and response codec (name compression, records split over packets), MAC
-// parsing and the Wake-on-LAN packet sent to a local UDP socket; system payloads and the connection
-// status reply (platform/system).
+// parsing and the Wake-on-LAN packet sent to a local UDP socket; net/ssdp: M-SEARCH against a local
+// responder, responses and UPnP descriptions; system payloads and the connection status reply
+// (platform/system).
 #define WNK_TEST_MAIN
 #include "wnk_test.hpp"
 
 #include "wnk/net/lan.hpp"
+#include "wnk/net/ssdp.hpp"
 #include "wnk/platform/system.hpp"
 
 #include <cstring>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -215,4 +218,169 @@ TEST("system: launch, browser and toast payloads; replies; connection status") {
     CHECK(!platform::parse_audio_guidance(R"({"settings":{}})", &on));
     CHECK_EQ(platform::speak_payload("Play, button", "en-GB"), std::string(R"({"clear":true,"language":"en-GB","text":"Play, button"})"));
     CHECK(platform::launch_app("x").status == platform::LunaStatus::Unsupported);  // host: no bus
+}
+
+TEST("ssdp: the M-SEARCH request; responses with odd spacing, no reason phrase, max-age; refusals") {
+    const std::string req = net::ssdp_search_request("ssdp:all", {});
+    CHECK(req.rfind("M-SEARCH * HTTP/1.1\r\n", 0) == 0);
+    CHECK(req.find("HOST: 239.255.255.250:1900\r\n") != std::string::npos);
+    CHECK(req.find("MAN: \"ssdp:discover\"\r\n") != std::string::npos);
+    CHECK(req.find("MX: 2\r\nST: ssdp:all\r\n") != std::string::npos);
+    CHECK(req.size() > 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0);
+    const std::string resp = "HTTP/1.1 200\r\nCache-Control:max-age = 1800\r\nlocation: http://192.168.1.5:8200/rootDesc.xml\r\n"
+                             "SERVER: Linux/5 UPnP/1.0 MiniDLNA/1.3\r\nST:  urn:schemas-upnp-org:device:MediaServer:1\r\n"
+                             "USN: uuid:4d696e69-444c-164e-9d41-001122334455::urn:schemas-upnp-org:device:MediaServer:1\r\n"
+                             "EXT:\r\n\r\n";
+    net::SsdpResponse r;
+    REQUIRE(net::ssdp_parse_response(resp.data(), resp.size(), &r));
+    CHECK_EQ(r.location, std::string("http://192.168.1.5:8200/rootDesc.xml"));
+    CHECK_EQ(r.st, std::string("urn:schemas-upnp-org:device:MediaServer:1"));
+    CHECK_EQ(r.uuid(), std::string("uuid:4d696e69-444c-164e-9d41-001122334455"));
+    CHECK_EQ(r.max_age_s, 1800);
+    CHECK_EQ(r.header("Server"), std::string("Linux/5 UPnP/1.0 MiniDLNA/1.3"));
+    const std::string notify = "NOTIFY * HTTP/1.1\r\nLOCATION: http://x/\r\n\r\n";
+    CHECK(!net::ssdp_parse_response(notify.data(), notify.size(), &r));
+    const std::string no_location = "HTTP/1.1 200 OK\r\nST: upnp:rootdevice\r\n\r\n";
+    CHECK(!net::ssdp_parse_response(no_location.data(), no_location.size(), &r));
+}
+
+TEST("ssdp: a search reaches a local responder; one answer per USN, from its address") {
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    REQUIRE(fd >= 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    REQUIRE(bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof addr) == 0);
+    socklen_t len = sizeof addr;
+    REQUIRE(getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) == 0);
+    std::string seen;
+    std::thread responder([&] {
+        // Answers each M-SEARCH as a device with two types would: the root twice (a duplicate the
+        // client drops) and its MediaServer type, plus a line of noise.
+        for (int round = 0; round < 2; ++round) {
+            pollfd p{fd, POLLIN, 0};
+            if (poll(&p, 1, 3000) <= 0) return;
+            char buf[2048];
+            sockaddr_in from{};
+            socklen_t fl = sizeof from;
+            const ssize_t n = recvfrom(fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr *>(&from), &fl);
+            if (n <= 0) return;
+            if (round == 0) seen.assign(buf, static_cast<size_t>(n));
+            for (const char *usn : {"uuid:a::upnp:rootdevice", "uuid:a::upnp:rootdevice", "uuid:a::urn:x:device:MediaServer:1"}) {
+                const std::string r = std::string("HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.1:1/d.xml\r\nST: ssdp:all\r\nUSN: ") +
+                                      usn + "\r\n\r\n";
+                sendto(fd, r.data(), r.size(), 0, reinterpret_cast<sockaddr *>(&from), fl);
+            }
+            sendto(fd, "garbage", 7, 0, reinterpret_cast<sockaddr *>(&from), fl);
+        }
+    });
+    net::SsdpOptions o;
+    o.address = "127.0.0.1";
+    o.port = ntohs(addr.sin_port);
+    o.mx = 1;
+    std::string err;
+    const auto found = net::ssdp_search("ssdp:all", std::chrono::milliseconds(600), {}, &err, o);
+    responder.join();
+    close(fd);
+    CHECK(seen.find("ST: ssdp:all") != std::string::npos);
+    CHECK(seen.find("HOST: 127.0.0.1:" + std::to_string(o.port)) != std::string::npos);
+    REQUIRE(found.size() == 2);
+    CHECK_EQ(found[0].usn, std::string("uuid:a::upnp:rootdevice"));
+    CHECK_EQ(found[1].uuid(), std::string("uuid:a"));
+    CHECK_EQ(found[0].address, std::string("127.0.0.1"));
+    CHECK(net::ssdp_search("ssdp:all", std::chrono::milliseconds(10), {}, &err, net::SsdpOptions{"not-an-ip", 1900, 2}).empty());
+    CHECK(err.find("not an IPv4") != std::string::npos);
+}
+
+TEST("upnp: a description with URLBase, an embedded device, entities and relative URLs") {
+    const std::string xml =
+            "<?xml version=\"1.0\"?>\n<root xmlns=\"urn:schemas-upnp-org:device-1-0\">"
+            "<specVersion><major>1</major><minor>0</minor></specVersion>"
+            "<device><deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType>"
+            "<friendlyName> Router &amp; Modem &#x2122;</friendlyName><manufacturer>Acme</manufacturer>"
+            "<modelName>R1</modelName><modelNumber/><UDN>uuid:root-1</UDN>"
+            "<serviceList><service><serviceType>urn:schemas-upnp-org:service:Layer3Forwarding:1</serviceType>"
+            "<serviceId>urn:upnp-org:serviceId:L3F</serviceId><controlURL>/ctl/L3F</controlURL>"
+            "<eventSubURL>/evt/L3F</eventSubURL><SCPDURL>L3F.xml</SCPDURL></service></serviceList>"
+            "<deviceList><device><deviceType>urn:schemas-upnp-org:device:WANDevice:1</deviceType>"
+            "<friendlyName>WAN</friendlyName><UDN>uuid:wan-1</UDN><serviceList><service>"
+            "<serviceType>urn:schemas-upnp-org:service:WANCommonInterfaceConfig:1</serviceType>"
+            "<controlURL>http://10.0.0.1:5000/wan</controlURL><SCPDURL>../scpd/wan.xml</SCPDURL></service>"
+            "</serviceList></device></deviceList><presentationURL>/</presentationURL></device>"
+            "<URLBase>http://10.0.0.1:5000/desc/</URLBase></root>";
+    net::UpnpDevice d;
+    std::string err;
+    REQUIRE(net::parse_upnp_description(xml, "http://10.0.0.1:5000/rootDesc.xml", &d, &err));
+    CHECK_EQ(d.friendly_name, std::string("Router & Modem \xE2\x84\xA2"));
+    CHECK_EQ(d.udn, std::string("uuid:root-1"));  // the root's, not the embedded device's
+    CHECK_EQ(d.device_type, std::string("urn:schemas-upnp-org:device:InternetGatewayDevice:1"));
+    CHECK_EQ(d.model_number, std::string(""));
+    REQUIRE(d.services.size() == 2);
+    CHECK_EQ(d.services[0].control_url, std::string("http://10.0.0.1:5000/ctl/L3F"));
+    CHECK_EQ(d.services[0].scpd_url, std::string("http://10.0.0.1:5000/desc/L3F.xml"));  // against URLBase
+    CHECK_EQ(d.services[1].control_url, std::string("http://10.0.0.1:5000/wan"));
+    CHECK_EQ(d.services[1].scpd_url, std::string("http://10.0.0.1:5000/scpd/wan.xml"));
+    CHECK(!net::parse_upnp_description("<html><body/></html>", "http://h/", &d, &err));
+    CHECK(err.find("device") != std::string::npos);
+    CHECK_EQ(net::resolve_http_url("http://h:1/a/b.xml", "c.xml"), std::string("http://h:1/a/c.xml"));
+    CHECK_EQ(net::resolve_http_url("http://h:1/a/b.xml", "./c/../d"), std::string("http://h:1/a/d"));
+    CHECK_EQ(net::resolve_http_url("http://h:1", "x"), std::string("http://h:1/x"));
+    CHECK_EQ(net::resolve_http_url("https://h/a/", "//cdn/i.png"), std::string("https://cdn/i.png"));
+    CHECK_EQ(net::resolve_http_url("http://h/a/b?q=1", "c?x=2"), std::string("http://h/a/c?x=2"));
+}
+
+namespace {
+
+struct DescriptionTransport final : net::HttpTransport {
+    net::HttpResponse perform(const net::HttpRequest &req, const async::CancellationToken &) override {
+        net::HttpResponse r;
+        last_url = req.url;
+        max = req.max_response_bytes;
+        r.status = req.url == "http://dev/desc.xml" ? 200 : 404;
+        r.body = "<root><device><friendlyName>Living Room Speaker</friendlyName><UDN>uuid:s</UDN>"
+                 "<serviceList><service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>"
+                 "<controlURL>ctl</controlURL></service></serviceList></device></root>";
+        return r;
+    }
+    std::string describe() const override { return "fake"; }
+    std::string last_url;
+    size_t max = 0;
+};
+
+}  // namespace
+
+TEST("upnp: fetching a description through the transport; HTTP errors reported") {
+    DescriptionTransport http;
+    net::UpnpDevice d;
+    std::string err;
+    REQUIRE(net::fetch_upnp_description(http, "http://dev/desc.xml", &d, {}, &err));
+    CHECK_EQ(d.friendly_name, std::string("Living Room Speaker"));
+    CHECK_EQ(d.services[0].control_url, std::string("http://dev/ctl"));
+    CHECK_EQ(http.max, size_t{256u << 10});
+    CHECK(!net::fetch_upnp_description(http, "http://dev/missing.xml", &d, {}, &err));
+    CHECK_EQ(err, std::string("HTTP 404"));
+}
+
+TEST("ssdp: root devices on this network and their descriptions (skipped when none answer)") {
+    std::string err;
+    const auto found = net::ssdp_search("upnp:rootdevice", std::chrono::milliseconds(1500), {}, &err);
+    if (!err.empty() || found.empty()) {
+        std::printf("  SKIP (no SSDP answer: %s)\n", err.empty() ? "nothing answered" : err.c_str());
+        return;
+    }
+    auto http = net::make_curl_transport({}, &err);
+    int described = 0;
+    for (const auto &r : found) {
+        net::UpnpDevice d;
+        std::string why;
+        if (http && net::fetch_upnp_description(*http, r.location, &d, {}, &why)) {
+            ++described;
+            std::printf("  %s: %s (%s %s), %zu services\n", r.address.c_str(), d.friendly_name.c_str(), d.manufacturer.c_str(),
+                        d.model_name.c_str(), d.services.size());
+        } else {
+            std::printf("  %s: %s (%s)\n", r.address.c_str(), r.location.c_str(), why.c_str());
+        }
+    }
+    CHECK(!found[0].location.empty());
+    CHECK(described > 0);
 }

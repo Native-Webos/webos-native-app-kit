@@ -102,7 +102,26 @@ A UI-only app links `wnk_app` and nothing else. An app with accounts also links 
 
 ## Recipe: add the app
 
-### 1. Files
+### 0. Start from `tools/new-app.py` (an app in its own folder)
+
+```sh
+tools/new-app.py ~/src/weather org.example.weather --title "Weather" --vendor "Example"
+cd ~/src/weather && ./build.sh          # host build + smoke test
+./build.sh webos                        # build/webos-release/dist/org.example.weather_0.1.0_arm.ipk
+```
+
+The folder is a standalone CMake project outside the kit, with its own `build/`. Its
+`CMakeLists.txt` includes the kit's `cmake/WnkApp.cmake`, which applies the kit's compiler and link
+rules, adds the kit's libraries (not its examples or tests), and provides
+`wnk_add_webos_package()` and `wnk_add_app_test()` (a host run with scripted keys). The kit is found
+through `WNK_KIT_DIR` (CMake cache or environment), else the path recorded when the app was made; a
+git submodule at `kit/` works with `WNK_KIT_DIR=kit`. FFmpeg is off in such a project until it sets
+`WNK_FFMPEG ON` before the include. `build.sh` also installs (`./build.sh install`, honouring
+`ARES_DEVICE`) and launches it. Everything below (the CMake arguments, `main.cpp`, the rules) applies
+the same way; in an app project write `${WNK_KIT_DIR}` where an in-tree app writes
+`${PROJECT_SOURCE_DIR}`, and `${WNK_FONT_DIR}` for the fonts.
+
+### 1. Files (an app inside the kit's tree)
 
 ```
 applications/<name>/

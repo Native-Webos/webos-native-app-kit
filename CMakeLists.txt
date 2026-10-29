@@ -6,34 +6,11 @@ project(webos-native-app-kit VERSION 0.1.0 LANGUAGES C CXX)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(WebOSTarget)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
 option(WNK_BUILD_TESTS "Build host unit tests" ${WNK_HOST})
 option(WNK_BUILD_EXAMPLES "Build example applications" ON)
 set(WNK_SOURCE_URL "" CACHE STRING "Where packages' corresponding source is published (licenses/SOURCE.txt)")
 
-if (WNK_WEBOS)
-    # libstdc++ on the TV ranges from 6.0.16 to 6.0.32 (6.0.25 on webOS 6) and a bundled copy would
-    # shadow the TV's own for LG's C++ libraries (docs/research/TOOLCHAIN-AND-BUILD.md, ABI rule 2).
-    # -tno-glibc-polyfill: the NDK gcc otherwise links libglibc_polyfills.a (a getauxval shim whose
-    # licence is unknown) whenever something references getauxval.
-    add_link_options(-static-libstdc++ -static-libgcc -Wl,--build-id=sha1 -Wl,--as-needed -tno-glibc-polyfill)
-    # Build paths never reach the binaries, so the same source gives the same packages in any build
-    # directory or checkout location (tools/release.sh --check-reproducible).
-    add_compile_options("-ffile-prefix-map=${CMAKE_SOURCE_DIR}=." "-ffile-prefix-map=${CMAKE_BINARY_DIR}=build")
-    # Debug info in the build tree for tools/symbolize-crash.py; the ipk's staged copies are stripped.
-    add_compile_options(-g)
-    # Bundled shared libraries live in lib/ next to the executable.
-    set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
-    set(CMAKE_INSTALL_RPATH "$ORIGIN/lib")
-    set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
-endif ()
-
-add_compile_options(-Wall -Wextra)
+include(WnkFlags)
 
 # libwebp decoder (static, pinned release) for WebP images in image/.
 include(LibWebp)

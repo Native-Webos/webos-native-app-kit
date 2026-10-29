@@ -31,6 +31,15 @@ tools/device-test.sh                     # run the platform-independent unit tes
 
 Set `ARES_DEVICE` to choose a TV. Set `WEBOS_NDK` if the NDK is not in `~/webos-ndk/…` or `/opt/…`.
 
+Start your own app in its own folder, outside the kit, which it uses by reference:
+
+```sh
+tools/new-app.py ~/src/weather org.example.weather --title "Weather"
+cd ~/src/weather && ./build.sh            # host build + smoke test; ./build.sh webos for the ipk
+```
+
+See "Recipe: add the app" in `docs/AGENT-APP-GUIDE.md`.
+
 ## What is here
 
 | Path | Contents |

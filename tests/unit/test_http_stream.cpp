@@ -27,6 +27,7 @@ std::vector<uint8_t> pattern(size_t n) {
 struct RangeTransport final : HttpTransport {
     std::vector<uint8_t> data;
     std::atomic<bool> ranges{true};
+    size_t ranged_requests = SIZE_MAX;  // later requests ignore Range, as if the server changed
     size_t chunk = 4096;
     std::chrono::microseconds chunk_delay{0};
     std::mutex m;
@@ -58,9 +59,11 @@ struct RangeTransport final : HttpTransport {
         }
         long scripted = 0;
         size_t drop = SIZE_MAX;
+        bool ranges = this->ranges;
         {
             std::lock_guard<std::mutex> lock(m);
             offsets.push_back(off);
+            if (offsets.size() > ranged_requests) ranges = false;
             if (!statuses.empty()) {
                 scripted = statuses.front();
                 statuses.pop_front();
@@ -299,9 +302,9 @@ TEST("http stream: a server without ranges reads forward only") {
 TEST("http stream: a reconnect to a server that stopped honouring ranges fails") {
     auto t = std::make_shared<RangeTransport>(100000);
     t->drop_after = {20000};
+    t->ranged_requests = 1;  // set before open: the reconnect can come before the test thread runs again
     HttpStream s(t, "http://test/file", small());
     REQUIRE(s.open());
-    t->ranges = false;
     const auto got = read_all(s);
     CHECK_EQ(got.size(), 20000u);
     CHECK(s.error() == NetError::Protocol);

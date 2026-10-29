@@ -416,7 +416,8 @@ TEST("prefetch warms the cache without a callback") {
         env.main.drain();
         return env.svc->memory().get(ImageService::cache_key({"https://img/p.png"})) != nullptr;
     }));
-    CHECK_EQ(env.svc->stats().in_flight, 0u);
+    // The worker fills the cache before the main thread retires the flight.
+    CHECK(env.pump([&] { return env.svc->stats().in_flight == 0u; }));
 }
 
 // ---- more formats ---------------------------------------------------------------------------------

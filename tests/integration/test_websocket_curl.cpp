@@ -209,11 +209,14 @@ TEST("websocket: no pong within the timeout ends the connection; destruction is 
     REQUIRE(!r.errors.empty());
     CHECK(r.errors[0].find("no pong") != std::string::npos);
 
+    // A long close timeout the destructor must not wait out: it caps its wait for the peer at 500 ms, so
+    // a regression shows as 30 s, far from what a loaded machine adds to the 0.5 s.
+    WebSocketOptions slow_close;
+    slow_close.close_timeout_ms = 30000;
+    Rig q(slow_close);
+    REQUIRE(q.ws->connect(ws_base() + "/ws/silent"));
+    REQUIRE(q.wait([&] { return q.opened; }));
     auto t0 = std::chrono::steady_clock::now();
-    {
-        Rig q;
-        REQUIRE(q.ws->connect(ws_base() + "/ws/silent"));
-        REQUIRE(q.wait([&] { return q.opened; }));
-    }  // destructor: close 1001, short wait for the (absent) answer, join
-    CHECK(std::chrono::steady_clock::now() - t0 < 2s);
+    q.ws.reset();  // close 1001, short wait for the (absent) answer, join
+    CHECK(std::chrono::steady_clock::now() - t0 < 10s);
 }

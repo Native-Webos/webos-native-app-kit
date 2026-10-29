@@ -123,7 +123,8 @@ class Watchdog {
 // relaunch (<prefix>_RELAUNCH, a lifecycle message as the application manager sends it, arrives as
 // SDL_webOSTakeRelaunchMessage would return it), pad (attach an SDL virtual game controller), pad+NAME /
 // pad-NAME (press / release a button by SDL name: a, b, dpright, start...), padx=V / pady=V (left stick,
-// -1..1), pad~ (unplug it). <prefix>_SHOT saves the
+// -1..1), pad~ (unplug it), wait@MS (the next step comes MS of wall-clock time later, not a frame count:
+// sanitizer builds draw frames several times slower). <prefix>_SHOT saves the
 // last drawn frame as BMP. The app quits when the script ends.
 class Script {
  public:
@@ -145,11 +146,16 @@ class Script {
     bool tick(uint64_t iteration, render::Gles2Renderer &r, SDL_Window *window) {
         if (!active()) return false;
         const uint64_t first = 20, gap = 6;
-        if (iteration >= first && next_ < steps_.size() && (iteration - first) % gap == 0) {
-            if (steps_[next_].kind == Step::Relaunch) relaunch_due_ = relaunch_message_;
-            run(steps_[next_++], r, window);
+        if (iteration >= first + next_ * gap + held_ && next_ < steps_.size()) {
+            if (SDL_GetTicks64() < hold_until_) {
+                ++held_;  // later steps move back by the frames spent waiting
+            } else {
+                if (steps_[next_].kind == Step::Relaunch) relaunch_due_ = relaunch_message_;
+                if (steps_[next_].kind == Step::Wait) hold_until_ = SDL_GetTicks64() + static_cast<Uint64>(steps_[next_].x);
+                run(steps_[next_++], r, window);
+            }
         }
-        return next_ >= steps_.size() && iteration >= first + steps_.size() * gap + 60;
+        return next_ >= steps_.size() && iteration >= first + steps_.size() * gap + held_ + 60;
     }
     void save(render::Gles2Renderer &r, int dw, int dh) const {
         if (shot_.empty()) return;
@@ -165,7 +171,7 @@ class Script {
 
  private:
     struct Step {
-        enum Kind { Key, Move, Click, Wheel, Background, Foreground, Text, KeyboardClosed, Relaunch, Pad } kind = Key;
+        enum Kind { Key, Move, Click, Wheel, Background, Foreground, Text, KeyboardClosed, Relaunch, Pad, Wait } kind = Key;
         SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
         float x = 0, y = 0;
         std::string text;
@@ -180,6 +186,8 @@ class Script {
                 st.kind = Step::Move;
             } else if (std::sscanf(name.c_str(), "click@%f:%f", &st.x, &st.y) == 2) {
                 st.kind = Step::Click;
+            } else if (std::sscanf(name.c_str(), "wait@%f", &st.x) == 1) {
+                st.kind = Step::Wait;
             } else if (std::sscanf(name.c_str(), "wheel@%f", &st.y) == 1) {
                 st.kind = Step::Wheel;
             } else if (name.rfind("text@", 0) == 0) {
@@ -296,7 +304,8 @@ class Script {
                 ev.text.timestamp = SDL_GetTicks();
                 SDL_PushEvent(&ev);
                 break;
-            case Step::Relaunch: break;  // tick() hands the message to the shell
+            case Step::Relaunch:
+            case Step::Wait: break;  // tick() hands the message to the shell / holds the next step
             case Step::Pad: pad(st.text); break;
             case Step::KeyboardClosed:
                 // What SDL-webOS does when the panel closes: text events off (SDL_IsTextInputActive false).
@@ -315,6 +324,8 @@ class Script {
     }
     std::vector<Step> steps_;
     size_t next_ = 0;
+    uint64_t held_ = 0;      // frames spent in wait@ steps
+    Uint64 hold_until_ = 0;  // SDL_GetTicks64() before which the next step waits
     std::string shot_;
     std::string relaunch_message_, relaunch_due_;
     SDL_Joystick *pad_ = nullptr;

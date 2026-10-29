@@ -275,8 +275,8 @@ bool parse_wvtt_init(const uint8_t *data, size_t size, uint32_t *timescale, std:
     return true;
 }
 
-bool parse_wvtt_fragment(const uint8_t *data, size_t size, uint32_t timescale, std::vector<SubtitleCue> *out,
-                         std::string *error) {
+bool mp4_text_samples(const uint8_t *data, size_t size, uint32_t timescale, std::vector<Mp4TextSample> *out,
+                      std::string *error) {
     std::vector<Box> top;
     if (timescale == 0 || !boxes(data, data + size, &top)) {
         *error = "malformed fragment";
@@ -335,27 +335,35 @@ bool parse_wvtt_fragment(const uint8_t *data, size_t size, uint32_t timescale, s
                         *error = "sample outside the fragment";
                         return false;
                     }
-                    std::vector<Box> cues;
-                    if (boxes(sample, sample + sz, &cues)) {
-                        for (const Box &c : cues) {
-                            if (std::memcmp(c.type, "vttc", 4) != 0) continue;  // vtte: nothing showing
-                            Box payl;
-                            if (!descend(c.body, c.end, {"payl"}, &payl)) continue;
-                            const std::string text =
-                                webvtt_plain_text(std::string(reinterpret_cast<const char *>(payl.body),
-                                                              static_cast<size_t>(payl.end - payl.body)));
-                            if (text.empty()) continue;
-                            SubtitleCue cue;
-                            cue.start_us = to_us(t);
-                            cue.end_us = to_us(t + dur);
-                            cue.text = text;
-                            out->push_back(std::move(cue));
-                        }
-                    }
+                    out->push_back(Mp4TextSample{to_us(t), to_us(t + dur), sample, sz});
                     sample += sz;
                     t += dur;
                 }
             }
+        }
+    }
+    return true;
+}
+
+bool parse_wvtt_fragment(const uint8_t *data, size_t size, uint32_t timescale, std::vector<SubtitleCue> *out,
+                         std::string *error) {
+    std::vector<Mp4TextSample> samples;
+    if (!mp4_text_samples(data, size, timescale, &samples, error)) return false;
+    for (const Mp4TextSample &s : samples) {
+        std::vector<Box> cues;
+        if (!boxes(s.data, s.data + s.size, &cues)) continue;
+        for (const Box &c : cues) {
+            if (std::memcmp(c.type, "vttc", 4) != 0) continue;  // vtte: nothing showing
+            Box payl;
+            if (!descend(c.body, c.end, {"payl"}, &payl)) continue;
+            const std::string text = webvtt_plain_text(
+                    std::string(reinterpret_cast<const char *>(payl.body), static_cast<size_t>(payl.end - payl.body)));
+            if (text.empty()) continue;
+            SubtitleCue cue;
+            cue.start_us = s.start_us;
+            cue.end_us = s.end_us;
+            cue.text = text;
+            out->push_back(std::move(cue));
         }
     }
     return true;

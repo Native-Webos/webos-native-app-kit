@@ -717,8 +717,8 @@ secrets: never log them. Without keys `AdaptiveSource` refuses an encrypted pres
 HLS `EXT-X-KEY` needs nothing from the app: METHOD=AES-128 segments (MPEG-TS or fMP4) are decrypted as
 they download, with the key from its URI (sent with `headers` and `license_headers`) and rotating
 keys followed per segment; SAMPLE-AES / SAMPLE-AES-CTR in fMP4 go through the CENC path with the
-URI's key. SAMPLE-AES in MPEG-TS and FairPlay (`skd://`) are refused with the reason. TTML (`stpp`) is
-listed and not decoded. Audio bitrate switching is not implemented; video bitrate switching is
+URI's key. SAMPLE-AES in MPEG-TS and FairPlay (`skd://`) are refused with the reason. TTML in HLS
+(IMSC in fMP4) is listed and not decoded. Audio bitrate switching is not implemented; video bitrate switching is
 (`adaptive_bitrate`, default on).
 
 A static MPD may have several Periods (chapters, inserted clips). Each rendition continues into the
@@ -736,7 +736,8 @@ them styled with libass: fonts, colours, positions, rotation, karaoke and drawin
 libass (`-DWNK_LIBASS=OFF`), or for other formats, the plain text is drawn. libass has no font provider on
 the TV, so a family the media does not carry falls back to `default_font`. Give the app's own faces
 as extra fonts so a bold style gets the bold face (Example D's `select_subtitles`). Manifest subtitles: HLS WebVTT, DASH
-`text/vtt` and `wvtt`. A subtitle file beside the media (SubRip, WebVTT, ASS; a path or http(s) URL)
+`text/vtt`, `application/ttml+xml`, `wvtt` and `stpp` (TTML, IMSC and EBU-TT-D as plain text; styling and
+regions dropped). A subtitle file beside the media (SubRip, WebVTT, ASS, TTML as `.ttml`/`.dfxp`/`.xml`; a path or http(s) URL)
 is read whole on a worker with `load_subtitle_file(url, kExternalSubtitleTrack + n, options, &file, &err)`
 and handed to `controller->add_subtitle_track(file.info, file.cues)`. It joins the track list and is
 kept through seeks and reloads until the next `open()`. Example D's `{"subs": [...]}` shows how.
@@ -855,7 +856,7 @@ Say these are missing. Do not emulate them with a fake.
 | No second window, no overlay window | One SDL window, one GLES context. |
 | No durable filesystem on Developer Mode webOS | Persist with DB8. |
 | `keymanager3` absent on webOS 6.5.3 | Secrets are plain envelopes there unless `protection()` says otherwise. |
-| TTML subtitles, audio-only bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
+| TTML in HLS, TTML styling and images, audio-only bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
 | Home and Exit as background/close paths | Not fully measured. The shell already handles `SDL_QUIT` and background events. |
 | Jellyfin/Plex/Emby clients | Not in the tree. A client would be an app on top of HTTP + this UI + this player, not a change to `media/`. |
 

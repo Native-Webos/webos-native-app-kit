@@ -35,10 +35,20 @@ bool parse_vtt_timestamp(const std::string &s, int64_t *us);
 std::string webvtt_plain_text(const std::string &cue_text);
 
 // WebVTT in ISO BMFF (ISO/IEC 14496-30, DASH "wvtt"), which FFmpeg does not read. The init segment
-// gives the track's timescale (mdhd); each fragment (moof + mdat) gives samples whose boxes are cues
-// (vttc, text in payl) or gaps (vtte). Times are media time in microseconds (tfdt/timescale).
+// gives the track's timescale (mdhd; any track's, so TTML in MP4 uses it too); each fragment (moof +
+// mdat) gives samples whose boxes are cues (vttc, text in payl) or gaps (vtte). Times are media time
+// in microseconds (tfdt/timescale).
 bool parse_wvtt_init(const uint8_t *data, size_t size, uint32_t *timescale, std::string *error);
 bool parse_wvtt_fragment(const uint8_t *data, size_t size, uint32_t timescale, std::vector<SubtitleCue> *out,
                          std::string *error);
+
+// The samples of a fragment's text track, timed by tfdt and trun; `data` points into the fragment.
+struct Mp4TextSample {
+    int64_t start_us = 0, end_us = 0;
+    const uint8_t *data = nullptr;
+    size_t size = 0;
+};
+bool mp4_text_samples(const uint8_t *data, size_t size, uint32_t timescale, std::vector<Mp4TextSample> *out,
+                      std::string *error);
 
 }  // namespace wnk::media

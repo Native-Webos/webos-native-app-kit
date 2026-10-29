@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling"
+    xmlns:ttp="http://www.w3.org/ns/ttml#parameter" ttp:frameRate="25" xml:lang="en">
+  <head>
+    <styling><style xml:id="s1" tts:color="white" tts:fontStyle="italic"/></styling>
+  </head>
+  <body>
+    <div>
+      <p begin="00:00:00:12" end="00:00:05:00">TTML <span style="s1">sidecar</span><br/>cue</p>
+      <p begin="5s" end="9s">Second TTML cue</p>
+    </div>
+  </body>
+</tt>

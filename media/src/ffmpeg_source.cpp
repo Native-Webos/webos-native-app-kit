@@ -6,6 +6,7 @@
 #include "wnk/media/dovi.hpp"
 #include "wnk/media/time_stretch.hpp"
 #include "wnk/media/subtitles.hpp"
+#include "wnk/media/ttml.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -27,6 +28,7 @@ extern "C" {
 #include <cstdarg>
 #include <cstring>
 #include <deque>
+#include <fstream>
 #include <map>
 #include <mutex>
 
@@ -1334,8 +1336,74 @@ bool FfmpegSource::set_speed(double speed, std::string *why) {
     return true;
 }
 
+namespace {
+
+// .ttml, .dfxp and .xml (query and fragment ignored): TTML, which FFmpeg has no demuxer for.
+bool ttml_name(const std::string &uri) {
+    std::string path = uri.substr(0, uri.find_first_of("?#"));
+    const size_t dot = path.rfind('.');
+    if (dot == std::string::npos || path.find('/', dot) != std::string::npos) return false;
+    std::string ext = path.substr(dot + 1);
+    for (char &c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == "ttml" || ext == "dfxp" || ext == "xml";
+}
+
+bool read_whole(const std::string &uri, const FfmpegSourceOptions &options, std::string *body, std::string *error) {
+    if (uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0) {
+        if (!options.http) {
+            *error = "no HTTP transport for " + uri;
+            return false;
+        }
+        net::HttpRequest req;
+        req.url = uri;
+        async::CancellationSource cancel;
+        net::HttpResponse r = options.http->perform(req, cancel.token());
+        if (!r.ok()) {
+            *error = r.error != net::NetError::None ? std::string(net::error_name(r.error)) + " " + r.detail
+                                                    : "HTTP " + std::to_string(r.status);
+            return false;
+        }
+        *body = std::move(r.body);
+        return true;
+    }
+    const std::string path = uri.rfind("file://", 0) == 0 ? uri.substr(7) : uri;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        *error = "cannot open " + path;
+        return false;
+    }
+    body->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    if (body->size() > (16u << 20)) {
+        *error = "subtitle file larger than 16 MiB";
+        return false;
+    }
+    return true;
+}
+
+bool load_ttml_file(const std::string &uri, int track, const FfmpegSourceOptions &options, SubtitleFile *out,
+                    std::string *error) {
+    std::string doc;
+    if (!read_whole(uri, options, &doc, error)) return false;
+    TtmlFile f;
+    if (!parse_ttml(doc, &f, error)) return false;
+    out->info = TrackInfo{};
+    out->info.index = track;
+    out->info.type = TrackType::Subtitle;
+    out->info.codec_label = "ttml";
+    out->info.subtitle = SubtitleKind::Text;
+    out->cues.clear();
+    for (SubtitleCue &c : f.cues) {
+        c.track = track;
+        out->cues.push_back(std::make_shared<SubtitleCue>(std::move(c)));
+    }
+    return true;
+}
+
+}  // namespace
+
 bool load_subtitle_file(const std::string &uri, int track, const FfmpegSourceOptions &options, SubtitleFile *out,
                         std::string *error, const std::function<bool()> &cancelled) {
+    if (ttml_name(uri)) return load_ttml_file(uri, track, options, out, error);
     FfmpegSource source(options);
     if (!source.open(uri, error)) return false;
     const MediaInfo &info = source.info();

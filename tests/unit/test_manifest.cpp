@@ -31,6 +31,24 @@ TEST("xml: elements, attributes, text, entities, CDATA, comments, prefixes") {
     CHECK(root.attribute("cenc") == nullptr);  // xmlns:cenc is not an attribute named "cenc"
 }
 
+TEST("xml: text_children keeps mixed content in document order") {
+    XmlLimits limits;
+    limits.text_children = true;
+    XmlNode root;
+    std::string err;
+    REQUIRE(parse_xml("<p>one <span>two</span><br/>th<!-- c -->ree<![CDATA[!]]></p>", &root, &err, limits));
+    REQUIRE(root.children.size() == 4);
+    CHECK_EQ(root.children[0].name, std::string("#text"));
+    CHECK_EQ(root.children[0].text, std::string("one "));
+    CHECK_EQ(root.children[1].local(), std::string("span"));
+    CHECK_EQ(root.children[1].children[0].text, std::string("two"));
+    CHECK_EQ(root.children[2].local(), std::string("br"));
+    CHECK_EQ(root.children[3].text, std::string("three!"));  // a comment does not split a run
+    CHECK_EQ(root.text, std::string("one three!"));            // still concatenated as without it
+    REQUIRE(parse_xml("<p>one <span>two</span></p>", &root, &err));
+    CHECK_EQ(root.children.size(), size_t{1});  // off by default
+}
+
 TEST("xml: malformed documents and hostile ones are refused with a reason") {
     XmlNode root;
     std::string err;

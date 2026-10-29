@@ -18,6 +18,7 @@ struct XmlNode {
     std::vector<std::pair<std::string, std::string>> attributes;
     std::vector<XmlNode> children;
     std::string text;  // character data directly inside this element, concatenated
+                       // (with XmlLimits::text_children, also each run as a "#text" child, in order)
 
     // The name without its namespace prefix.
     std::string local() const;
@@ -33,6 +34,9 @@ struct XmlLimits {
     size_t max_bytes = 16u << 20;
     int max_depth = 64;
     size_t max_nodes = 1u << 20;
+    // Mixed content (TTML's <p>a<span>b</span><br/>c</p>): every run of character data is also a
+    // child named "#text" holding it, so text and elements keep their order. Counts as a node.
+    bool text_children = false;
 };
 
 // Parses a whole document into its root element. False with a short reason (and the byte offset)

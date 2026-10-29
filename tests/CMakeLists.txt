@@ -389,6 +389,10 @@ if (TARGET wnk-player)
     wnk_player_e2e(subtitle_file_beside_media
             "{\"autoplay\":0,\"subs\":\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/subtitles/side.srt\"}" "Z,Z,Z,Z,Z,Z,Z,Z"
             "subtitle file side.srt: 2 cues as track 1000.*subtitles: track 1000, Subtitles: side.srt \\(subrip\\).*subtitle shown: Sidecar file cue")
+    # TTML beside the media: FFmpeg has no demuxer for it, the kit reads it whole.
+    wnk_player_e2e(ttml_file_beside_media
+            "{\"autoplay\":0,\"subs\":\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/subtitles/side.ttml\"}" "Z,Z,Z,Z,Z,Z,Z,Z"
+            "subtitle file side.ttml: 2 cues as track 1000.*subtitles: track 1000, Subtitles: side.ttml \\(ttml\\).*subtitle shown: TTML sidecar / cue")
     # An ASS file is drawn styled by libass (when the build has it), not as plain text.
     if (WNK_HAVE_LIBASS)
         wnk_player_e2e(ass_styled_by_libass

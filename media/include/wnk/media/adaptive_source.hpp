@@ -23,10 +23,11 @@
 //             target is downloaded.
 //
 //   subtitles text tracks of the manifest are offered as Subtitle tracks after the audio ones: HLS
-//             WebVTT playlists (cue times placed through X-TIMESTAMP-MAP), DASH text/vtt files and
-//             WebVTT in MP4 (wvtt, parsed by the kit: FFmpeg does not read it). After select() a background thread fetches every one of them
+//             WebVTT playlists (cue times placed through X-TIMESTAMP-MAP), DASH text/vtt and
+//             application/ttml+xml files, and WebVTT or TTML in MP4 (wvtt, stpp; parsed by the kit:
+//             FFmpeg reads neither). After select() a background thread fetches every one of them
 //             (the default first) and read() hands their cues out ahead of the media; the player's
-//             subtitle store keeps them across seeks. TTML (stpp) is listed but not readable here.
+//             subtitle store keeps them across seeks.
 //
 // Timestamps are presentation time: DASH segments map through presentationTimeOffset and the Period
 // start; HLS renditions share the timeline of the first segment of the video rendition.
@@ -51,7 +52,7 @@
 // when a Period ends, and a seek starts in the Period holding the target. Bitrate switching and
 // subtitles follow the first Period's renditions only.
 // WebM renditions (VP9, Opus) play like fMP4 ones; with SegmentBase their Cues are the index.
-// Not yet: audio bitrate switching, TTML subtitles, encrypted renditions without ClearKey keys
+// Not yet: audio bitrate switching, TTML in HLS (IMSC in fMP4), encrypted renditions without ClearKey keys
 // (refused), hierarchical sidx indexes.
 #pragma once
 

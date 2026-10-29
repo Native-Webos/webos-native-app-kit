@@ -136,6 +136,21 @@ class Parser {
         return true;
     }
 
+    // Where character data inside `node` goes: its text, or (text_children) a "#text" child, the
+    // last one again when nothing came between (a comment does not split a run).
+    std::string *text_run(XmlNode *node, std::string *error) {
+        if (!limits_.text_children) return &node->text;
+        if (node->children.empty() || node->children.back().name != "#text") {
+            if (++nodes_ > limits_.max_nodes) {
+                fail("too many elements", error);
+                return nullptr;
+            }
+            node->children.emplace_back();
+            node->children.back().name = "#text";
+        }
+        return &node->children.back().text;
+    }
+
     bool element(XmlNode *node, int depth, std::string *error) {
         if (depth >= limits_.max_depth) return fail("nesting too deep", error);
         if (++nodes_ > limits_.max_nodes) return fail("too many elements", error);
@@ -185,7 +200,10 @@ class Parser {
                 pos_ += 9;
                 const size_t end = s_.find("]]>", pos_);
                 if (end == std::string::npos) return fail("unterminated CDATA", error);
-                node->text.append(s_, pos_, end - pos_);
+                std::string *run = text_run(node, error);
+                if (run == nullptr) return false;
+                run->append(s_, pos_, end - pos_);
+                if (run != &node->text) node->text.append(s_, pos_, end - pos_);
                 pos_ = end + 3;
             } else if (starts("<?")) {
                 if (!skip_past("?>")) return fail("unterminated processing instruction", error);
@@ -195,7 +213,11 @@ class Parser {
             } else {
                 size_t end = s_.find('<', pos_);
                 if (end == std::string::npos) end = s_.size();
-                if (!decode(end, &node->text, error)) return false;
+                std::string *run = text_run(node, error);
+                if (run == nullptr) return false;
+                const size_t from = run->size();
+                if (!decode(end, run, error)) return false;
+                if (run != &node->text) node->text.append(*run, from, std::string::npos);
             }
         }
     }

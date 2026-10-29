@@ -3,6 +3,7 @@
 #include "wnk_test.hpp"
 
 #include "wnk/media/subtitles.hpp"
+#include "wnk/media/ttml.hpp"
 #include "wnk/media/webvtt.hpp"
 
 using namespace wnk::media;
@@ -222,4 +223,146 @@ TEST("wvtt: timescale from mdhd; cues and gaps from a fragment, timed by tfdt an
     CHECK_EQ(cues[2].end_us, int64_t{13500000});
     CHECK(!parse_wvtt_fragment(frag.data(), frag.size() - 10, ts, &cues, &err));  // truncated mdat
     CHECK(!parse_wvtt_init(frag.data(), frag.size(), &ts, &err));
+}
+
+TEST("ttml time expressions: clock times, frames, offsets, ticks") {
+    TtmlRates r;
+    int64_t us = 0;
+    REQUIRE(parse_ttml_time("01:02:03.5", r, &us));
+    CHECK_EQ(us, int64_t{3723500000});
+    REQUIRE(parse_ttml_time("100:00:00", r, &us));
+    CHECK_EQ(us, int64_t{360000000000});
+    r.frame_rate = 25;
+    REQUIRE(parse_ttml_time("00:00:01:05", r, &us));  // 1 s + 5 frames at 25 fps
+    CHECK_EQ(us, int64_t{1200000});
+    REQUIRE(parse_ttml_time("50f", r, &us));
+    CHECK_EQ(us, int64_t{2000000});
+    REQUIRE(parse_ttml_time(" 1.5s ", r, &us));
+    CHECK_EQ(us, int64_t{1500000});
+    REQUIRE(parse_ttml_time("250ms", r, &us));
+    CHECK_EQ(us, int64_t{250000});
+    REQUIRE(parse_ttml_time("2m", r, &us));
+    CHECK_EQ(us, int64_t{120000000});
+    REQUIRE(parse_ttml_time("0.5h", r, &us));
+    CHECK_EQ(us, int64_t{1800000000});
+    r.tick_rate = 10000000;
+    REQUIRE(parse_ttml_time("15000000t", r, &us));
+    CHECK_EQ(us, int64_t{1500000});
+    CHECK(!parse_ttml_time("1.5", r, &us));        // no metric
+    CHECK(!parse_ttml_time("00:1:00", r, &us));    // minutes need two digits
+    CHECK(!parse_ttml_time("00:00:00.5:01", r, &us));
+    CHECK(!parse_ttml_time("-1s", r, &us));
+    CHECK(!parse_ttml_time("1x", r, &us));
+}
+
+TEST("ttml: timing inherited from body and div, br, white space, entities, styling dropped") {
+    const std::string doc =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:tts=\"http://www.w3.org/ns/ttml#styling\" xml:lang=\"en\">"
+            "<head><styling><style xml:id=\"s\" tts:color=\"yellow\"/></styling><metadata>not shown</metadata></head>"
+            "<body begin=\"10s\"><div begin=\"1s\">\n"
+            "  <p begin=\"00:00:00.500\" end=\"00:00:02.000\" style=\"s\">\n    Hello   <span tts:fontStyle=\"italic\">big</span>\n"
+            "    world<br/>  line &amp; two  </p>\n"
+            "  <p begin=\"3s\" dur=\"1s\" xml:space=\"preserve\">a  b</p>\n"
+            "  <p begin=\"5s\"><metadata>x</metadata></p>\n"
+            "  <p begin=\"6s\">open</p>\n"
+            "</div></body></tt>";
+    TtmlFile f;
+    std::string err;
+    REQUIRE(parse_ttml(doc, &f, &err));
+    REQUIRE(f.cues.size() == 3);
+    CHECK_EQ(f.cues[0].start_us, int64_t{11500000});  // body 10 s + div 1 s + p 0.5 s
+    CHECK_EQ(f.cues[0].end_us, int64_t{13000000});
+    CHECK_EQ(f.cues[0].text, std::string("Hello big world\nline & two"));
+    CHECK_EQ(f.cues[1].start_us, int64_t{14000000});
+    CHECK_EQ(f.cues[1].end_us, int64_t{15000000});
+    CHECK_EQ(f.cues[1].text, std::string("a  b"));
+    CHECK_EQ(f.cues[2].start_us, int64_t{17000000});
+    CHECK_EQ(f.cues[2].end_us, kNoTime);  // nothing ends it
+    CHECK_EQ(f.cues[2].text, std::string("open"));
+}
+
+TEST("ttml: spans timed on their own become one cue per stretch; ticks; seq; refusals") {
+    // Paint-on: "one" from 1 s, "two" joins at 2 s, both until 3 s.
+    const std::string doc = "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" "
+                            "ttp:tickRate=\"10\"><body><div>"
+                            "<p begin=\"10t\" end=\"30t\"><span>one</span> <span begin=\"10t\">two</span></p>"
+                            "<p begin=\"40t\" end=\"50t\"><span end=\"5t\">gone</span><span begin=\"5t\">gone</span></p>"
+                            "</div><div timeContainer=\"seq\" begin=\"10s\"><p dur=\"1s\">s1</p><p dur=\"2s\">s2</p></div>"
+                            "</body></tt>";
+    TtmlFile f;
+    std::string err;
+    REQUIRE(parse_ttml(doc, &f, &err));
+    REQUIRE(f.cues.size() == 5);
+    CHECK_EQ(f.cues[0].text, std::string("one"));
+    CHECK_EQ(f.cues[0].start_us, int64_t{1000000});
+    CHECK_EQ(f.cues[0].end_us, int64_t{2000000});
+    CHECK_EQ(f.cues[1].text, std::string("one two"));
+    CHECK_EQ(f.cues[1].start_us, int64_t{2000000});
+    CHECK_EQ(f.cues[1].end_us, int64_t{3000000});
+    CHECK_EQ(f.cues[2].text, std::string("gone"));  // the same text either side of a cut: one cue
+    CHECK_EQ(f.cues[2].start_us, int64_t{4000000});
+    CHECK_EQ(f.cues[2].end_us, int64_t{5000000});
+    CHECK_EQ(f.cues[3].start_us, int64_t{10000000});  // seq: one after the other
+    CHECK_EQ(f.cues[4].start_us, int64_t{11000000});
+    CHECK_EQ(f.cues[4].end_us, int64_t{13000000});
+
+    REQUIRE(parse_ttml("<tt xmlns=\"http://www.w3.org/ns/ttml\"><body/></tt>", &f, &err));  // a gap
+    CHECK(f.cues.empty());
+    CHECK(!parse_ttml("<html/>", &f, &err));
+    CHECK(err.find("not TTML") != std::string::npos);
+    CHECK(!parse_ttml("<tt><body><p begin=\"soon\">x</p></body></tt>", &f, &err));
+    CHECK(!parse_ttml("<tt><body>", &f, &err));
+}
+
+namespace {
+
+// A fragment of one text track: samples of the given durations (ms, timescale 1000) from `start_ms`.
+std::vector<uint8_t> text_fragment(uint32_t start_ms, const std::vector<std::pair<uint32_t, std::vector<uint8_t>>> &samples) {
+    std::vector<uint8_t> tfhd = {0, 0, 0, 0};
+    be32(&tfhd, 1);
+    std::vector<uint8_t> tfdt = {0, 0, 0, 0};
+    be32(&tfdt, start_ms);
+    std::vector<uint8_t> trun = {0, 0, 0x03, 0x01};
+    be32(&trun, static_cast<uint32_t>(samples.size()));
+    const size_t offset_at = trun.size();
+    be32(&trun, 0);
+    std::vector<uint8_t> mdat;
+    for (const auto &[dur, body] : samples) {
+        be32(&trun, dur);
+        be32(&trun, static_cast<uint32_t>(body.size()));
+        mdat.insert(mdat.end(), body.begin(), body.end());
+    }
+    auto moof = box("moof", box("traf", cat({box("tfhd", tfhd), box("tfdt", tfdt), box("trun", trun)})));
+    const uint32_t data_offset = static_cast<uint32_t>(moof.size() + 8);
+    const size_t at = 8 + 8 + 8 + tfhd.size() + 8 + tfdt.size() + 8 + offset_at;
+    for (int i = 0; i < 4; ++i) moof[at + static_cast<size_t>(i)] = static_cast<uint8_t>(data_offset >> (24 - 8 * i));
+    return cat({moof, box("mdat", mdat)});
+}
+
+}  // namespace
+
+TEST("stpp: each sample a TTML document on the media timeline; sample-relative documents moved; gaps") {
+    const std::string tt = "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div>", end = "</div></body></tt>";
+    // 20-22 s: media time. 22-24 s: timed from the sample start, padded. 24-25 s: an open end. 25-26 s: empty.
+    const auto frag = text_fragment(20000, {{2000, text(tt + "<p begin=\"00:00:20.5\" end=\"00:00:21.5\">media</p>" + end)},
+                                            {2000, text(tt + "<p begin=\"0.5s\" end=\"1s\">relative</p>" + end + std::string(2, '\0'))},
+                                            {1000, text(tt + "<p begin=\"24.2s\">open</p>" + end)},
+                                            {1000, {}}});
+    std::vector<SubtitleCue> cues;
+    std::string err;
+    REQUIRE(parse_stpp_fragment(frag.data(), frag.size(), 1000, &cues, &err));
+    REQUIRE(cues.size() == 3);
+    CHECK_EQ(cues[0].text, std::string("media"));
+    CHECK_EQ(cues[0].start_us, int64_t{20500000});
+    CHECK_EQ(cues[0].end_us, int64_t{21500000});
+    CHECK_EQ(cues[1].text, std::string("relative"));
+    CHECK_EQ(cues[1].start_us, int64_t{22500000});
+    CHECK_EQ(cues[1].end_us, int64_t{23000000});
+    CHECK_EQ(cues[2].text, std::string("open"));
+    CHECK_EQ(cues[2].start_us, int64_t{24200000});
+    CHECK_EQ(cues[2].end_us, int64_t{25000000});  // closed at the sample's end
+    const auto bad = text_fragment(0, {{1000, text("<tt><body><p begin=\"x\">no</p></body></tt>")}});
+    CHECK(!parse_stpp_fragment(bad.data(), bad.size(), 1000, &cues, &err));
+    CHECK(err.find("TTML sample") != std::string::npos);
 }

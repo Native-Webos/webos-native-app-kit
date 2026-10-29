@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <map>
 #include <thread>
 #include <cmath>
 #include <cstdio>
@@ -34,6 +35,37 @@ bool have_server() { return !env("WNK_TEST_HTTP_BASE").empty() && !env("WNK_TEST
 bool have_ffmpeg() {
     static const bool ok = std::system("ffmpeg -hide_banner -version >/dev/null 2>&1") == 0;
     return ok;
+}
+
+// ISO BMFF boxes for a TTML-in-MP4 (stpp) track, which the ffmpeg CLI cannot fragment.
+void put32(std::string *b, uint32_t v) {
+    for (int sh = 24; sh >= 0; sh -= 8) *b += static_cast<char>(v >> sh);
+}
+
+std::string box(const char *type, const std::string &body) {
+    std::string b;
+    put32(&b, static_cast<uint32_t>(body.size() + 8));
+    return b + type + body;
+}
+
+std::string stpp_init() {
+    std::string mdhd(4, '\0');
+    put32(&mdhd, 0), put32(&mdhd, 0), put32(&mdhd, 1000), put32(&mdhd, 0), put32(&mdhd, 0x55c40000);
+    return box("ftyp", "iso6" + std::string(4, '\0')) + box("moov", box("trak", box("mdia", box("mdhd", mdhd))));
+}
+
+// One 2 s sample from `start_ms` holding `doc`.
+std::string stpp_segment(uint32_t start_ms, const std::string &doc) {
+    std::string tfhd(4, '\0'), tfdt(4, '\0'), trun = std::string("\0\0\x03\x01", 4);
+    put32(&tfhd, 1);
+    put32(&tfdt, start_ms);
+    put32(&trun, 1);
+    const std::string traf_head = box("tfhd", tfhd) + box("tfdt", tfdt);
+    const uint32_t moof_size = 8 + 8 + static_cast<uint32_t>(traf_head.size()) + 8 + static_cast<uint32_t>(trun.size()) + 12;
+    put32(&trun, moof_size + 8);  // data offset: past the moof and the mdat header
+    put32(&trun, 2000);
+    put32(&trun, static_cast<uint32_t>(doc.size()));
+    return box("moof", box("traf", traf_head + box("trun", trun))) + box("mdat", doc);
 }
 
 // Writes the presentations once. Names are flat because the server serves one directory.
@@ -106,7 +138,36 @@ bool make_presentations() {
             "-hls_playlist_type vod -hls_segment_filename 's_%v_%03d.ts' -master_pl_name s.m3u8 "
             "-var_stream_map 'v:0,a:0,s:0,sgroup:subs,language:en' 's_%v.m3u8'";
         if (std::system(subs.c_str()) != 0) return false;
-        // d.mpd with a German text/vtt AdaptationSet and a TTML one this build cannot read.
+        // TTML: "Fr N" in 2 s stpp segments (media time), "En N" in one file (ticks), at N.2-N.8 s.
+        const std::string tt = "<?xml version=\"1.0\"?><tt xmlns=\"http://www.w3.org/ns/ttml\" "
+                               "xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\" ttp:tickRate=\"10000\"><body><div>";
+        if (FILE *f = std::fopen((d + "/fr-init.mp4").c_str(), "wb")) {
+            const std::string b = stpp_init();
+            std::fwrite(b.data(), 1, b.size(), f);
+            std::fclose(f);
+        }
+        std::string en = tt;
+        for (int seg = 0; seg < 5; ++seg) {
+            std::string doc = tt;
+            for (int i = seg * 2; i < seg * 2 + 2; ++i) {
+                char line[160];
+                std::snprintf(line, sizeof line, "<p begin=\"00:00:%02d.200\" end=\"00:00:%02d.800\">Fr <span>%d</span></p>", i, i, i);
+                doc += line;
+                std::snprintf(line, sizeof line, "<p begin=\"%dt\" end=\"%dt\">En<br/>%d</p>", i * 10000 + 2000, i * 10000 + 8000, i);
+                en += line;
+            }
+            const std::string b = stpp_segment(static_cast<uint32_t>(seg) * 2000, doc + "</div></body></tt>");
+            if (FILE *f = std::fopen((d + "/fr-" + std::to_string(seg + 1) + ".m4s").c_str(), "wb")) {
+                std::fwrite(b.data(), 1, b.size(), f);
+                std::fclose(f);
+            }
+        }
+        if (FILE *f = std::fopen((d + "/en.ttml").c_str(), "w")) {
+            std::fputs((en + "</div></body></tt>").c_str(), f);
+            std::fclose(f);
+        }
+        // d.mpd with a German text/vtt AdaptationSet, French stpp segments, an English TTML file and
+        // a format this build cannot read.
         FILE *src = std::fopen((d + "/d.mpd").c_str(), "r");
         if (src == nullptr) return false;
         std::string mpd;
@@ -120,8 +181,14 @@ bool make_presentations() {
                         "<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>"
                         "<Representation id=\"de\" bandwidth=\"100\"><BaseURL>de.vtt</BaseURL></Representation>"
                         "</AdaptationSet><AdaptationSet id=\"10\" contentType=\"text\" mimeType=\"application/mp4\" "
-                        "codecs=\"stpp\" lang=\"fr\"><Representation id=\"fr\" bandwidth=\"100\">"
-                        "<BaseURL>fr.mp4</BaseURL></Representation></AdaptationSet>");
+                        "codecs=\"stpp.ttml.im1t\" lang=\"fr\"><SegmentTemplate timescale=\"1000\" duration=\"2000\" "
+                        "startNumber=\"1\" initialization=\"fr-init.mp4\" media=\"fr-$Number$.m4s\"/>"
+                        "<Representation id=\"fr\" bandwidth=\"100\"/></AdaptationSet>"
+                        "<AdaptationSet id=\"11\" contentType=\"text\" mimeType=\"application/ttml+xml\" lang=\"en\">"
+                        "<Representation id=\"en\" bandwidth=\"100\"><BaseURL>en.ttml</BaseURL></Representation>"
+                        "</AdaptationSet><AdaptationSet id=\"12\" contentType=\"text\" mimeType=\"text/x-unknown\" "
+                        "lang=\"es\"><Representation id=\"es\" bandwidth=\"100\"><BaseURL>es.txt</BaseURL>"
+                        "</Representation></AdaptationSet>");
         if (FILE *out = std::fopen((d + "/ds.mpd").c_str(), "w")) {
             std::fputs(mpd.c_str(), out);
             std::fclose(out);
@@ -497,28 +564,48 @@ TEST("adaptive source: WebM DASH (VP9, Opus) indexed by its Cues") {
     CHECK_EQ(after.video[0].pts_us, int64_t{5000000});  // ffmpeg starts a Cluster at every keyframe
 }
 
-TEST("adaptive source: DASH text/vtt subtitles; TTML listed but not readable; a seek does not stop loading") {
+TEST("adaptive source: DASH text/vtt, TTML file and stpp subtitles; unknown listed; a seek does not stop loading") {
     SKIP_UNLESS_READY();
     AdaptiveSource s(options());
     std::string err;
     REQUIRE(s.open(url("ds.mpd"), &err));
     const MediaInfo &info = s.info();
-    REQUIRE(info.tracks.size() == 4);
+    REQUIRE(info.tracks.size() == 6);
     CHECK_EQ(info.tracks[2].language, std::string("de"));
     CHECK(info.tracks[2].subtitle == SubtitleKind::Text);
     CHECK(info.tracks[2].is_default);  // Role main
     CHECK_EQ(info.tracks[3].language, std::string("fr"));
-    CHECK(info.tracks[3].subtitle == SubtitleKind::None);
+    CHECK(info.tracks[3].subtitle == SubtitleKind::Text);
+    CHECK_EQ(info.tracks[4].language, std::string("en"));
+    CHECK(info.tracks[4].subtitle == SubtitleKind::Text);
+    CHECK_EQ(info.tracks[5].language, std::string("es"));
+    CHECK(info.tracks[5].subtitle == SubtitleKind::None);
     StreamFormat f;
     REQUIRE(s.select(0, 1, starfish_like(), &f, &err));
     s.interrupt();  // a seek's interrupt must not reach the subtitle loader
     REQUIRE(s.seek(4000000, &err));
     s.reset_interrupt();
-    const auto cues = read_cues(s, 2, 10);
-    REQUIRE(cues.size() == 10);
-    CHECK_EQ(cues[3]->text, std::string("Cue 3"));  // tags removed
-    CHECK_EQ(cues[3]->start_us, int64_t{3200000});
-    CHECK_EQ(cues[3]->end_us, int64_t{3800000});
+    std::map<int, std::vector<std::shared_ptr<const SubtitleCue>>> cues;
+    Packet p;
+    while (s.read(&p, &err) == MediaSource::Read::Packet &&
+           (cues[2].size() < 10 || cues[3].size() < 10 || cues[4].size() < 10)) {
+        if (p.type == TrackType::Subtitle && p.subtitle) cues[p.subtitle->track].push_back(p.subtitle);
+    }
+    for (auto &[track, list] : cues) {
+        std::sort(list.begin(), list.end(), [](const auto &a, const auto &b) { return a->start_us < b->start_us; });
+    }
+    REQUIRE(cues[2].size() == 10);
+    CHECK_EQ(cues[2][3]->text, std::string("Cue 3"));  // tags removed
+    CHECK_EQ(cues[2][3]->start_us, int64_t{3200000});
+    CHECK_EQ(cues[2][3]->end_us, int64_t{3800000});
+    REQUIRE(cues[3].size() == 10);
+    CHECK_EQ(cues[3][7]->text, std::string("Fr 7"));
+    CHECK_EQ(cues[3][7]->start_us, int64_t{7200000});
+    CHECK_EQ(cues[3][7]->end_us, int64_t{7800000});
+    REQUIRE(cues[4].size() == 10);
+    CHECK_EQ(cues[4][9]->text, std::string("En\n9"));
+    CHECK_EQ(cues[4][9]->start_us, int64_t{9200000});
+    CHECK(cues[5].empty());
 }
 
 namespace {

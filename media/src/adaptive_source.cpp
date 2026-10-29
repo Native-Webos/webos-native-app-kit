@@ -4,6 +4,7 @@
 
 #include "wnk/log.hpp"
 #include "wnk/media/ffmpeg_source.hpp"
+#include "wnk/media/ttml.hpp"
 #include "wnk/media/webvtt.hpp"
 
 extern "C" {
@@ -1213,7 +1214,7 @@ struct AdaptiveSource::Impl {
     }
 
     // ---- subtitles from the manifest -------------------------------------------------------
-    enum class SubKind : uint8_t { None, VttFiles, Mp4 };
+    enum class SubKind : uint8_t { None, VttFiles, TtmlFiles, Mp4Vtt, Mp4Ttml };
     struct SubtitleChoice {
         int rendition = -1;
         int track = -1;  // TrackInfo index
@@ -1230,8 +1231,10 @@ struct AdaptiveSource::Impl {
         const std::string mime = lower(r.mime_type), codecs = lower(r.codecs);
         if (pres.format == Presentation::Format::Hls) return SubKind::VttFiles;  // WebVTT is HLS's format
         if (mime == "text/vtt") return SubKind::VttFiles;
-        if (mime == "application/mp4" && codecs.rfind("wvtt", 0) == 0) return SubKind::Mp4;
-        return SubKind::None;  // TTML (stpp, application/ttml+xml) has no decoder here
+        if (mime == "application/ttml+xml") return SubKind::TtmlFiles;
+        if (mime == "application/mp4" && codecs.rfind("wvtt", 0) == 0) return SubKind::Mp4Vtt;
+        if (mime == "application/mp4" && codecs.rfind("stpp", 0) == 0) return SubKind::Mp4Ttml;
+        return SubKind::None;
     }
 
     void push_cue(SubtitleCue c) {
@@ -1245,7 +1248,7 @@ struct AdaptiveSource::Impl {
         SubtitleChoice choice;
         size_t next = 0;           // first segment not fetched yet
         bool failed = false;
-        uint32_t timescale = 0;    // wvtt: from the init segment, once
+        uint32_t timescale = 0;    // MP4: from the init segment, once
         size_t cues = 0;
     };
 
@@ -1258,16 +1261,16 @@ struct AdaptiveSource::Impl {
             st.failed = true;
             return false;
         };
-        const bool mp4 = st.choice.kind == SubKind::Mp4;
+        const bool mp4 = st.choice.kind == SubKind::Mp4Vtt || st.choice.kind == SubKind::Mp4Ttml;
         if (mp4 && st.timescale == 0) {
             std::optional<MediaSegment> init;
             {
                 std::lock_guard<std::mutex> lock(pres_mutex);
                 init = r.init;
             }
-            if (!init || !fetch(init->url, &init->range, &body, nullptr, &error, Ctx::Subtitles) ||
-                !parse_wvtt_init(reinterpret_cast<const uint8_t *>(body.data()), body.size(), &st.timescale, &error)) {
-                if (error.empty()) error = "no initialisation segment";
+            // Without an init segment (one fragmented file as the BaseURL), the moov is in the segment.
+            if (init && (!fetch(init->url, &init->range, &body, nullptr, &error, Ctx::Subtitles) ||
+                         !parse_wvtt_init(reinterpret_cast<const uint8_t *>(body.data()), body.size(), &st.timescale, &error))) {
                 return fail();
             }
         }
@@ -1278,27 +1281,45 @@ struct AdaptiveSource::Impl {
             for (size_t i = st.next; i < r.segments.size(); ++i) todo.push_back(r.segments[i]);
             origin = mp4 ? (r.time_origin_us != kNoTime ? r.time_origin_us : 0) : (hls_origin_us != kNoTime ? hls_origin_us : 0);
         }
-        std::optional<SubtitleCue> held;  // wvtt: a cue split across fragments, joined again
+        std::optional<SubtitleCue> held;  // MP4: a cue split across fragments, joined again
         for (const MediaSegment &seg : todo) {
             if (subs_stop) return false;
             if (!fetch(seg.url, &seg.range, &body, nullptr, &error, Ctx::Subtitles)) return fail();
             ++st.next;
             if (mp4) {
+                const auto *bytes = reinterpret_cast<const uint8_t *>(body.data());
+                if (st.timescale == 0 && !parse_wvtt_init(bytes, body.size(), &st.timescale, &error)) {
+                    error = "no initialisation segment";
+                    return fail();
+                }
                 std::vector<SubtitleCue> got;
-                if (!parse_wvtt_fragment(reinterpret_cast<const uint8_t *>(body.data()), body.size(), st.timescale, &got,
-                                         &error)) {
+                if (!(st.choice.kind == SubKind::Mp4Vtt ? parse_wvtt_fragment(bytes, body.size(), st.timescale, &got, &error)
+                                                         : parse_stpp_fragment(bytes, body.size(), st.timescale, &got, &error))) {
                     return fail();
                 }
                 for (SubtitleCue &cue : got) {
                     cue.track = st.choice.track;
                     cue.start_us -= origin;
-                    cue.end_us -= origin;
+                    if (cue.end_us != kNoTime) cue.end_us -= origin;
                     if (held && held->text == cue.text && std::llabs(held->end_us - cue.start_us) <= 1000) {
                         held->end_us = cue.end_us;
                         continue;
                     }
                     if (held) push_cue(std::move(*held)), ++st.cues;
                     held = std::move(cue);
+                }
+                continue;
+            }
+            if (st.choice.kind == SubKind::TtmlFiles) {
+                TtmlFile f;
+                if (!parse_ttml(body, &f, &error)) {
+                    WNK_LOGW(kCat, "subtitles %s: %s", r.id.c_str(), error.c_str());
+                    continue;
+                }
+                for (SubtitleCue &cue : f.cues) {  // presentation time, as DASH text files are
+                    cue.track = st.choice.track;
+                    push_cue(std::move(cue));
+                    ++st.cues;
                 }
                 continue;
             }
@@ -1516,7 +1537,7 @@ struct AdaptiveSource::Impl {
         }
 
         // Subtitles: DASH, one per AdaptationSet; HLS, one per playlist. All are offered; those this
-        // build cannot read (TTML) as SubtitleKind::None.
+        // build cannot read as SubtitleKind::None.
         subtitle_choices.clear();
         for (size_t i = 0; i < pres.renditions.size(); ++i) {
             const Rendition &r = pres.renditions[i];

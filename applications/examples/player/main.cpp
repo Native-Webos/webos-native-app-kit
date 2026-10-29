@@ -32,7 +32,7 @@
 //   {"audio": "5:2,9:1"}                   scripted audio track changes (seconds after the player opens:
 //                                          stream index), for checking the switch without a remote
 //   {"speeds": "5:1.5,15:1"}               scripted playback speeds (seconds after the player opens: speed)
-//   {"subs": ["http://.../film.srt"]}      subtitle files beside the media (SubRip, WebVTT, ASS; a
+//   {"subs": ["http://.../film.srt"]}      subtitle files beside the media (SubRip, WebVTT, ASS, TTML; a
 //                                          string or a list), added as tracks; the first is shown
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"backend": "ndl"}                     force NDL (default: Starfish when the codecs suit it, else NDL)

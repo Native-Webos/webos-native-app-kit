@@ -7,4 +7,5 @@ and the RPU payload. `fel_to_mel.bin` converted with mode 2 is `fel_to_81.bin`, 
 `tests/unit/test_dovi.cpp`.
 
 `subtitles/side.srt`: two SubRip cues written for the kit, used by `e2e.player.subtitle_file_beside_media`.
+`subtitles/side.ttml`: the same two cues as TTML (frame-counted clock time, a styled span, a line break), written for the kit, used by `e2e.player.ttml_file_beside_media`.
 `subtitles/styled.ass`: two styled ASS events (a dialogue line and a rotated sign) written for the kit, used by `e2e.player.ass_styled_by_libass`.

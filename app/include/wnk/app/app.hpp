@@ -50,6 +50,16 @@ struct AppConfig {
     std::string title = "wnk app";
     size_t worker_threads = 2;
     bool http = false;        // create the libcurl transport (dlopen) for HTTP(S) and image URLs
+    // A private HTTP cache on disk in front of that transport, for Context::http() and images
+    // (wnk/net/http_cache.hpp): it answers from disk only what the server's caching headers allow and
+    // revalidates the rest (ETag / Last-Modified), so the app never sees older data than HTTP allows.
+    // On the TV it lives in <app dir>/.wnk-state/http-cache (kept across reboots and updates, removed
+    // with the app), else in the runtime dir (until reboot); on the host under $XDG_CACHE_HOME/<id>.
+    bool http_cache = true;
+    uint64_t http_cache_bytes = 32u << 20;
+    // Also answer with the stored copy when the network fails or the server answers 5xx (offline use).
+    // Off by default: an app with its own offline handling would otherwise see old data as new.
+    bool http_cache_offline = false;
     bool images = true;       // image service + texture cache + ui::ImageSource
     size_t image_memory_bytes = 48u << 20;
     size_t texture_bytes = 64u << 20;

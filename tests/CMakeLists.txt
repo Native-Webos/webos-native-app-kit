@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest dlna subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
+foreach (t log platform input focus font storage async http http_cache http_stream segment_reader image ui lifecycle crash capabilities media manifest dlna subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -28,6 +28,7 @@ target_link_libraries(test_dovi PRIVATE wnk_media)
 target_link_libraries(test_time_stretch PRIVATE wnk_media)
 target_compile_definitions(test_dovi PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(test_dlna PRIVATE wnk_media_dlna)
+target_link_libraries(test_http_cache PRIVATE wnk_net)
 target_compile_definitions(test_dlna PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(test_subtitle_view PRIVATE wnk_media_ui)
 target_compile_definitions(test_subtitle_view PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
@@ -470,3 +471,10 @@ if (NOT WNK_WEBOS)
     set_tests_properties(unit.ndl_release PROPERTIES
             ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/fakes;${WNK_LSAN}")
 endif ()
+
+# Every test run gets its own empty HTTP cache directory in the build tree (the app shell's cache
+# would otherwise live under the developer's ~/.cache and carry entries from one run to the next).
+get_property(_wnk_tests DIRECTORY PROPERTY TESTS)
+foreach (_t IN LISTS _wnk_tests)
+    set_property(TEST ${_t} APPEND PROPERTY ENVIRONMENT "XDG_CACHE_HOME=${CMAKE_CURRENT_BINARY_DIR}/cache/${_t}")
+endforeach ()

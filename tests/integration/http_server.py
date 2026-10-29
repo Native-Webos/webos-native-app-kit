@@ -33,6 +33,11 @@ ClearKey licence route (W3C EME Clear Key), for tests/integration/test_clearkey.
                       for the test key IDs it knows (CLEARKEY_KEYS); MODE deny answers 403, empty
                       answers a key set without the requested keys
 
+HTTP cache routes (tests/integration/test_http_curl.cpp):
+    /etag?v=V           ETag "V", Cache-Control: no-cache; a matching If-None-Match gets 304
+    /etag/count         {"200": N, "304": M} sent so far
+    /gzip-cacheable     a gzip body with max-age=600
+
 DLNA routes, a stand-in media server for Example B's browsing (tests/CMakeLists.txt e2e.tvui.dlna_*):
     /upnp/description.xml   a MediaServer device ("Test Media") with a ContentDirectory at /upnp/control
     /upnp/control           POST Browse: "0" → folders films (a video and a picture) and empty; any
@@ -143,6 +148,9 @@ def ws_read(r):
     key = r.read(4) if h[1] & 0x80 else b"\0\0\0\0"
     data = r.read(n)
     return op, bytes(b ^ key[i % 4] for i, b in enumerate(data))
+
+
+ETAG_COUNT = {"200": 0, "304": 0}  # /etag answers, for the HTTP cache test
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -389,6 +397,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, json.dumps(info).encode(), {"Content-Type": "application/json"})
         if url.path == "/clearkey" or url.path.startswith("/clearkey/"):
             return self._clearkey(url.path[len("/clearkey/"):] if url.path != "/clearkey" else "", body)
+        if url.path == "/etag":
+            # Revalidation: ETag "<v>" (query v=, default 1), no-cache; If-None-Match on it → 304.
+            # /etag/count reports how many full bodies and 304s were sent.
+            v = urllib.parse.parse_qs(url.query).get("v", ["1"])[0]
+            tag = f'"{v}"'
+            if self.headers.get("If-None-Match") == tag:
+                ETAG_COUNT["304"] += 1
+                return self._send(304, b"", {"ETag": tag, "Cache-Control": "no-cache"})
+            ETAG_COUNT["200"] += 1
+            return self._send(200, f"version {v}".encode(), {"ETag": tag, "Cache-Control": "no-cache",
+                                                              "Content-Type": "text/plain"})
+        if url.path == "/etag/count":
+            return self._send(200, json.dumps(ETAG_COUNT).encode(), {"Content-Type": "application/json"})
+        if url.path == "/gzip-cacheable":
+            return self._send(200, gzip.compress(b"cacheable body " * 100),
+                              {"Content-Encoding": "gzip", "Content-Type": "text/plain", "Cache-Control": "max-age=600"})
         if url.path == "/gzip":
             return self._send(200, gzip.compress(b"compressed body " * 100),
                               {"Content-Encoding": "gzip", "Content-Type": "text/plain"})

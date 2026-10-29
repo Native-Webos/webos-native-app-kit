@@ -6,10 +6,12 @@
 #include "wnk_test.hpp"
 
 #include "wnk/net/http.hpp"
+#include "wnk/net/http_cache.hpp"
 #include "wnk/net/http_stream.hpp"
 
 #include <atomic>
 #include <cstdlib>
+#include <unistd.h>
 #include <memory>
 #include <string>
 #include <thread>
@@ -371,4 +373,38 @@ TEST("stream: HTTPS with the kit's TLS rules") {
     HttpStream bad(std::shared_ptr<HttpTransport>(transport(false)), kHttps + "/range?n=10");
     CHECK(!bad.open());
     CHECK(bad.error() == NetError::Tls);
+}
+
+TEST("http cache over curl: an ETag revalidates with 304, a gzip body is stored decoded") {
+    NEED_SERVER();
+    char tmpl[] = "/tmp/wnk-http-cache-curl-XXXXXX";
+    REQUIRE(::mkdtemp(tmpl) != nullptr);
+    std::shared_ptr<HttpTransport> inner = transport();
+    REQUIRE(inner);
+    HttpCacheOptions o;
+    o.directory = tmpl;
+    auto cache = std::make_shared<HttpCache>(o);
+    CachingTransport t(inner, cache);
+    HttpResponse a = t.perform(get(kHttp + "/etag?v=7"), {});
+    CHECK_EQ(a.body, std::string("version 7"));
+    CHECK_EQ(a.header("x-wnk-cache"), std::string("miss"));
+    HttpResponse b = t.perform(get(kHttp + "/etag?v=7"), {});
+    CHECK_EQ(b.status, 200L);
+    CHECK_EQ(b.body, std::string("version 7"));
+    CHECK_EQ(b.header("x-wnk-cache"), std::string("revalidated"));
+    HttpResponse count = inner->perform(get(kHttp + "/etag/count"), {});
+    CHECK(count.body.find("\"304\": 1") != std::string::npos);
+    const std::string expect = [] {
+        std::string s;
+        for (int i = 0; i < 100; ++i) s += "cacheable body ";
+        return s;
+    }();
+    HttpResponse g = t.perform(get(kHttp + "/gzip-cacheable"), {});
+    CHECK_EQ(g.body, expect);
+    HttpResponse h = t.perform(get(kHttp + "/gzip-cacheable"), {});
+    CHECK_EQ(h.header("x-wnk-cache"), std::string("hit"));
+    CHECK_EQ(h.body, expect);
+    CHECK(h.header("content-encoding").empty());
+    cache->clear();
+    ::rmdir(tmpl);
 }

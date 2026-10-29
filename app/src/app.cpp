@@ -7,6 +7,7 @@
 #include "wnk/image/textures.hpp"
 #include "wnk/input/sdl_input.hpp"
 #include "wnk/log.hpp"
+#include "wnk/net/http_cache.hpp"
 #include "wnk/platform/luna.hpp"
 #include "wnk/render/gles2_renderer.hpp"
 #include "wnk/ui/image_source.hpp"
@@ -538,6 +539,7 @@ class Shell final : public Context {
         if (config_.http) {
             http_ = net::make_curl_transport({}, &err);
             if (!http_) WNK_LOGW("net", "no HTTP transport: %s", err.c_str());
+            if (http_ && config_.http_cache) open_http_cache();
         }
         if (config_.storage) {
             store_ = storage::open_default_store(launch_.app_id, &err);
@@ -1282,6 +1284,34 @@ class Shell final : public Context {
     }
 
     // The fixed teardown order from the header comment, each step timed, under the watchdog.
+    // The HTTP cache's directory: durable where the TV allows it, else until reboot.
+    void open_http_cache() {
+        std::vector<std::pair<std::string, const char *>> dirs;
+        if constexpr (platform::kIsWebOS) {
+            if (!launch_.app_dir.empty()) dirs.emplace_back(launch_.app_dir + "/.wnk-state/http-cache", "durable");
+        } else {
+            const char *xdg = std::getenv("XDG_CACHE_HOME");
+            const char *home = std::getenv("HOME");
+            const std::string base = xdg != nullptr && xdg[0] == '/' ? xdg : home != nullptr ? std::string(home) + "/.cache" : "";
+            if (!base.empty()) dirs.emplace_back(base + "/" + launch_.app_id + "/http-cache", "durable");
+        }
+        if (!runtime_.empty()) dirs.emplace_back(runtime_ + "/http-cache", "until reboot");
+        for (const auto &[dir, kind] : dirs) {
+            net::HttpCacheOptions o;
+            o.directory = dir;
+            o.max_bytes = config_.http_cache_bytes;
+            o.stale_if_error = config_.http_cache_offline;
+            auto cache = std::make_shared<net::HttpCache>(o);
+            if (!cache->usable()) continue;
+            http_cache_ = std::make_shared<net::CachingTransport>(http_, cache);
+            http_ = http_cache_;
+            WNK_LOGI("net", "http cache %s (%s): %zu entries, %.1f of %.0f MiB", dir.c_str(), kind, cache->entries(),
+                     static_cast<double>(cache->bytes()) / 1048576.0, static_cast<double>(o.max_bytes) / 1048576.0);
+            return;
+        }
+        WNK_LOGW("net", "no directory for the http cache: requests go straight to the network");
+    }
+
     void shutdown() {
         const Uint64 t0 = SDL_GetPerformanceCounter();
         lifecycle_.dispatch(Event::Quit, SDL_GetTicks());
@@ -1322,6 +1352,15 @@ class Shell final : public Context {
         run_step("release images", [this] {
             textures_.reset();
             images_.reset();
+            if (http_cache_) {
+                const net::HttpCacheStats st = http_cache_->stats();
+                WNK_LOGI("net", "http cache: %llu hits, %llu revalidated, %llu stale, %llu misses (%llu stored), %llu bypassed; %zu entries, %.1f MiB",
+                         static_cast<unsigned long long>(st.hits), static_cast<unsigned long long>(st.revalidated),
+                         static_cast<unsigned long long>(st.stale), static_cast<unsigned long long>(st.misses),
+                         static_cast<unsigned long long>(st.stored), static_cast<unsigned long long>(st.bypassed),
+                         http_cache_->cache().entries(), static_cast<double>(http_cache_->cache().bytes()) / 1048576.0);
+                http_cache_.reset();
+            }
             http_.reset();
             store_.reset();
         });
@@ -1382,6 +1421,7 @@ class Shell final : public Context {
     std::unique_ptr<async::WorkerPool> pool_;
     std::unique_ptr<async::WorkerPool> shell_pool_;  // font search, Luna requests, speech
     std::shared_ptr<net::HttpTransport> http_;
+    std::shared_ptr<net::CachingTransport> http_cache_;  // the same object as http_ when the cache is on
     std::unique_ptr<storage::KeyValueStore> store_;
     std::unique_ptr<image::ImageService> images_;
     std::unique_ptr<image::ImageTextures> textures_;

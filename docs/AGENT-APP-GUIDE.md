@@ -280,6 +280,8 @@ int main(int argc, char **argv) {
 | `fallback_app_id` | `"wnk app"` | Always, to the same id as `APPID`. |
 | `title` | `"wnk app"` | Window title. |
 | `http` | false | Any `http://` or `https://` URL (API, images, streams). |
+| `http_cache` / `http_cache_bytes` | true / 32 MiB | Leave on. A disk cache in front of `ctx.http()` and images that follows HTTP (see "HTTP cache" below). false for an app whose responses must never touch the disk. |
+| `http_cache_offline` | false | The app would rather show the last copy than an error when offline. Leave false if it has its own offline handling. |
 | `images` | true | Posters and thumbnails. Set false for a player with no images. |
 | `storage` | false | Settings or session that must survive relaunch. Needs `database.operation`. |
 | `audio` | false | The app plays its own sounds (interface clicks, game effects, music). Not needed for video: the player has its own audio path. |
@@ -479,6 +481,25 @@ from `AppConfig::fallback_fonts` (files you bundle), else from a face the shell 
 characters (JP, KR, SC, TC). The search runs on a worker; the text appears on the next frame.
 
 ## Data loading, HTTP, storage
+
+### HTTP cache
+
+With `AppConfig::http` the shell puts a private HTTP cache (`wnk/net/http_cache.hpp`) in front of
+`ctx.http()` and the image service. It follows RFC 9111 and never invents freshness:
+
+- fresh by `Cache-Control: max-age` or `Expires`: answered from disk, no request;
+- stale or `no-cache` with an `ETag`/`Last-Modified`: one conditional request; a 304 answers with
+  the stored body (as HTTP 200);
+- no freshness and no validator, `no-store`, `Vary: *`, more than 4 MiB, `Range`, `Authorization`,
+  or the request's own `If-None-Match`: not cached;
+- a successful POST/PUT/PATCH/DELETE drops what is stored for its URL;
+- on a network failure or 5xx, the stored copy only if the response said `stale-if-error` or the
+  app set `http_cache_offline` (never past `must-revalidate`).
+
+Every response has an `x-wnk-cache` header (`hit`, `revalidated`, `stale`, `miss`, `bypass`). A
+"refresh" control should send `Cache-Control: no-cache` to revalidate even a fresh copy. On the TV
+the cache is `<app dir>/.wnk-state/http-cache` (kept across reboots and updates, removed with the
+app); the shell logs its hits at shutdown.
 
 ### Threading pattern
 

@@ -135,6 +135,14 @@ class CheckPackageTests(unittest.TestCase):
         self.assertTrue(any("FFmpeg-LGPL-2.1.txt" in f for f in failures))
         self.assertTrue(any("FFmpeg source tarball" in f for f in failures))
 
+    def test_optional_needed_may_be_absent_or_present(self):
+        ipk = build(make_stage(self.tmp), self.tmp / "out")
+        needed = wnk_elf.parse(HOST_ELF.read_bytes()).needed
+        failures, out = self.run_check(ipk, needed + ["libnothing.so.1?"])
+        self.assertEqual(failures, [], out)
+        failures, out = self.run_check(ipk, needed[:-1] + [needed[-1] + "?"])
+        self.assertEqual(failures, [], out)
+
     def test_dt_needed_mismatch_fails(self):
         ipk = build(make_stage(self.tmp), self.tmp / "out")
         failures, _ = self.run_check(ipk, ["libnothing.so.1"])

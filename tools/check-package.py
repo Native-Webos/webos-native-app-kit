@@ -228,8 +228,10 @@ def check_ipk(path: Path, expected_needed: list[str] | None, arch: str,
     if bundled:
         r.check("$ORIGIN/lib" in paths, f"main has RPATH/RUNPATH $ORIGIN/lib for bundled libraries (has {paths})")
     if expected_needed is not None:
+        # A trailing "?" marks a reviewed library that a build option may leave out (it may be absent).
         actual = sorted(main_info.needed)
-        want = sorted(expected_needed)
+        optional = {n[:-1] for n in expected_needed if n.endswith("?")}
+        want = sorted({n.rstrip("?") for n in expected_needed} - (optional - set(actual)))
         r.check(actual == want, "main DT_NEEDED equals the reviewed list"
                 + ("" if actual == want else f"\n         missing: {sorted(set(want) - set(actual))}"
                    f"\n         unexpected: {sorted(set(actual) - set(want))}"))

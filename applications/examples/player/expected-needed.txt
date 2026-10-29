@@ -1,9 +1,10 @@
 # Reviewed DT_NEEDED list for wnk-player on webOS (checked by tools/check-package.py).
 # Adding a line is a review decision: the library must exist under this SONAME on every targeted
-# firmware (tools/fw-lib-matrix.py), or be bundled in lib/.
+# firmware (tools/fw-lib-matrix.py), or be bundled in lib/. A trailing ? means a build option may leave it out.
 ld-linux.so.3
 libc.so.6
 libm.so.6
+libgcc_s.so.1?          # WNK_DOVI: unwinder for the Rust libdovi code (_Unwind_*, __aeabi_unwind_*); every firmware 1.2-11.2 (fw-lib-matrix)
 libdl.so.2              # dlopen of libNDL_directmedia.so.1 and libcurl.so.4 (never DT_NEEDED), the shell's optional libraries
 libpthread.so.0         # playback thread, worker pool
 librt.so.1

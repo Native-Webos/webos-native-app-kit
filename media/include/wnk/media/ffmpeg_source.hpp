@@ -25,10 +25,13 @@
 
 #include "wnk/media/clearkey.hpp"
 #include "wnk/media/media.hpp"
+#include "wnk/media/subtitles.hpp"
 #include "wnk/net/byte_reader.hpp"
 #include "wnk/net/http_stream.hpp"
 
+#include <functional>
 #include <memory>
+#include <vector>
 
 namespace wnk::media {
 
@@ -84,5 +87,18 @@ class FfmpegSource : public MediaSource {
 // each input channel using FFmpeg's AV_CHAN_* numbering (FL=0, FR=1, FC=2, LFE=3, BL=4, BR=5,
 // SL=9, SR=10), empty for "first two are left/right".
 void mix_to_stereo_s16(const float *const *planes, int channels, int samples, const int *order, int16_t *out);
+
+// A subtitle file read whole (SubRip, WebVTT, ASS/SSA), to show beside media that lacks the track.
+struct SubtitleFile {
+    TrackInfo info;  // type Subtitle, index = the track asked for
+    std::vector<std::shared_ptr<const SubtitleCue>> cues;  // sorted by start, track = info.index
+};
+
+// Reads the subtitle file at `uri` (a path, file://, or http(s) through options.http) as track
+// `track` (from kExternalSubtitleTrack up, so it never meets a demuxer's stream index). The first
+// subtitle stream of the file is used. Blocking: call it on a worker; `cancelled` is polled between
+// packets.
+bool load_subtitle_file(const std::string &uri, int track, const FfmpegSourceOptions &options, SubtitleFile *out,
+                        std::string *error, const std::function<bool()> &cancelled = {});
 
 }  // namespace wnk::media

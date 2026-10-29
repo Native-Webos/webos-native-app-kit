@@ -5,3 +5,5 @@
 and the RPU payload. `fel_to_mel.bin` converted with mode 2 is `fel_to_81.bin`, and `mel_orig.bin` is
 `mel_to_81.bin`, byte for byte (dovi_tool's `fel_conversions` and `mel_conversions` tests). Used by
 `tests/unit/test_dovi.cpp`.
+
+`subtitles/side.srt`: two SubRip cues written for the kit, used by `e2e.player.subtitle_file_beside_media`.

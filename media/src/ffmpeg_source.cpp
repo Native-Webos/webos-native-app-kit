@@ -1189,6 +1189,8 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
         }
     }
     m.need_key = true;
+    if (video_track < 0 && audio_track < 0) return true;  // subtitles only (load_subtitle_file)
+    if (!out->video && !out->audio) *error = "nothing playable in the selected tracks";
     return out->video || out->audio;
 }
 
@@ -1299,6 +1301,43 @@ bool FfmpegSource::set_speed(double speed, std::string *why) {
         return false;
     }
     impl_->speed = speed;
+    return true;
+}
+
+bool load_subtitle_file(const std::string &uri, int track, const FfmpegSourceOptions &options, SubtitleFile *out,
+                        std::string *error, const std::function<bool()> &cancelled) {
+    FfmpegSource source(options);
+    if (!source.open(uri, error)) return false;
+    const MediaInfo &info = source.info();
+    const auto it = std::find_if(info.tracks.begin(), info.tracks.end(), [](const TrackInfo &t) {
+        return t.type == TrackType::Subtitle && t.subtitle != SubtitleKind::None;
+    });
+    if (it == info.tracks.end()) {
+        *error = "no subtitle track this build can decode";
+        return false;
+    }
+    const int stream = it->index;
+    StreamFormat format;
+    if (!source.select(-1, -1, BackendCaps{}, &format, error)) return false;
+    out->info = *it;
+    out->info.index = track;
+    out->cues.clear();
+    for (;;) {
+        if (cancelled && cancelled()) {
+            *error = "cancelled";
+            return false;
+        }
+        Packet p;
+        const MediaSource::Read r = source.read(&p, error);
+        if (r == MediaSource::Read::EndOfStream) break;
+        if (r != MediaSource::Read::Packet) return false;
+        if (p.type != TrackType::Subtitle || !p.subtitle || p.subtitle->track != stream) continue;
+        auto cue = std::make_shared<SubtitleCue>(*p.subtitle);
+        cue->track = track;
+        out->cues.push_back(std::move(cue));
+    }
+    std::stable_sort(out->cues.begin(), out->cues.end(),
+                     [](const auto &a, const auto &b) { return a->start_us < b->start_us; });
     return true;
 }
 

@@ -381,6 +381,10 @@ if (TARGET wnk-player)
     # Subtitles: the default English track shows; Down switches to French, then off.
     wnk_player_e2e(subtitles_default_and_switch "{\"autoplay\":3}" "Z,Z,Z,Z,Z,Down,Z,Z,Z,Z,Z,Z,Down,Z"
             "subtitles: track 3, Subtitles: English \\(subrip\\).*subtitle shown: Second [0-9].*subtitles: track 4, Subtitles: Fran.*subtitle shown: Sous-titre fran.+ais num.+ro [0-9] / deuxi.+me ligne.*subtitles: track -1, Subtitles off")
+    # A subtitle file beside the media ({"subs"}): read on a worker, added as a track and shown.
+    wnk_player_e2e(subtitle_file_beside_media
+            "{\"autoplay\":0,\"subs\":\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/subtitles/side.srt\"}" "Z,Z,Z,Z,Z,Z,Z,Z"
+            "subtitle file side.srt: 2 cues as track 1000.*subtitles: track 1000, Subtitles: side.srt \\(subrip\\).*subtitle shown: Sidecar file cue")
     # The track menu (Up) opens on the playing English audio track; Right, OK plays the French one from
     # the position, with the decoder reloaded.
     wnk_player_e2e(tracks_menu_switches_audio "{\"autoplay\":3}" "Z,Z,Z,Z,Up,Right,Return,Z,Z,Z,Z,Z,Z"

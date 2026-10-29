@@ -62,6 +62,7 @@ struct PlaybackController::Core {
     // Subtitle track to show (a stream index from MediaInfo, -1 for none).
     void set_subtitle_track(int track) { subtitle_track_.store(track); }
     int subtitle_track() const { return subtitle_track_.load(); }
+    bool add_subtitle_track(TrackInfo info, std::vector<std::shared_ptr<const SubtitleCue>> cues);
     // Cues of the selected track at the current position (empty when none or paused before any).
     std::vector<std::shared_ptr<const SubtitleCue>> subtitles_now() const;
     const SubtitleStore &subtitle_store() const { return subtitles_; }
@@ -169,6 +170,8 @@ struct PlaybackController::Core {
     std::atomic<int64_t> last_seek_target_us_{kNoTime};  // main thread: the latest seek() target
     SubtitleStore subtitles_;
     std::atomic<int> subtitle_track_{-1};
+    // Subtitle files added for the current open() (mutex_): kept through reloads and rescues.
+    std::vector<std::pair<TrackInfo, std::vector<std::shared_ptr<const SubtitleCue>>>> external_subs_;
     std::atomic<bool> eos_seen_{false};
     std::thread thread_;
     bool joined_ = false;
@@ -233,6 +236,9 @@ void PlaybackController::set_video_area(const Rect &pixels) { core_->set_video_a
 void PlaybackController::set_audio_track(int track) { core_->set_audio_track(track); }
 void PlaybackController::set_speed(double speed) { core_->set_speed(speed); }
 void PlaybackController::set_subtitle_track(int track) { core_->subtitle_track_.store(track); }
+bool PlaybackController::add_subtitle_track(TrackInfo info, std::vector<std::shared_ptr<const SubtitleCue>> cues) {
+    return core_->add_subtitle_track(std::move(info), std::move(cues));
+}
 int PlaybackController::subtitle_track() const { return core_->subtitle_track_.load(); }
 std::vector<std::shared_ptr<const SubtitleCue>> PlaybackController::subtitles_now() const { return core_->subtitles_now(); }
 const SubtitleStore &PlaybackController::subtitle_store() const { return core_->subtitles_; }
@@ -260,7 +266,36 @@ void PlaybackController::Core::post(Command c) {
     cv_.notify_all();
 }
 
-void PlaybackController::Core::open(const std::string &uri) { post({Cmd::Open, uri, 0}); }
+void PlaybackController::Core::open(const std::string &uri) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        external_subs_.clear();  // they belonged to the previous media
+    }
+    post({Cmd::Open, uri, 0});
+}
+
+bool PlaybackController::Core::add_subtitle_track(TrackInfo info, std::vector<std::shared_ptr<const SubtitleCue>> cues) {
+    if (info.type != TrackType::Subtitle || info.index < kExternalSubtitleTrack) return false;
+    for (const auto &c : cues) {
+        if (!c || c->track != info.index) return false;
+    }
+    for (const auto &c : cues) subtitles_.add(c);
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto same = [&info](const TrackInfo &t) { return t.index == info.index; };
+    auto it = std::find_if(external_subs_.begin(), external_subs_.end(), [&same](const auto &e) { return same(e.first); });
+    if (it != external_subs_.end()) {
+        *it = {info, std::move(cues)};
+    } else {
+        external_subs_.emplace_back(info, std::move(cues));
+    }
+    // Shown in the track list at once if the media is already open; otherwise do_open adds it.
+    if (!snap_.info.uri.empty()) {
+        auto &tracks = snap_.info.tracks;
+        tracks.erase(std::remove_if(tracks.begin(), tracks.end(), same), tracks.end());
+        tracks.push_back(std::move(info));
+    }
+    return true;
+}
 void PlaybackController::Core::play() { post({Cmd::Play, {}, 0}); }
 void PlaybackController::Core::pause() { post({Cmd::Pause, {}, 0}); }
 void PlaybackController::Core::pause_and_release() { post({Cmd::Pause, {}, 0, true}); }
@@ -555,6 +590,12 @@ void PlaybackController::Core::do_open(const std::string &uri) {
         if (applied_seek_gen_ == seek_gen_) seek_target_us_ = kNoTime;  // else a seek queued behind the open keeps it
     }
     subtitles_.clear();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto &e : external_subs_) {
+            for (const auto &c : e.second) subtitles_.add(c);
+        }
+    }
     set_state(PlayState::Opening);
     source_->reset_interrupt();
     std::string err;
@@ -580,6 +621,7 @@ void PlaybackController::Core::do_open(const std::string &uri) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snap_.info = info;
+        for (const auto &e : external_subs_) snap_.info.tracks.push_back(e.first);
         snap_.format = format;
         snap_.duration_us = info.duration_us;
         snap_.video_track = v != nullptr ? v->index : -1;

@@ -617,6 +617,76 @@ TEST("ffmpeg source: subtitles read while a seek looks for its keyframe are deli
     CHECK(subs[0].subtitle->text.find("Second") == 0);
 }
 
+// ---- subtitle files beside the media ---------------------------------------------------------------
+
+namespace {
+
+std::string write_text(const std::string &name, const std::string &text) {
+    const std::string path = dir() + "/" + name;
+    if (FILE *f = std::fopen(path.c_str(), "w")) {
+        std::fputs(text.c_str(), f);
+        std::fclose(f);
+    }
+    return path;
+}
+
+const char *kSrt = "1\n00:00:01,000 --> 00:00:02,500\nHello <b>there</b>\n\n"
+                   "2\n00:00:03,000 --> 00:00:04,000\nTwo\nlines\n\n";
+const char *kVtt = "WEBVTT\n\n00:01.000 --> 00:02.500 line:80%\nHello <b>there</b>\n\n"
+                   "intro\n00:03.000 --> 00:04.000\nTwo\nlines\n";
+const char *kAss = "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 360\n\n"
+                   "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, Bold\nStyle: Default,Sans,24,&H00FFFFFF,0\n\n"
+                   "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+                   "Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Two\\Nlines\n"
+                   "Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,{\\b1}Hello{\\b0} there\n";
+
+void check_two_cues(const SubtitleFile &f, int track) {
+    CHECK_EQ(f.info.index, track);
+    CHECK(f.info.type == TrackType::Subtitle);
+    CHECK(f.info.subtitle == SubtitleKind::Text);
+    std::vector<std::shared_ptr<const SubtitleCue>> cues;
+    for (const auto &c : f.cues) {
+        if (!c->empty()) cues.push_back(c);
+    }
+    REQUIRE(cues.size() == 2u);
+    CHECK_EQ(cues[0]->track, track);
+    CHECK_EQ(cues[0]->text, std::string("Hello there"));
+    CHECK_EQ(cues[0]->start_us, int64_t{1000000});
+    CHECK_EQ(cues[0]->end_us, int64_t{2500000});
+    CHECK_EQ(cues[1]->text, std::string("Two\nlines"));
+    CHECK_EQ(cues[1]->start_us, int64_t{3000000});
+    CHECK_EQ(cues[1]->end_us, int64_t{4000000});
+}
+
+}  // namespace
+
+TEST("subtitle file: SubRip, WebVTT and ASS read whole as an external track, in start order") {
+    for (const auto &[name, text] : {std::pair<std::string, const char *>{"side.srt", kSrt},
+                                     {"side.vtt", kVtt},
+                                     {"side.ass", kAss}}) {
+        std::printf("  %s\n", name.c_str());
+        SubtitleFile f;
+        std::string err;
+        REQUIRE(load_subtitle_file(write_text(name, text), kExternalSubtitleTrack + 3, {}, &f, &err));
+        check_two_cues(f, kExternalSubtitleTrack + 3);
+    }
+}
+
+TEST("subtitle file: a file without subtitles, a missing file and cancelling are refused with a reason") {
+    SubtitleFile f;
+    std::string err;
+    CHECK(!load_subtitle_file(dir() + "/nothing-here.srt", kExternalSubtitleTrack, {}, &f, &err));
+    CHECK(!err.empty());
+    if (have_ffmpeg() && make_clip("h264_aac.mp4", "libx264", "aac")) {
+        err.clear();
+        CHECK(!load_subtitle_file(dir() + "/h264_aac.mp4", kExternalSubtitleTrack, {}, &f, &err));
+        CHECK(err.find("no subtitle track") != std::string::npos);
+    }
+    err.clear();
+    CHECK(!load_subtitle_file(write_text("cancel.srt", kSrt), kExternalSubtitleTrack, {}, &f, &err, [] { return true; }));
+    CHECK_EQ(err, std::string("cancelled"));
+}
+
 // ---- over HTTP (needs http_server.py: WNK_TEST_HTTP_BASE and WNK_TEST_FILES_DIR) ------------------
 
 namespace {
@@ -714,6 +784,16 @@ TEST("ffmpeg source over HTTP: missing resource reports the status; no transport
     REQUIRE(s.select(s.info().best(TrackType::Video)->index, -1, ndl_like_caps(), &f, &err));
     Packet p;
     CHECK(s.read(&p, &err) == MediaSource::Read::Packet);
+}
+
+TEST("subtitle file over HTTP: read through the kit's client like a media file") {
+    SKIP_WITHOUT_SERVER();
+    write_text("side_http.srt", kSrt);
+    SubtitleFile f;
+    std::string err;
+    REQUIRE(load_subtitle_file(serve_clip("side_http.srt"), kExternalSubtitleTrack, with_http(), &f, &err));
+    check_two_cues(f, kExternalSubtitleTrack);
+    CHECK(!load_subtitle_file(env("WNK_TEST_HTTP_BASE") + "/files/missing.srt", kExternalSubtitleTrack, with_http(), &f, &err));
 }
 
 TEST("stereo mix: 5.1 downmix keeps left/right apart, adds centre to both, drops LFE, never clips") {

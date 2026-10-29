@@ -45,7 +45,8 @@
 //
 // Subtitles: every cue the source decodes goes into a SubtitleStore (all subtitle tracks, kept across
 // seeks) instead of the backend; subtitles_now() answers what the selected track shows at the
-// current position, so switching tracks needs no seek.
+// current position, so switching tracks needs no seek. Subtitle files read beside the media join the
+// same store through add_subtitle_track().
 //
 // Threading: public methods are main-thread calls and never block on the playback thread except
 // stop()/~PlaybackController, which join it with a deadline. State changes are posted to the
@@ -161,6 +162,11 @@ class PlaybackController {
 
     // Subtitle track to show (a stream index from MediaInfo, -1 for none).
     void set_subtitle_track(int track);
+    // Adds a subtitle file read beside the media (load_subtitle_file) as a track of the current
+    // open(): it joins snapshot().info.tracks and the store, survives seeks and reloads, and is
+    // dropped by the next open(). The same index again replaces it. False if `info` is not a
+    // subtitle track from kExternalSubtitleTrack up or a cue names another track.
+    bool add_subtitle_track(TrackInfo info, std::vector<std::shared_ptr<const SubtitleCue>> cues);
     int subtitle_track() const;
     // Cues of the selected track at the current position (empty when none or paused before any).
     std::vector<std::shared_ptr<const SubtitleCue>> subtitles_now() const;

@@ -23,6 +23,10 @@
 
 namespace wnk::media {
 
+// Track indexes from here up are subtitle files added beside the media (load_subtitle_file,
+// PlaybackController::add_subtitle_track), never a demuxer's stream index.
+constexpr int kExternalSubtitleTrack = 1000;
+
 // "ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text" (FFmpeg's AVSubtitleRect::ass) →
 // plain text: override blocks {...} and drawings (\p1 ... \p0) removed, \N and \n become line
 // breaks, \h a space, blank lines and surrounding spaces dropped.

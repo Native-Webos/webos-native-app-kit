@@ -341,6 +341,7 @@ stubbing a lookalike.
 | File or HTTP video, pause, seek | `FfmpegSource` + `PlaybackController` + `AutoBackend` (Starfish preferred, NDL fallback). Example D. |
 | DASH (`.mpd`) or HLS (`.m3u8`), including live | `AdaptiveSource` when `AdaptiveSource::handles(uri)`. |
 | Subtitles in the picture | `SubtitleView` (`wnk_media_ui`) fed by `controller->subtitles_now()`. |
+| Subtitle file next to the video (`.srt`, `.vtt`, `.ass`) | `load_subtitle_file` on a worker, then `controller->add_subtitle_track`. Example D's `{"subs"}`. |
 | Audio language / track menu | `snapshot().info.tracks` lists them; `set_audio_track(index)` while playing or paused; `snapshot().audio_track` is the one playing. Example D's `open_tracks`. |
 | Playback speed (0.5x-2x) | `set_speed(s)` while playing or paused; `snapshot().speed` is the one in force. File sources only; refused for DASH/HLS and where the fed frame rate would pass 60 fps. Audio is stereo while sped up. Example D's track menu. |
 | Video visible behind the UI | `ui.set_clear_color(wnk::render::kTransparent)` while the player screen is showing. Restore with `std::nullopt` on hide. |
@@ -728,7 +729,10 @@ its first Period. WebM renditions (VP9, Opus) play too, indexed by the file's Cu
 
 Subtitles the FFmpeg source can decode (SubRip, ASS/SSA, WebVTT, MP4 timed text, PGS, DVD, DVB)
 become cues. ASS styling is stripped to plain text. Manifest subtitles: HLS WebVTT, DASH
-`text/vtt` and `wvtt`. External subtitle files are not loaded.
+`text/vtt` and `wvtt`. A subtitle file beside the media (SubRip, WebVTT, ASS; a path or http(s) URL)
+is read whole on a worker with `load_subtitle_file(url, kExternalSubtitleTrack + n, options, &file, &err)`
+and handed to `controller->add_subtitle_track(file.info, file.cues)`. It joins the track list and is
+kept through seeks and reloads until the next `open()`. Example D's `{"subs": [...]}` shows how.
 
 Host builds have no NDL or Starfish. `PacingBackend` is the no-output stand-in (Example D uses it
 when neither backend loads). Playback tests on the host check the controller, not the picture.
@@ -844,7 +848,7 @@ Say these are missing. Do not emulate them with a fake.
 | No second window, no overlay window | One SDL window, one GLES context. |
 | No durable filesystem on Developer Mode webOS | Persist with DB8. |
 | `keymanager3` absent on webOS 6.5.3 | Secrets are plain envelopes there unless `protection()` says otherwise. |
-| TTML subtitles, external subtitle files, ASS styling, audio-only bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
+| TTML subtitles, ASS styling, audio-only bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
 | Home and Exit as background/close paths | Not fully measured. The shell already handles `SDL_QUIT` and background events. |
 | Jellyfin/Plex/Emby clients | Not in the tree. A client would be an app on top of HTTP + this UI + this player, not a change to `media/`. |
 

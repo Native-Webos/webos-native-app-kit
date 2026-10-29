@@ -32,6 +32,8 @@
 //   {"audio": "5:2,9:1"}                   scripted audio track changes (seconds after the player opens:
 //                                          stream index), for checking the switch without a remote
 //   {"speeds": "5:1.5,15:1"}               scripted playback speeds (seconds after the player opens: speed)
+//   {"subs": ["http://.../film.srt"]}      subtitle files beside the media (SubRip, WebVTT, ASS; a
+//                                          string or a list), added as tracks; the first is shown
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"backend": "ndl"}                     force NDL (default: Starfish when the codecs suit it, else NDL)
 //   {"backend": "starfish"}                force LG's Starfish pipeline
@@ -121,6 +123,7 @@ struct Settings {
     std::shared_ptr<wnk::net::HttpTransport> http;  // null if libcurl is unavailable
     ContentKeys keys;         // ClearKey content keys ({"keys": ...})
     std::string license_url;  // ClearKey licence server ({"licenseUrl": ...}); else the manifest's
+    std::vector<std::string> subtitle_files;  // {"subs": ...}: added as tracks beside the media
 };
 
 std::string clock_text(int64_t us) {
@@ -189,7 +192,8 @@ std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &u
 class PlayerScreen : public Screen {
  public:
     PlayerScreen(wnk::app::Context &ctx, const Settings &s, std::string uri, std::string title)
-        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks), audio_switches_(s.audio_switches), speeds_(s.speeds), caps_(s.caps) {
+        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks), audio_switches_(s.audio_switches), speeds_(s.speeds), caps_(s.caps),
+          subtitle_files_(s.subtitle_files), http_(s.http) {
         name = "player";
         // Under the controls: subtitles over the whole picture.
         subs_view_ = &add<SubtitleView>();
@@ -246,6 +250,7 @@ class PlayerScreen : public Screen {
             opened_ = true;
             WNK_LOGI(kCat, "opening %s with %s", uri_.c_str(), backend_name_.c_str());
             controller_->open(uri_);
+            for (size_t i = 0; i < subtitle_files_.size(); ++i) load_subtitles(subtitle_files_[i], kExternalSubtitleTrack + static_cast<int>(i));
         }
     }
     void on_hide(Ui &ui) override { ui.set_clear_color(std::nullopt); }
@@ -477,6 +482,40 @@ class PlayerScreen : public Screen {
         WNK_LOGI(kCat, "tracks menu open, focus=%s", f != nullptr ? f->name.c_str() : "<none>");
     }
 
+    // A subtitle file beside the media: read whole on a worker, then added as a track and shown if
+    // nothing else is.
+    void load_subtitles(const std::string &url, int track) {
+        FfmpegSourceOptions o;
+        o.http = http_;
+        struct Loaded {
+            bool ok = false;
+            SubtitleFile file;
+            std::string error;
+        };
+        wnk::async::run_then_post<Loaded>(
+            ctx_.pool(), ctx_.dispatcher(), life_.weak(), {},
+            [url, track, o](const wnk::async::CancellationToken &cancel) {
+                Loaded l;
+                l.ok = load_subtitle_file(url, track, o, &l.file, &l.error, [&cancel] { return cancel.cancelled(); });
+                return l;
+            },
+            [this, url](Loaded l) {
+                if (!l.ok) {
+                    WNK_LOGW(kCat, "subtitle file %s: %s", url.c_str(), l.error.c_str());
+                    return;
+                }
+                const std::string path = url.substr(0, url.find_first_of("?#"));
+                l.file.info.title = path.substr(path.find_last_of('/') + 1);
+                const int index = l.file.info.index;
+                WNK_LOGI(kCat, "subtitle file %s: %zu cues as track %d", l.file.info.title.c_str(), l.file.cues.size(), index);
+                controller_->add_subtitle_track(l.file.info, std::move(l.file.cues));
+                tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(), [index](const TrackInfo &t) { return t.index == index; }),
+                              tracks_.end());
+                tracks_.push_back(l.file.info);
+                if (controller_->subtitle_track() < 0) select_subtitles(index);
+            });
+    }
+
     // Off → each subtitle track this build can draw → off.
     void next_subtitles() {
         std::vector<int> order{-1};
@@ -539,7 +578,10 @@ class PlayerScreen : public Screen {
     size_t next_speed_ = 0;
     std::vector<std::pair<double, double>> caps_;
     size_t next_cap_ = 0;
+    std::vector<std::string> subtitle_files_;
+    std::shared_ptr<wnk::net::HttpTransport> http_;
     AdaptiveSource *adaptive_ = nullptr;  // owned by controller_; null for files
+    wnk::async::Lifetime life_;  // last: worker results for a closed screen are dropped
 };
 
 // ---- experiment: DRM through the platform pipeline -----------------------------------------------
@@ -961,6 +1003,12 @@ class Player : public wnk::app::Delegate {
             timed("speeds", &s.speeds);
             timed("capKbps", &s.caps);
             if (params.contains("codecs") && params["codecs"].is_string()) s.codecs = params["codecs"];
+            if (params.contains("subs") && params["subs"].is_string()) s.subtitle_files.push_back(params["subs"]);
+            if (params.contains("subs") && params["subs"].is_array()) {
+                for (const auto &f : params["subs"]) {
+                    if (f.is_string()) s.subtitle_files.push_back(f);
+                }
+            }
             if (params.contains("startKbps") && params["startKbps"].is_number_integer()) {
                 s.start_bps = std::clamp<int64_t>(params["startKbps"].get<int64_t>(), 100, 1000000) * 1000;
             }

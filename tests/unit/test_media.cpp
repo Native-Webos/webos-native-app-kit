@@ -577,6 +577,60 @@ TEST("controller: subtitle packets go to the store, never to the backend; the se
     r.pc->stop();
 }
 
+TEST("controller: a subtitle file added beside the media joins the tracks, survives a reload, goes with the next open") {
+    Rig r(std::make_unique<ScriptedSource>(3000000));
+    TrackInfo side;
+    side.index = kExternalSubtitleTrack;
+    side.type = TrackType::Subtitle;
+    side.subtitle = SubtitleKind::Text;
+    side.language = "fra";
+    auto cue = std::make_shared<SubtitleCue>();
+    cue->track = kExternalSubtitleTrack;
+    cue->start_us = 0;
+    cue->end_us = 60000000;
+    cue->text = "bonjour";
+    // Refused: not a subtitle track, an index a demuxer could use, a cue for another track.
+    TrackInfo video = side;
+    video.type = TrackType::Video;
+    CHECK(!r.pc->add_subtitle_track(video, {cue}));
+    TrackInfo low = side;
+    low.index = 3;
+    CHECK(!r.pc->add_subtitle_track(low, {cue}));
+    auto other = std::make_shared<SubtitleCue>(*cue);
+    other->track = kExternalSubtitleTrack + 1;
+    CHECK(!r.pc->add_subtitle_track(side, {other}));
+
+    r.pc->open("x");
+    CHECK(r.pc->add_subtitle_track(side, {cue}));  // before the open is processed: kept through it
+    r.pc->set_subtitle_track(kExternalSubtitleTrack);
+    r.pc->play();
+    REQUIRE(r.wait_state(PlayState::Playing));
+    const auto has_side = [&r] {
+        const auto tracks = r.pc->snapshot().info.tracks;
+        return std::count_if(tracks.begin(), tracks.end(), [](const TrackInfo &t) { return t.index == kExternalSubtitleTrack; });
+    };
+    CHECK_EQ(has_side(), 1);
+    REQUIRE(r.wait([&] { return !r.pc->subtitles_now().empty(); }));
+    CHECK_EQ(r.pc->subtitles_now()[0]->text, std::string("bonjour"));
+    // Added again while open: replaced, not doubled.
+    CHECK(r.pc->add_subtitle_track(side, {cue}));
+    CHECK_EQ(has_side(), 1);
+    // A reload (pause that gives the decoder back, then play) keeps it.
+    r.pc->pause_and_release();
+    REQUIRE(r.wait([&] { return r.log->unloads.load() >= 1; }));
+    r.pc->play();
+    REQUIRE(r.wait_state(PlayState::Playing));
+    CHECK_EQ(r.pc->subtitle_store().count(kExternalSubtitleTrack), 1u);
+    // Another media: gone.
+    r.transitions.clear();  // so the wait below sees the new open, not the old Playing
+    r.pc->open("y");
+    r.pc->play();
+    REQUIRE(r.wait_state(PlayState::Playing));
+    CHECK_EQ(has_side(), 0);
+    CHECK_EQ(r.pc->subtitle_store().count(kExternalSubtitleTrack), 0u);
+    r.pc->stop();
+}
+
 TEST("controller: audio stored far ahead of its video does not hold the video back") {
     PlaybackOptions o;
     o.max_lead_us = 1000000;

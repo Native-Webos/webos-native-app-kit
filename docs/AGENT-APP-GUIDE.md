@@ -732,7 +732,10 @@ URI's key. SAMPLE-AES in MPEG-TS and FairPlay (`skd://`) are refused with the re
 (IMSC in fMP4) is listed and not decoded. Video bitrate switching is on (`adaptive_bitrate`, default on), and so is DASH audio within its
 AdaptationSet: Representations of the same codec, channels and sample rate, chosen from what the
 video's bitrate leaves of the throughput estimate and of `set_bandwidth_limit`, so the backend's
-audio format never changes. `audio_switches()` counts them. HLS audio stays on its rendition.
+audio format never changes. `audio_switches()` counts them. In HLS, where each variant names an
+audio group (one per bitrate tier), the audio follows the video's variant into its group, matched on
+language, codec and channels (NAME only chooses among several in one group); the copies in the
+groups are one audio track.
 
 A static MPD may have several Periods (chapters, inserted clips). Each rendition continues into the
 matching one of the next Period (same AdaptationSet and Representation ids, else same type, language
@@ -869,7 +872,7 @@ Say these are missing. Do not emulate them with a fake.
 | No second window, no overlay window | One SDL window, one GLES context. |
 | No durable filesystem on Developer Mode webOS | Persist with DB8. |
 | `keymanager3` absent on webOS 6.5.3 | Secrets are plain envelopes there unless `protection()` says otherwise. |
-| TTML in HLS, TTML styling and images, HLS audio bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
+| TTML in HLS, TTML styling and images, DASH sidx boxes that index other sidx boxes | Not implemented. |
 | Home and Exit as background/close paths | Not fully measured. The shell already handles `SDL_QUIT` and background events. |
 | Jellyfin/Plex/Emby clients | Not in the tree. A client would be an app on top of HTTP + this UI + this player, not a change to `media/`. |
 

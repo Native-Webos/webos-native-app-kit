@@ -55,7 +55,9 @@
 // when a Period ends, and a seek starts in the Period holding the target. Bitrate switching and
 // subtitles follow the first Period's renditions only.
 // WebM renditions (VP9, Opus) play like fMP4 ones; with SegmentBase their Cues are the index.
-// Not yet: audio bitrate switching in HLS (audio groups per variant), TTML in HLS (IMSC in fMP4), encrypted renditions without ClearKey keys
+// HLS audio in groups per variant follows the video's variant into its group (the same language,
+// codec and channels), and the copies in each group are one audio track.
+// Not yet: TTML in HLS (IMSC in fMP4), encrypted renditions without ClearKey keys
 // (refused), hierarchical sidx indexes.
 #pragma once
 

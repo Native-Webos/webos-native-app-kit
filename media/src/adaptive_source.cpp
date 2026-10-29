@@ -373,10 +373,12 @@ struct AdaptiveSource::Impl {
     std::condition_variable refresh_cv;
     std::vector<int> ladder;        // video renditions that can replace each other, bandwidth ascending
     std::vector<int> active_ladder; // the part of it the backend can follow (select)
-    // DASH: the separate audio lane's Representations that differ only in bitrate (same
-    // AdaptationSet, codec, channels and rate, so the backend's audio format never changes),
-    // bandwidth ascending; fewer than two: the audio stays as selected.
+    // The separate audio lane's renditions that differ only in bitrate, bandwidth ascending; fewer
+    // than two: the audio stays as selected. DASH: Representations of one AdaptationSet with the same
+    // codec, channels and rate, so the backend's audio format never changes. HLS: the same audio in
+    // each audio group, one per group; it follows the video's variant.
     std::vector<int> audio_ladder;
+    int follow_tried = -1;  // HLS: the audio rendition last tried for the video's variant
     ThroughputEstimator estimator;
     std::atomic<int64_t> limit_bps{0};
     // What the last decision of each lane saw (0 video, 1 audio): decide again only on news.
@@ -917,13 +919,33 @@ struct AdaptiveSource::Impl {
         return r >= 0 ? pres.renditions[static_cast<size_t>(r)].bandwidth : 0;
     }
 
-    // DASH audio Representations that can replace `base` mid-stream, bandwidth ascending.
+    // Audio renditions that can replace `base` mid-stream (see audio_ladder), bandwidth ascending.
     void build_audio_ladder(int base) {
         audio_ladder.clear();
-        if (pres.format != Presentation::Format::Dash) return;  // HLS: audio groups follow the variant
         const Rendition &b = pres.renditions[static_cast<size_t>(base)];
         const std::string codec = lower(codec_entry(b.codecs, TrackType::Audio));
-        for (size_t i = 0; i < pres.renditions.size(); ++i) {
+        if (pres.format == Presentation::Format::Hls) {
+            if (b.group.empty()) return;  // an audio-only variant: no groups to move between
+            // Groups may name the same audio differently (ffmpeg: "audio_2", "audio_3"): match on
+            // language, codec and channels, and on NAME only to choose among several in one group.
+            std::map<std::string, std::vector<int>> by_group;
+            for (size_t i = 0; i < pres.renditions.size(); ++i) {
+                const Rendition &r = pres.renditions[i];
+                if (r.type != TrackType::Audio || r.group.empty() || r.language != b.language || r.channels != b.channels ||
+                    lower(codec_entry(r.codecs, TrackType::Audio)) != codec) {
+                    continue;
+                }
+                by_group[r.group].push_back(static_cast<int>(i));
+            }
+            for (const auto &[group, ks] : by_group) {
+                int pick = ks.size() == 1 ? ks[0] : -1;
+                for (int k : ks) {
+                    if (k == base || (pick < 0 && pres.renditions[static_cast<size_t>(k)].label == b.label)) pick = k;
+                }
+                if (pick >= 0) audio_ladder.push_back(pick);  // several and none by that name: not guessed
+            }
+        }
+        for (size_t i = 0; i < pres.renditions.size() && pres.format == Presentation::Format::Dash; ++i) {
             const Rendition &r = pres.renditions[i];
             if (r.type != TrackType::Audio || r.period != b.period || r.group != b.group || !decryptable(r, opt.keys)) continue;
             if (lower(codec_entry(r.codecs, TrackType::Audio)) != codec || r.channels != b.channels ||
@@ -948,6 +970,18 @@ struct AdaptiveSource::Impl {
         const int64_t limit = limit_bps.load();
         if (lanes[0].want_video) maybe_switch_lane(0, active_ladder, estimate, limit, 0);
         Lane &a = lanes.back();
+        if (pres.format == Presentation::Format::Hls) {
+            // The variant's BANDWIDTH counts its own group's audio: the audio follows the video.
+            if (audio_ladder.size() > 1 && lanes.size() > 1 && lanes[0].want_video && a.want_audio && !a.next &&
+                a.reader != nullptr && !a.ended) {
+                const int want = variant_audio(lanes[0].next ? lanes[0].next->rendition : lanes[0].rendition, a.rendition);
+                if (want != a.rendition && want != follow_tried) {
+                    follow_tried = want;  // once per change: a failed or too-late switch is not retried
+                    start_switch(lanes.size() - 1, want, "following the video");
+                }
+            }
+            return;
+        }
         if (audio_ladder.size() > 1 && !a.want_video && a.want_audio) {
             const int64_t video_bw = lanes[0].want_video ? lane_bandwidth(lanes[0]) : 0;
             const int64_t left = estimate > 0 ? std::max<int64_t>(1, estimate - video_bw) : 0;
@@ -965,7 +999,6 @@ struct AdaptiveSource::Impl {
         if (samples == decided_samples[slot] && raw_limit == decided_limit[slot]) return;  // nothing new to decide on
         decided_samples[slot] = samples;
         decided_limit[slot] = raw_limit;
-        const char *what = v.want_video ? "video" : "audio";
         const auto at = std::find(rungs.begin(), rungs.end(), v.rendition);
         if (at == rungs.end()) return;
         std::vector<int64_t> bws;
@@ -973,7 +1006,32 @@ struct AdaptiveSource::Impl {
         const int current = static_cast<int>(at - rungs.begin());
         const int target = choose_rung(bws, current, estimate, limit);
         if (target == current || target < 0) return;
-        const int to_index = rungs[static_cast<size_t>(target)];
+        start_switch(index, rungs[static_cast<size_t>(target)], ("throughput " + mbps(estimate)).c_str());
+    }
+
+    // HLS: the audio rendition that plays beside `variant`: `audio` if its group serves the variant
+    // (one video playlist may be listed once per group), else its rung in a group that does.
+    int variant_audio(int variant, int audio) const {
+        const Rendition &v = pres.renditions[static_cast<size_t>(variant)];
+        auto serves = [&](const std::string &group) {
+            return std::any_of(pres.renditions.begin(), pres.renditions.end(), [&](const Rendition &o) {
+                return o.type == TrackType::Video && o.audio_group == group && o.playlist_url == v.playlist_url;
+            });
+        };
+        if (serves(pres.renditions[static_cast<size_t>(audio)].group)) return audio;
+        int found = audio;
+        for (int k : audio_ladder) {
+            const std::string &g = pres.renditions[static_cast<size_t>(k)].group;
+            if (g == v.audio_group) return k;
+            if (found == audio && serves(g)) found = k;
+        }
+        return found;
+    }
+
+    // Starts switching lane `index` to rendition `to_index` at its next segment boundary.
+    void start_switch(size_t index, int to_index, const char *reason) {
+        Lane &v = lanes[index];
+        const char *what = v.want_video ? "video" : "audio";
         Rendition &to = pres.renditions[static_cast<size_t>(to_index)];
         std::string why;
         if (!ensure_segments(to, &why)) {
@@ -1019,8 +1077,8 @@ struct AdaptiveSource::Impl {
         sw.reader = make_reader(to, first);  // prefetches while the old rendition plays out
         std::lock_guard<std::mutex> lock(lanes_mutex);
         v.next = std::move(sw);
-        WNK_LOGI(kCat, "throughput %s: switching %s %s -> %s at segment %zu", mbps(estimate).c_str(), what,
-                 mbps(from.bandwidth).c_str(), mbps(to.bandwidth).c_str(), boundary);
+        WNK_LOGI(kCat, "%s: switching %s %s -> %s at segment %zu", reason, what, mbps(from.bandwidth).c_str(),
+                 mbps(to.bandwidth).c_str(), boundary);
     }
 
     void close_lanes() {
@@ -1561,6 +1619,24 @@ struct AdaptiveSource::Impl {
                     *same = static_cast<int>(i);
                 }
             }
+            if (pres.format == Presentation::Format::Hls) {
+                // The same audio in several groups (one per bitrate tier) is one choice: offer the
+                // rendition of the video's group.
+                std::vector<int> kept;
+                for (int k : picks) {
+                    bool covered = false;
+                    for (int &c : kept) {
+                        build_audio_ladder(c);
+                        if (std::find(audio_ladder.begin(), audio_ladder.end(), k) == audio_ladder.end()) continue;
+                        covered = true;
+                        if (pres.renditions[static_cast<size_t>(k)].group == v.audio_group) c = k;
+                        break;
+                    }
+                    if (!covered) kept.push_back(k);
+                }
+                audio_ladder.clear();
+                picks = std::move(kept);
+            }
             for (int k : picks) audio_choices.push_back({k, false});
         }
         // One default: the preferred language, else what the manifest marks, else the first.
@@ -1809,6 +1885,7 @@ bool AdaptiveSource::select(int video_track, int audio_track, const BackendCaps 
     m.decided_samples[0] = m.decided_samples[1] = 0;
     m.decided_limit[0] = m.decided_limit[1] = 0;
     m.audio_ladder.clear();
+    m.follow_tried = -1;
     if (video_track > 0 || audio_track == 0 ||
         (audio_track > 0 && static_cast<size_t>(audio_track - 1) >= m.audio_choices.size())) {
         *error = "no such track";
@@ -1829,7 +1906,14 @@ bool AdaptiveSource::select(int video_track, int audio_track, const BackendCaps 
         if (!m.ensure_segments(r, error)) return false;
         Impl::Lane aux;
         aux.rendition = audio->rendition;
-        if (m.opt.adaptive_bitrate) {
+        if (m.pres.format == Presentation::Format::Hls) {
+            // The audio of the video's own variant (its group); with bitrate switching it follows the video.
+            m.build_audio_ladder(audio->rendition);
+            if (with_video) aux.rendition = m.variant_audio(m.video, audio->rendition);
+            if (!m.opt.adaptive_bitrate || !with_video) m.audio_ladder.clear();
+            Rendition &sr = m.pres.renditions[static_cast<size_t>(aux.rendition)];
+            if (!m.ensure_segments(sr, error)) return false;
+        } else if (m.opt.adaptive_bitrate) {
             m.build_audio_ladder(audio->rendition);
             if (m.audio_ladder.size() > 1) {
                 // Start at the best rung that fits beside the video in the assumed bandwidth.

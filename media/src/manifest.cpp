@@ -1026,6 +1026,13 @@ bool parse_hls(const std::string &text, const std::string &url, Presentation *ou
             }
         }
     }
+    // Audio renditions declare no BANDWIDTH; an audio-only variant on the same playlist does.
+    for (Rendition &r : media) {
+        if (r.type != TrackType::Audio || r.group.empty() || r.bandwidth > 0) continue;
+        for (const Rendition &v : media) {
+            if (v.type == TrackType::Audio && v.group.empty() && v.playlist_url == r.playlist_url) r.bandwidth = v.bandwidth;
+        }
+    }
     out->renditions = std::move(media);
     if (out->renditions.empty()) {
         *error = "master playlist without variants";

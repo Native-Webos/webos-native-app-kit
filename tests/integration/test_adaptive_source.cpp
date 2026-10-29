@@ -117,6 +117,18 @@ bool make_presentations() {
             "-f dash -seg_duration 2 -adaptation_sets 'id=0,streams=v id=1,streams=a' "
             "-init_seg_name 'la-init-$RepresentationID$.m4s' -media_seg_name 'la-$RepresentationID$-$Number%05d$.m4s' la.mpd";
         if (std::system(audio_ladder.c_str()) != 0) return false;
+        // HLS bitrate tiers: 160x120 with 48 kb/s audio (group_alo), 640x480 with 160 kb/s audio
+        // (group_ahi), 20 s. ffmpeg names the two audio renditions differently ("audio_2", "audio_3").
+        const std::string hls_tiers =
+            "cd '" + d + "' && ffmpeg -hide_banner -loglevel error -y "
+            "-f lavfi -i testsrc2=size=640x480:rate=25:duration=20 "
+            "-f lavfi -i sine=frequency=440:sample_rate=48000:duration=20 -map 0:v -map 0:v -map 1:a -map 1:a "
+            "-c:v libx264 -g 25 -keyint_min 25 -sc_threshold 0 -c:a aac -s:v:0 160x120 -b:v:0 100k "
+            "-s:v:1 640x480 -b:v:1 1500k -b:a:0 48k -b:a:1 160k -f hls -hls_time 2 -hls_playlist_type vod "
+            "-hls_segment_type fmp4 -hls_fmp4_init_filename 'ha_init_%v.mp4' -hls_segment_filename 'ha_%v_%03d.m4s' "
+            "-master_pl_name ha.m3u8 -var_stream_map 'v:0,agroup:alo v:1,agroup:ahi "
+            "a:0,agroup:alo,language:en,name:alo a:1,agroup:ahi,language:en,name:ahi' 'ha_%v.m3u8'";
+        if (std::system(hls_tiers.c_str()) != 0) return false;
         // Subtitles: ten cues "Cue N" at N.2-N.8 s, as HLS WebVTT segments (no X-TIMESTAMP-MAP from
         // ffmpeg) and as a DASH text/vtt file added to a copy of d.mpd.
         std::string srt, vtt = "WEBVTT\n\n";
@@ -999,6 +1011,69 @@ TEST("adaptive source: DASH audio switches bitrate within its AdaptationSet, bes
     bool even = true;
     for (size_t i = 1; i < audio.size(); ++i) {
         const int64_t step = audio[i] - audio[i - 1];
+        even = even && step > 20000 && step < 22700;
+    }
+    CHECK(even);
+}
+
+TEST("adaptive source: HLS audio follows the video's variant into its audio group, seamlessly") {
+    SKIP_UNLESS_READY();
+    AdaptiveSourceOptions o = options();
+    o.initial_bandwidth = 3000000;  // starts on the high tier
+    o.max_ahead_us = 4000000;
+    AdaptiveSource s(o);
+    std::string err;
+    REQUIRE(s.open(url("ha.m3u8"), &err));
+    const Presentation &pres = s.presentation();
+    REQUIRE(s.info().tracks.size() == 2);  // one audio track: the tiers' copies are one choice
+    auto rend = [&](int r) -> const Rendition & { return pres.renditions[static_cast<size_t>(r)]; };
+    int64_t low = 0, high = 0;
+    for (const Rendition &r : pres.renditions) {
+        if (r.type != TrackType::Audio || r.group.empty()) continue;
+        CHECK(r.bandwidth > 0);  // from the audio-only variant on the same playlist
+        (r.group == "group_alo" ? low : high) = r.bandwidth;
+    }
+    REQUIRE(low > 0 && high > low);
+    StreamFormat f;
+    REQUIRE(s.select(0, 1, starfish_like(), &f, &err));
+    CHECK_EQ(rend(s.video_rendition()).height, 480);
+    CHECK_EQ(rend(s.audio_rendition()).group, std::string("group_ahi"));
+    // Down under a limit at 2 s, up again when it is lifted at 8 s.
+    Packet p;
+    std::vector<std::pair<int64_t, bool>> video_high, audio_high;  // (pts, on the high tier)
+    int limit = 0;
+    while (s.read(&p, &err) == MediaSource::Read::Packet) {
+        if (p.type == TrackType::Video) video_high.emplace_back(p.pts_us, rend(s.video_rendition()).height == 480);
+        if (p.type != TrackType::Audio) continue;
+        audio_high.emplace_back(p.pts_us, rend(s.audio_rendition()).group == "group_ahi");
+        if (limit == 0 && p.pts_us > 2000000) {
+            limit = 1;
+            s.set_bandwidth_limit(500000);  // only the low tier fits
+        } else if (limit == 1 && p.pts_us > 8000000) {
+            limit = 2;
+            s.set_bandwidth_limit(0);
+        }
+    }
+    CHECK_EQ(video_high.size(), size_t{500});
+    // The audio matches the tier of the picture at its time but near a switch (each lane cuts at
+    // its own next boundary): at most a 2 s segment for each of the two switches.
+    std::sort(video_high.begin(), video_high.end());
+    int64_t apart_us = 0;
+    bool low_seen = false;
+    for (const auto &[pts, hi] : audio_high) {
+        auto it = std::upper_bound(video_high.begin(), video_high.end(), std::make_pair(pts, true));
+        if (it != video_high.begin() && std::prev(it)->second != hi) apart_us += 21333;
+        low_seen = low_seen || !hi;
+    }
+    CHECK(low_seen);
+    CHECK(apart_us <= 4500000);
+    CHECK(audio_high.back().second);  // back on the high tier, with the picture
+    CHECK(video_high.back().second);
+    CHECK(s.audio_switches() >= 2);
+    CHECK(audio_high.size() >= 935 && audio_high.size() <= 940);
+    bool even = true;
+    for (size_t i = 1; i < audio_high.size(); ++i) {
+        const int64_t step = audio_high[i].first - audio_high[i - 1].first;
         even = even && step > 20000 && step < 22700;
     }
     CHECK(even);

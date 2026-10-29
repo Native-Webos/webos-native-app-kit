@@ -748,6 +748,69 @@ TEST("image view: loads once laid out, draws the texture, cancels when destroyed
     CHECK_EQ(images.cancelled[0], images.pending[0].ticket);
 }
 
+namespace {
+struct AnimatedImages : FakeImages {
+    std::vector<int> delays{100, 250, 40};
+    int loops = 0;
+    std::vector<size_t> asked;  // frames drawn
+    render::TextureId texture(const std::string &) override { return texture("", 0); }
+    render::TextureId texture(const std::string &, size_t frame) override {
+        asked.push_back(frame);
+        return static_cast<render::TextureId>(10 + frame);
+    }
+    void finish() {
+        auto p = std::move(pending);
+        pending.clear();
+        for (auto &x : p) {
+            Loaded l;
+            l.ok = true;
+            l.key = x.url;
+            l.width = l.height = 100;
+            l.delays_ms = delays;
+            l.loops = loops;
+            x.done(l);
+        }
+    }
+};
+}  // namespace
+
+TEST("image view: an animation plays its frames at their own times, loops, and stops when told") {
+    Env env;
+    AnimatedImages images;
+    env.ui.set_image_source(&images);
+    auto &img = env.ui.root().add<ImageView>("file:///anim.gif");
+    img.set_size(100, 100).set_align(Align::Start, Align::Start);
+    env.frame();
+    images.finish();
+    env.frame(0.05f);
+    CHECK_EQ(img.frame_count(), size_t{3});
+    CHECK_EQ(img.frame_index(), size_t{0});
+    env.frame(0.06f);  // 110 ms: past the first frame's 100
+    CHECK_EQ(img.frame_index(), size_t{1});
+    CHECK_EQ(images.asked.back(), size_t{1});
+    env.frame(0.25f);  // 360 ms: the 40 ms frame
+    CHECK_EQ(img.frame_index(), size_t{2});
+    env.frame(0.05f);  // 410 ms: forever, so back to the start
+    CHECK_EQ(img.frame_index(), size_t{0});
+    img.set_animate(false);
+    env.frames(30, 0.1f);
+    CHECK_EQ(img.frame_index(), size_t{0});
+
+    // Played a set number of times: it ends on the last frame.
+    AnimatedImages twice;
+    twice.loops = 2;
+    twice.delays = {100, 100};
+    env.ui.set_image_source(&twice);
+    auto &once_more = env.ui.root().add<ImageView>("file:///twice.webp");
+    once_more.set_size(100, 100).set_align(Align::Start, Align::Start);
+    env.frame();
+    twice.finish();
+    for (int i = 0; i < 20; ++i) env.frame(0.05f);  // 1 s: two plays of 200 ms, then still
+    CHECK_EQ(once_more.frame_index(), size_t{1});
+    env.frames(10, 0.1f);
+    CHECK_EQ(once_more.frame_index(), size_t{1});
+}
+
 TEST("scroll view: focusing a view below the fold scrolls it into view") {
     Env env;
     auto &sv = env.ui.root().add<ScrollView>();

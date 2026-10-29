@@ -102,6 +102,12 @@ class Renderer {
     // Resources.
     virtual TextureId create_texture(int width, int height, const uint8_t *rgba) = 0;
     virtual bool destroy_texture(TextureId id) = 0;
+    // Replaces a texture's pixels in place (same size), for animations. False if it cannot: the
+    // caller then creates a new texture instead.
+    virtual bool update_texture(TextureId id, int width, int height, const uint8_t *rgba) {
+        (void)id, (void)width, (void)height, (void)rgba;
+        return false;
+    }
     virtual FontId load_font(std::vector<uint8_t> ttf, std::string *error = nullptr) = 0;
     virtual FontId load_font_file(const std::string &path, std::string *error = nullptr) = 0;
 

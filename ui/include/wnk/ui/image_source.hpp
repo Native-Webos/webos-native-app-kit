@@ -19,6 +19,7 @@ class ServiceImageSource : public ImageSource {
     Ticket load(const std::string &url, int max_w, int max_h, std::function<void(Loaded)> done) override;
     void cancel(Ticket ticket) override { service_.cancel(ticket); }
     render::TextureId texture(const std::string &key) override;
+    render::TextureId texture(const std::string &key, size_t frame) override;
 
  private:
     image::ImageService &service_;

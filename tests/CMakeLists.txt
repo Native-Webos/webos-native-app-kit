@@ -14,7 +14,7 @@ target_link_libraries(test_async PRIVATE wnk_async)
 target_link_libraries(test_http PRIVATE wnk_net)
 target_link_libraries(test_http_stream PRIVATE wnk_net)
 target_link_libraries(test_segment_reader PRIVATE wnk_net)
-target_link_libraries(test_image PRIVATE wnk_image)
+target_link_libraries(test_image PRIVATE wnk_image wnk_image_textures)
 target_link_libraries(test_ui PRIVATE wnk_ui)
 target_link_libraries(test_lifecycle PRIVATE wnk_lifecycle wnk_diagnostics)
 target_link_libraries(test_crash PRIVATE wnk_diagnostics)
@@ -42,6 +42,7 @@ target_link_libraries(test_blob PRIVATE wnk_storage)
 target_link_libraries(test_audio PRIVATE wnk_audio Threads::Threads)
 target_include_directories(test_secret SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 target_include_directories(test_image SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
+target_compile_definitions(test_image PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
 # Compile checks: ignoring the result of HttpClient::send / auth::Session::send (false = on_done is
 # never called) must not build with -Werror=unused-result; checking it must. The probes are built by

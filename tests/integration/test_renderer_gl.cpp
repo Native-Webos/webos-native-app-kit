@@ -254,6 +254,39 @@ TEST("glyph atlas resets when full and text still renders") {
     CHECK(lit > 50);
 }
 
+TEST("update_texture replaces the pixels in place, changes the fingerprint, refuses another size") {
+    SKIP_WITHOUT_GL();
+    auto &r = *env().r;
+    const uint8_t red[16] = {255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255};
+    const uint8_t green[16] = {0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255};
+    TextureId t = r.create_texture(2, 2, red);
+    REQUIRE(t != kNoTexture);
+    auto draw = [&] {
+        frame();
+        r.clear(kBlack);
+        r.draw_image(t, {0, 0, 50, 50});
+        r.end_frame();
+        return r.frame_fingerprint();
+    };
+    const uint64_t before = draw();
+    CHECK(near(pixel(20, 20), 255, 0, 0, 255, 4));
+    // Queued, not yet flushed, then updated: the earlier quad keeps the old pixels.
+    frame();
+    r.clear(kBlack);
+    r.draw_image(t, {0, 0, 50, 50});
+    REQUIRE(r.update_texture(t, 2, 2, green));
+    r.draw_image(t, {100, 0, 50, 50});
+    r.end_frame();
+    CHECK(near(pixel(20, 20), 255, 0, 0, 255, 4));
+    CHECK(near(pixel(120, 20), 0, 255, 0, 255, 4));
+    CHECK(draw() != before);
+    CHECK(near(pixel(20, 20), 0, 255, 0, 255, 4));
+    CHECK(!r.update_texture(t, 1, 1, green));
+    CHECK(!r.update_texture(t + 999, 2, 2, green));
+    CHECK_EQ(r.stats().textures, 1u);
+    r.destroy_texture(t);
+}
+
 TEST("frame fingerprint: equal for identical frames, different for any visible change") {
     SKIP_WITHOUT_GL();
     auto &r = *env().r;

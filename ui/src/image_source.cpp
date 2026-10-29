@@ -12,16 +12,23 @@ ImageSource::Ticket ServiceImageSource::load(const std::string &url, int max_w, 
         if (r.image) {
             l.width = r.image->width;
             l.height = r.image->height;
+            l.delays_ms = r.image->delays_ms;
+            l.loops = r.image->loops;
         }
         if (!l.ok) l.error = std::string(image::error_name(r.error)) + (r.detail.empty() ? "" : ": " + r.detail);
         done(std::move(l));
     });
 }
 
-render::TextureId ServiceImageSource::texture(const std::string &key) {
-    if (const render::TextureId t = textures_.find(key); t != render::kNoTexture) return t;
+render::TextureId ServiceImageSource::texture(const std::string &key) { return texture(key, 0); }
+
+render::TextureId ServiceImageSource::texture(const std::string &key, size_t frame) {
+    if (const render::TextureId t = textures_.find_frame(key, frame); t != render::kNoTexture) return t;
+    // Another frame needs the pixels, which the memory cache keeps while the animation shows. Evicted:
+    // the frame on screen stays (still images: load again).
     const auto img = service_.memory().get(key);
-    return img ? textures_.acquire(key, *img) : render::kNoTexture;
+    if (!img) return frame == 0 ? render::kNoTexture : textures_.find(key);
+    return textures_.acquire_frame(key, *img, frame);
 }
 
 }  // namespace wnk::ui

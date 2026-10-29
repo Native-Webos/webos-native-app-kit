@@ -16,13 +16,42 @@ render::TextureId ImageTextures::find(const std::string &key) {
     return it->second.id;
 }
 
+render::TextureId ImageTextures::find_frame(const std::string &key, size_t frame) {
+    auto it = map_.find(key);
+    if (it == map_.end() || it->second.shown != frame) return render::kNoTexture;
+    touch(it->second, key);
+    return it->second.id;
+}
+
 render::TextureId ImageTextures::acquire(const std::string &key, const ImageRGBA &image) {
-    if (const render::TextureId id = find(key)) return id;
-    const render::TextureId id = r_.create_texture(image.width, image.height, image.pixels.data());
+    return acquire_frame(key, image, 0);
+}
+
+render::TextureId ImageTextures::acquire_frame(const std::string &key, const ImageRGBA &image, size_t frame) {
+    frame = frame < image.frame_count() ? frame : 0;
+    const std::vector<uint8_t> &px = image.frame(frame);
+    auto it = map_.find(key);
+    if (it != map_.end()) {
+        Slot &s = it->second;
+        touch(s, key);
+        if (s.shown == frame) return s.id;
+        if (r_.update_texture(s.id, image.width, image.height, px.data())) {
+            s.shown = frame;
+            return s.id;
+        }
+        // No in-place update: a new texture for this frame.
+        const render::TextureId id = r_.create_texture(image.width, image.height, px.data());
+        if (id == render::kNoTexture) return s.id;  // keep showing the last frame
+        r_.destroy_texture(s.id);
+        s.id = id;
+        s.shown = frame;
+        return id;
+    }
+    const render::TextureId id = r_.create_texture(image.width, image.height, px.data());
     if (id == render::kNoTexture) return id;
     order_.push_front(key);
-    map_[key] = Slot{id, image.bytes(), frame_, order_.begin()};
-    bytes_ += image.bytes();
+    map_[key] = Slot{id, px.size(), frame_, order_.begin(), frame};
+    bytes_ += px.size();
     return id;
 }
 

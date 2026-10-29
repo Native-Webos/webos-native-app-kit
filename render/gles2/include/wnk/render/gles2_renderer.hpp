@@ -51,6 +51,7 @@ class Gles2Renderer final : public Renderer {
 
     TextureId create_texture(int width, int height, const uint8_t *rgba) override;
     bool destroy_texture(TextureId id) override;
+    bool update_texture(TextureId id, int width, int height, const uint8_t *rgba) override;
     FontId load_font(std::vector<uint8_t> ttf, std::string *error = nullptr) override;
     FontId load_font_file(const std::string &path, std::string *error = nullptr) override;
 

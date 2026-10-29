@@ -3,12 +3,15 @@
 #include "wnk_test.hpp"
 
 #include "wnk/image/image.hpp"
+#include "wnk/image/textures.hpp"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_STATIC
 #include "stb_image_write.h"
 
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -548,4 +551,142 @@ TEST("WebP lossy, lossless and animated (first frame) decode") {
     tight.max_dimension = 8;
     CHECK(decode_image(lossless, 0, 0, tight).error == ImageError::TooLarge);
     CHECK(decode_image(lossless.substr(0, 30)).error == ImageError::Decode);
+}
+
+namespace {
+
+std::string fixture(const std::string &name) {
+    std::ifstream in(std::string(WNK_FIXTURES_DIR) + "/images/" + name, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Red, green and blue of frame i at its top-left pixel.
+std::array<int, 4> pixel(const ImageRGBA &img, size_t frame) {
+    const auto &px = img.frame(frame);
+    return {px[0], px[1], px[2], px[3]};
+}
+
+}  // namespace
+
+TEST("animated gif: every frame with its delay; loop counts as browsers read them") {
+    const std::string gif = fixture("anim.gif");
+    REQUIRE(!gif.empty());
+    DecodeResult r = decode_image(gif);
+    REQUIRE(r.error == ImageError::None);
+    const ImageRGBA &img = *r.image;
+    CHECK_EQ(img.width, 16);
+    CHECK_EQ(img.frame_count(), size_t{3});
+    CHECK(img.animated());
+    CHECK(img.delays_ms == (std::vector<int>{100, 250, 40}));
+    CHECK_EQ(img.loops, 0);  // NETSCAPE count 0: forever
+    CHECK((pixel(img, 0) == std::array<int, 4>{255, 0, 0, 255}));
+    CHECK((pixel(img, 1) == std::array<int, 4>{0, 255, 0, 255}));
+    CHECK((pixel(img, 2) == std::array<int, 4>{0, 0, 255, 255}));
+    CHECK_EQ(img.bytes(), size_t{16 * 8 * 4 * 3});
+    r = decode_image(fixture("anim-repeat1.gif"));
+    REQUIRE(r.image);
+    CHECK_EQ(r.image->loops, 2);  // one repeat: shown twice
+    // Scaled: every frame.
+    r = decode_image(gif, 8, 8);
+    REQUIRE(r.image);
+    CHECK_EQ(r.image->width, 8);
+    CHECK_EQ(r.image->more_frames.size(), size_t{2});
+    CHECK_EQ(r.image->frame(2).size(), size_t{8 * 4 * 4});
+    CHECK((pixel(*r.image, 2) == std::array<int, 4>{0, 0, 255, 255}));
+}
+
+TEST("animated webp: frames composited on the canvas with their delays, alpha and loop count") {
+    const DecodeResult r = decode_image(fixture("anim.webp"));
+    REQUIRE(r.error == ImageError::None);
+    const ImageRGBA &img = *r.image;
+    CHECK_EQ(img.frame_count(), size_t{3});
+    CHECK(img.delays_ms == (std::vector<int>{100, 250, 40}));
+    CHECK_EQ(img.loops, 3);
+    CHECK((pixel(img, 1) == std::array<int, 4>{0, 255, 0, 255}));
+    CHECK(pixel(img, 2)[2] == 255);
+    CHECK(std::abs(pixel(img, 2)[3] - 128) <= 1);
+}
+
+TEST("animations beyond the byte limit, or with animate off, decode to their first frame") {
+    DecodeLimits small;
+    small.max_animation_bytes = 16 * 8 * 4 * 2;  // two frames' worth: three do not fit
+    for (const char *name : {"anim.gif", "anim.webp"}) {
+        DecodeResult r = decode_image(fixture(name), 0, 0, small);
+        REQUIRE(r.image);
+        CHECK(!r.image->animated());
+        CHECK_EQ(r.image->bytes(), size_t{16 * 8 * 4});
+        CHECK((pixel(*r.image, 0) == std::array<int, 4>{255, 0, 0, 255}));
+        DecodeLimits off;
+        off.animate = false;
+        r = decode_image(fixture(name), 0, 0, off);
+        REQUIRE(r.image);
+        CHECK(!r.image->animated());
+    }
+}
+
+namespace {
+
+struct CountingRenderer final : render::Renderer {
+    int creates = 0, destroys = 0, updates = 0;
+    bool can_update = true;
+    std::vector<uint8_t> last;  // pixels of the last upload
+    void set_logical_size(Size) override {}
+    void begin_frame(int, int) override {}
+    const render::CanvasMapping &mapping() const override { return m; }
+    void clear(render::Color) override {}
+    void push_clip(const Rect &) override {}
+    void pop_clip() override {}
+    void push_translate(float, float) override {}
+    void pop_translate() override {}
+    void fill_rect(const Rect &, render::Color, float) override {}
+    void stroke_rect(const Rect &, render::Color, float, float) override {}
+    void draw_image(render::TextureId, const Rect &, render::Color, const Rect &) override {}
+    float draw_text(const render::TextStyle &, Point, std::string_view) override { return 0; }
+    float measure_text(const render::TextStyle &, std::string_view) const override { return 0; }
+    float line_height(const render::TextStyle &) const override { return 0; }
+    float ascent(const render::TextStyle &) const override { return 0; }
+    void end_frame() override {}
+    render::TextureId create_texture(int w, int h, const uint8_t *rgba) override {
+        last.assign(rgba, rgba + static_cast<size_t>(w) * h * 4);
+        return static_cast<render::TextureId>(++creates);
+    }
+    bool destroy_texture(render::TextureId) override { return ++destroys > 0; }
+    bool update_texture(render::TextureId, int w, int h, const uint8_t *rgba) override {
+        if (!can_update) return false;
+        ++updates;
+        last.assign(rgba, rgba + static_cast<size_t>(w) * h * 4);
+        return true;
+    }
+    render::FontId load_font(std::vector<uint8_t>, std::string *) override { return render::kNoFont; }
+    render::FontId load_font_file(const std::string &, std::string *) override { return render::kNoFont; }
+    render::RenderStats stats() const override { return {}; }
+    render::GpuInfo gpu_info() const override { return {}; }
+    render::CanvasMapping m;
+};
+
+}  // namespace
+
+TEST("image textures: an animation keeps one texture and replaces its pixels per frame") {
+    const DecodeResult r = decode_image(fixture("anim.gif"));
+    REQUIRE(r.image);
+    CountingRenderer gpu;
+    ImageTextures tex(gpu, 64u << 20);
+    const render::TextureId id = tex.acquire_frame("a", *r.image, 0);
+    CHECK_EQ(gpu.creates, 1);
+    CHECK_EQ(tex.acquire_frame("a", *r.image, 0), id);  // same frame: nothing uploaded
+    CHECK_EQ(gpu.updates, 0);
+    CHECK_EQ(tex.acquire_frame("a", *r.image, 1), id);
+    CHECK_EQ(gpu.updates, 1);
+    CHECK_EQ(gpu.last[1], 255);  // green
+    CHECK_EQ(tex.find_frame("a", 1), id);
+    CHECK_EQ(tex.find_frame("a", 0), render::kNoTexture);
+    CHECK_EQ(tex.bytes(), size_t{16 * 8 * 4});  // one frame on the GPU
+    gpu.can_update = false;                     // no in-place update: a new texture replaces it
+    const render::TextureId other = tex.acquire_frame("a", *r.image, 2);
+    CHECK(other != id);
+    CHECK_EQ(gpu.destroys, 1);
+    CHECK_EQ(tex.count(), size_t{1});
+    const render::TextureId first = tex.acquire_frame("a", *r.image, 7);  // out of range: frame 0
+    CHECK_EQ(tex.find_frame("a", 0), first);
+    CHECK_EQ(gpu.last[0], 255);  // red
 }

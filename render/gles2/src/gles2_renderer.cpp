@@ -534,6 +534,18 @@ bool Gles2Renderer::destroy_texture(TextureId id) {
     return true;
 }
 
+bool Gles2Renderer::update_texture(TextureId id, int width, int height, const uint8_t *rgba) {
+    auto it = textures_.find(id);
+    if (it == textures_.end() || rgba == nullptr || it->second.width != width || it->second.height != height) return false;
+    flush();  // queued quads must draw with the old pixels
+    glBindTexture(GL_TEXTURE_2D, it->second.gl);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    if (glGetError() != GL_NO_ERROR) return false;
+    ++uploads_;  // the frame fingerprint must change with the pixels
+    return true;
+}
+
 FontId Gles2Renderer::load_font(std::vector<uint8_t> ttf, std::string *error) {
     auto face = FontFace::from_bytes(std::move(ttf), error);
     if (face == nullptr) return kNoFont;

@@ -65,6 +65,8 @@ class ImageSource {
         std::string key;  // pass to texture()
         int width = 0, height = 0;
         std::string error;
+        std::vector<int> delays_ms;  // an animation: how long each frame shows; empty for a still image
+        int loops = 0;               // times to play it; 0: forever
     };
     virtual ~ImageSource() = default;
     // Starts loading; `done` runs later on the main thread, never inside this call and never after
@@ -74,6 +76,11 @@ class ImageSource {
     // GPU texture for a loaded key, uploading if needed. kNoTexture if the pixels were evicted, in
     // which case the caller loads again.
     virtual render::TextureId texture(const std::string &key) = 0;
+    // Frame `frame` of an animation (Loaded::delays_ms). Sources without animations show frame 0.
+    virtual render::TextureId texture(const std::string &key, size_t frame) {
+        (void)frame;
+        return texture(key);
+    }
 };
 
 // What moved focus last; scrolling containers follow keyboard and programmatic focus but not hover,

@@ -29,8 +29,20 @@ namespace wnk::image {
 
 struct ImageRGBA {
     int width = 0, height = 0;
-    std::vector<uint8_t> pixels;  // width*height*4, straight alpha, top row first
-    size_t bytes() const { return pixels.size(); }
+    std::vector<uint8_t> pixels;  // width*height*4, straight alpha, top row first (an animation's first frame)
+    // Animations (GIF, WebP): each frame whole (composited as the format says), with how long it shows.
+    // A still image has no delays and no more_frames.
+    std::vector<int> delays_ms;                    // one per frame, the first frame's included
+    std::vector<std::vector<uint8_t>> more_frames;  // frames 1..n-1, each like `pixels`
+    int loops = 0;                                  // times to play; 0: forever
+    size_t frame_count() const { return delays_ms.empty() ? 1 : delays_ms.size(); }
+    bool animated() const { return frame_count() > 1; }
+    const std::vector<uint8_t> &frame(size_t i) const { return i == 0 || i > more_frames.size() ? pixels : more_frames[i - 1]; }
+    size_t bytes() const {
+        size_t n = pixels.size();
+        for (const auto &f : more_frames) n += f.size();
+        return n;
+    }
 };
 
 enum class ImageError { None, Network, HttpStatus, NotFound, Decode, TooLarge, Cancelled, Unsupported };
@@ -40,6 +52,11 @@ struct DecodeLimits {
     size_t max_encoded_bytes = 16u << 20;
     int max_dimension = 8192;            // either side, before scaling
     uint64_t max_pixels = 8192ull * 8192ull;
+    // An animation whose frames (at the file's own size, as they are decoded before scaling) would
+    // take more than this shows its first frame only. Checked from the frame count and canvas before
+    // any frame is decoded.
+    size_t max_animation_bytes = 48u << 20;
+    bool animate = true;  // false: animations decode to their first frame
 };
 
 struct DecodeResult {
@@ -49,7 +66,8 @@ struct DecodeResult {
 };
 
 // Decode an image to RGBA. The format is taken from the bytes, not from a file name or Content-Type:
-//   PNG, JPEG, BMP, GIF (first frame), WebP (lossy, lossless, alpha; first frame of an animation),
+//   PNG, JPEG, BMP, GIF (animated: every frame with its delay and the NETSCAPE loop count), WebP
+//   (lossy, lossless, alpha, animated),
 //   SVG (nanosvg: shapes, paths, gradients, transforms; no text, filters, CSS or embedded images).
 // Raster images are downscaled (never enlarged) to fit inside max_w/max_h when > 0, keeping the
 // aspect ratio. An SVG is drawn at the size that fits max_w/max_h, enlarged if need be, so a vector icon

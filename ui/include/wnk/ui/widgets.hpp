@@ -141,9 +141,14 @@ class ImageView : public View {
     ~ImageView() override;
     ImageView &set_url(std::string url);
     ImageView &set_fit(ImageFit fit);
+    // Animated GIF and WebP play (their own frame times and loop count) unless this is off; off
+    // shows the first frame.
+    ImageView &set_animate(bool on);
     const std::string &url() const { return url_; }
     enum class State : uint8_t { Empty, Loading, Ready, Failed };
     State state() const { return state_; }
+    size_t frame_index() const { return frame_; }  // the animation frame showing
+    size_t frame_count() const { return delays_.empty() ? 1 : delays_.size(); }
 
  protected:
     void update(Ui &ui, float dt) override;
@@ -160,6 +165,11 @@ class ImageView : public View {
     std::string key_;
     int img_w_ = 0, img_h_ = 0;
     int reloads_ = 0;
+    bool animate_ = true;
+    std::vector<int> delays_;  // of the loaded animation
+    int loops_ = 0, played_ = 0;
+    size_t frame_ = 0;
+    float frame_ms_ = 0;  // time the current frame has shown
 };
 
 // ---- controls --------------------------------------------------------------------------------------

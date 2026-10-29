@@ -163,12 +163,157 @@ DecodeResult failed(std::string why) {
     return r;
 }
 
-// The raster image fitted inside max_w x max_h (never enlarged).
+// The raster image fitted inside max_w x max_h (never enlarged), every frame of an animation.
 void finish(DecodeResult &r, std::shared_ptr<ImageRGBA> img, int max_w, int max_h) {
     int fw = img->width, fh = img->height;
     fit_size(img->width, img->height, max_w, max_h, &fw, &fh);
-    if (fw != img->width || fh != img->height) img = std::make_shared<ImageRGBA>(downscale(*img, fw, fh));
+    if (fw != img->width || fh != img->height) {
+        auto out = std::make_shared<ImageRGBA>(downscale(*img, fw, fh));
+        out->delays_ms = img->delays_ms;
+        out->loops = img->loops;
+        ImageRGBA one;
+        one.width = img->width;
+        one.height = img->height;
+        for (auto &f : img->more_frames) {
+            one.pixels = std::move(f);
+            out->more_frames.push_back(downscale(one, fw, fh).pixels);
+        }
+        img = std::move(out);
+    }
     r.image = std::move(img);
+}
+
+// Formats count a delay this short as "as fast as possible"; browsers show it for 100 ms.
+int frame_delay(int ms) { return ms < 20 ? 100 : ms; }
+
+bool animation_fits(int w, int h, size_t frames, const DecodeLimits &limits) {
+    return limits.animate && frames > 1 && static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * 4 * frames <= limits.max_animation_bytes;
+}
+
+// GIF structure without decoding: the logical screen, how many images it holds and how many times
+// to play it: once without a NETSCAPE2.0 block, forever for its count 0, else count + 1 (the count
+// is of repeats, as browsers read it). False if the block structure is broken before the first image.
+bool gif_scan(const std::string &b, int *w, int *h, size_t *frames, int *loops) {
+    const auto *p = reinterpret_cast<const uint8_t *>(b.data());
+    const size_t n = b.size();
+    if (n < 13) return false;
+    *w = p[6] | (p[7] << 8);
+    *h = p[8] | (p[9] << 8);
+    *frames = 0;
+    *loops = 1;
+    size_t pos = 13;
+    if (p[10] & 0x80) pos += 3u << ((p[10] & 7) + 1);  // global colour table
+    auto skip_sub_blocks = [&]() {
+        while (pos < n) {
+            const uint8_t len = p[pos++];
+            if (len == 0) return true;
+            pos += len;
+        }
+        return false;
+    };
+    while (pos < n) {
+        const uint8_t tag = p[pos++];
+        if (tag == 0x3B) break;  // trailer
+        if (tag == 0x21) {       // extension
+            if (pos >= n) break;
+            const uint8_t label = p[pos++];
+            if (label == 0xFF && pos + 16 <= n && p[pos] == 11 && std::memcmp(p + pos + 1, "NETSCAPE2.0", 11) == 0 &&
+                p[pos + 12] == 3 && p[pos + 13] == 1) {
+                const int repeats = p[pos + 14] | (p[pos + 15] << 8);
+                *loops = repeats == 0 ? 0 : repeats + 1;
+            }
+            if (!skip_sub_blocks()) break;
+        } else if (tag == 0x2C) {  // image descriptor
+            if (pos + 9 > n) break;
+            const uint8_t flags = p[pos + 8];
+            pos += 9;
+            if (flags & 0x80) pos += 3u << ((flags & 7) + 1);  // local colour table
+            ++pos;                                             // LZW minimum code size
+            if (!skip_sub_blocks()) break;
+            ++*frames;
+        } else {
+            break;
+        }
+    }
+    return *frames > 0 || *w > 0;
+}
+
+// Every frame of an animated GIF, composited by stb (disposal, transparency).
+DecodeResult decode_gif_animation(const std::string &bytes, int loops, int max_w, int max_h) {
+    int *delays = nullptr;
+    int w = 0, h = 0, z = 0, comp = 0;
+    stbi_uc *px = stbi_load_gif_from_memory(reinterpret_cast<const stbi_uc *>(bytes.data()), static_cast<int>(bytes.size()),
+                                            &delays, &w, &h, &z, &comp, 4);
+    if (px == nullptr) {
+        STBI_FREE(delays);
+        return failed(std::string("unreadable gif (") + (stbi_failure_reason() != nullptr ? stbi_failure_reason() : "?") + ")");
+    }
+    auto img = std::make_shared<ImageRGBA>();
+    img->width = w;
+    img->height = h;
+    img->loops = loops;
+    const size_t frame = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
+    for (int i = 0; i < z; ++i) {
+        const stbi_uc *f = px + frame * static_cast<size_t>(i);
+        if (i == 0) {
+            img->pixels.assign(f, f + frame);
+        } else {
+            img->more_frames.emplace_back(f, f + frame);
+        }
+        img->delays_ms.push_back(frame_delay(delays != nullptr ? delays[i] : 100));
+    }
+    stbi_image_free(px);
+    STBI_FREE(delays);
+    if (z < 2) {
+        img->delays_ms.clear();
+        img->more_frames.clear();
+    }
+    DecodeResult r;
+    finish(r, std::move(img), max_w, max_h);
+    return r;
+}
+
+// Every frame of an animated WebP on its canvas (libwebp's WebPAnimDecoder blends and disposes).
+DecodeResult decode_webp_animation(const std::string &bytes, int max_w, int max_h) {
+    WebPAnimDecoderOptions o;
+    if (!WebPAnimDecoderOptionsInit(&o)) return failed("WebP animation decoder unavailable");
+    o.color_mode = MODE_RGBA;
+    o.use_threads = 0;
+    const WebPData data{reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()};
+    WebPAnimDecoder *dec = WebPAnimDecoderNew(&data, &o);
+    if (dec == nullptr) return failed("animated WebP did not decode");
+    WebPAnimInfo info;
+    if (!WebPAnimDecoderGetInfo(dec, &info)) {
+        WebPAnimDecoderDelete(dec);
+        return failed("animated WebP without information");
+    }
+    auto img = std::make_shared<ImageRGBA>();
+    img->width = static_cast<int>(info.canvas_width);
+    img->height = static_cast<int>(info.canvas_height);
+    img->loops = static_cast<int>(info.loop_count);
+    const size_t frame = static_cast<size_t>(img->width) * static_cast<size_t>(img->height) * 4;
+    int previous = 0;
+    while (WebPAnimDecoderHasMoreFrames(dec)) {
+        uint8_t *buf = nullptr;
+        int timestamp = 0;
+        if (!WebPAnimDecoderGetNext(dec, &buf, &timestamp)) {
+            WebPAnimDecoderDelete(dec);
+            return failed("WebP frame decoding failed");
+        }
+        if (img->delays_ms.empty()) {
+            img->pixels.assign(buf, buf + frame);
+        } else {
+            img->more_frames.emplace_back(buf, buf + frame);
+        }
+        img->delays_ms.push_back(frame_delay(timestamp - previous));  // timestamps are when each frame ends
+        previous = timestamp;
+    }
+    WebPAnimDecoderDelete(dec);
+    if (img->delays_ms.empty()) return failed("animated WebP without frames");
+    if (img->delays_ms.size() < 2) img->delays_ms.clear();
+    DecodeResult r;
+    finish(r, std::move(img), max_w, max_h);
+    return r;
 }
 
 // SVG: parsed, then rasterised at the size it will be shown (fitted to max_w x max_h, which may enlarge
@@ -232,6 +377,11 @@ DecodeResult decode_webp(const std::string &bytes, int max_w, int max_h, const D
         if (demux == nullptr) return failed("animated WebP did not demux");
         const int cw = static_cast<int>(WebPDemuxGetI(demux, WEBP_FF_CANVAS_WIDTH));
         const int ch = static_cast<int>(WebPDemuxGetI(demux, WEBP_FF_CANVAS_HEIGHT));
+        const size_t count = WebPDemuxGetI(demux, WEBP_FF_FRAME_COUNT);
+        if (within(cw, ch, limits) && animation_fits(cw, ch, count, limits)) {
+            WebPDemuxDelete(demux);
+            return decode_webp_animation(bytes, max_w, max_h);
+        }
         WebPIterator it;
         if (!within(cw, ch, limits) || !WebPDemuxGetFrame(demux, 1, &it)) {
             WebPDemuxDelete(demux);
@@ -317,6 +467,13 @@ DecodeResult decode_image(const std::string &bytes, int max_w, int max_h, const 
         r.error = ImageError::TooLarge;
         r.detail = "image is " + std::to_string(w) + "x" + std::to_string(h);
         return r;
+    }
+    if (format == "gif") {
+        int gw = 0, gh = 0, loops = 0;
+        size_t frames = 0;
+        if (gif_scan(bytes, &gw, &gh, &frames, &loops) && animation_fits(w, h, frames, limits)) {
+            return decode_gif_animation(bytes, loops, max_w, max_h);
+        }
     }
     stbi_uc *px = stbi_load_from_memory(data, len, &w, &h, &comp, 4);
     if (px == nullptr) {

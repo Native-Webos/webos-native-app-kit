@@ -412,6 +412,11 @@ class HomeScreen : public Screen {
         auto &webp = images.add<ImageView>(media + "poster.webp");
         webp.set_size(284, 160);  // the picture is 16:9
         webp.name = "widgets.webp";
+        auto &anim = images.add<ImageView>(media + "spinner.webp");  // animated: 12 frames of 80 ms
+        anim.set_fit(ImageFit::Contain);
+        anim.set_size(96, 96);
+        anim.set_align(Align::Start, Align::Center);
+        anim.name = "widgets.animated";
         return col;
     }
 

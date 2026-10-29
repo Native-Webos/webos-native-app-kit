@@ -420,6 +420,12 @@ ImageView &ImageView::set_fit(ImageFit fit) {
     return *this;
 }
 
+ImageView &ImageView::set_animate(bool on) {
+    animate_ = on;
+    if (!on) frame_ = 0, frame_ms_ = 0;
+    return *this;
+}
+
 void ImageView::cancel() {
     if (ticket_ != 0 && source_ != nullptr) source_->cancel(ticket_);
     ticket_ = 0;
@@ -442,21 +448,41 @@ void ImageView::start(Ui &ui) {
             key_ = std::move(l.key);
             img_w_ = l.width;
             img_h_ = l.height;
+            delays_ = std::move(l.delays_ms);
+            loops_ = l.loops;
+            played_ = 0;
+            frame_ = 0;
+            frame_ms_ = 0;
         } else {
             state_ = State::Failed;
         }
     });
 }
 
-void ImageView::update(Ui &ui, float) {
+void ImageView::update(Ui &ui, float dt) {
     if (state_ == State::Empty && !url_.empty() && !frame().empty() && ui.images() != nullptr && reloads_ < 3) start(ui);
+    if (state_ != State::Ready || !animate_ || delays_.size() < 2 || (loops_ > 0 && played_ >= loops_)) return;
+    frame_ms_ += dt * 1000.0f;
+    // A slow frame (a stall, the idle probe) skips ahead rather than playing the backlog quickly.
+    for (int guard = 0; guard < static_cast<int>(delays_.size()) && frame_ms_ >= static_cast<float>(delays_[frame_]); ++guard) {
+        frame_ms_ -= static_cast<float>(delays_[frame_]);
+        if (frame_ + 1 < delays_.size()) {
+            ++frame_;
+        } else if (loops_ > 0 && ++played_ >= loops_) {
+            frame_ms_ = 0;  // stays on the last frame, as browsers do
+            break;
+        } else {
+            frame_ = 0;
+        }
+    }
+    if (frame_ms_ > static_cast<float>(delays_[frame_])) frame_ms_ = 0;
 }
 
 void ImageView::draw(Ui &ui) {
     render::Renderer &r = ui.renderer();
     const Rect f = frame();
     if (state_ == State::Ready && source_ != nullptr) {
-        const render::TextureId tex = source_->texture(key_);
+        const render::TextureId tex = frame_ == 0 ? source_->texture(key_) : source_->texture(key_, frame_);
         if (tex != render::kNoTexture && img_w_ > 0 && img_h_ > 0) {
             const float ia = static_cast<float>(img_w_) / static_cast<float>(img_h_);
             const float fa = f.w / f.h;

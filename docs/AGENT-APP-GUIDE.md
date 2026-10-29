@@ -733,7 +733,8 @@ URI's key. SAMPLE-AES in MPEG-TS and FairPlay (`skd://`) are refused with the re
 AdaptationSet: Representations of the same codec, channels and sample rate, chosen from what the
 video's bitrate leaves of the throughput estimate and of `set_bandwidth_limit`, so the backend's
 audio format never changes. `audio_switches()` counts them. In HLS, where each variant names an
-audio group (one per bitrate tier), the audio follows the video's variant into its group, matched on
+audio group (one per bitrate tier), the audio follows the video's variant into its group at the video's switch time (audio already
+downloaded past it is dropped), matched on
 language, codec and channels (NAME only chooses among several in one group); the copies in the
 groups are one audio track.
 

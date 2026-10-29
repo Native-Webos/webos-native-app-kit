@@ -339,8 +339,12 @@ struct AdaptiveSource::Impl {
             int rendition = -1;
             size_t first = 0;
             std::unique_ptr<net::SegmentReader> reader;
+            // Set: the old rendition's packets from this time on are dropped and the new one takes
+            // over there, wherever the old one's download has got to (it may be far ahead).
+            int64_t cut_us = kNoTime;
         };
         std::optional<Switch> next;
+        int64_t last_end_us = kNoTime;  // end of the last packet handed out
         // Packets ending before this are dropped: an audio lane reopened at its own segment boundary
         // may start well before the video's keyframe (segment lengths differ, and HLS EXTINF values
         // are only approximate).
@@ -977,7 +981,14 @@ struct AdaptiveSource::Impl {
                 const int want = variant_audio(lanes[0].next ? lanes[0].next->rendition : lanes[0].rendition, a.rendition);
                 if (want != a.rendition && want != follow_tried) {
                     follow_tried = want;  // once per change: a failed or too-late switch is not retried
-                    start_switch(lanes.size() - 1, want, "following the video");
+                    // At the video's switch, not where the audio's download has got to: that may
+                    // be many segments on (on a C1, 14 s with 160 kb/s audio beside 3.5 Mb/s video).
+                    int64_t cut = kNoTime;
+                    if (!pres.live && lanes[0].next) {
+                        const Rendition &tv = pres.renditions[static_cast<size_t>(lanes[0].next->rendition)];
+                        if (lanes[0].next->first < tv.segments.size()) cut = tv.segments[lanes[0].next->first].start_us;
+                    }
+                    start_switch(lanes.size() - 1, want, "following the video", cut);
                 }
             }
             return;
@@ -1028,8 +1039,9 @@ struct AdaptiveSource::Impl {
         return found;
     }
 
-    // Starts switching lane `index` to rendition `to_index` at its next segment boundary.
-    void start_switch(size_t index, int to_index, const char *reason) {
+    // Starts switching lane `index` to rendition `to_index` at its next segment boundary, or at
+    // `cut_us` (VOD) when given.
+    void start_switch(size_t index, int to_index, const char *reason, int64_t cut_us = kNoTime) {
         Lane &v = lanes[index];
         const char *what = v.want_video ? "video" : "audio";
         Rendition &to = pres.renditions[static_cast<size_t>(to_index)];
@@ -1044,9 +1056,27 @@ struct AdaptiveSource::Impl {
         }
         std::lock_guard<std::mutex> plock(pres_mutex);
         const Rendition &from = pres.renditions[static_cast<size_t>(v.rendition)];
+        const size_t init = from.init ? 1 : 0;
+        if (cut_us != kNoTime && !pres.live && !from.segments.empty() && !to.segments.empty()) {
+            // Playlist times are approximate (EXTINF): open the target a second early and let
+            // drop_before_us trim what overlaps the old rendition.
+            const size_t at = segment_at(from.segments, cut_us);
+            const size_t part = v.reader->download_part();
+            const size_t downloading = v.first + (part > init ? part - init : 0);
+            if (downloading > at) v.reader->stop_after_current();  // what is in already reaches the cut
+            Lane::Switch sw;
+            sw.rendition = to_index;
+            sw.first = segment_at(to.segments, cut_us - 1000000);
+            sw.cut_us = cut_us;
+            sw.reader = make_reader(to, sw.first);
+            std::lock_guard<std::mutex> lock(lanes_mutex);
+            v.next = std::move(sw);
+            WNK_LOGI(kCat, "%s: switching %s %s -> %s at %.2f s (downloading segment %zu)", reason, what,
+                     mbps(from.bandwidth).c_str(), mbps(to.bandwidth).c_str(), static_cast<double>(cut_us) / 1e6, downloading);
+            return;
+        }
         // Live HLS: the boundary must exist in the target's list too (by number) before cutting.
         const size_t delivered = v.reader->stop_after_current();
-        const size_t init = from.init ? 1 : 0;
         const size_t boundary = v.first + (delivered > init ? delivered - init : 0);  // first segment not read
         if (boundary >= from.segments.size()) {
             if (!pres.live || live_ended) return;  // the old one plays to the end
@@ -1094,7 +1124,11 @@ struct AdaptiveSource::Impl {
         while (!lane.pending && !lane.ended) {
             Packet p;
             const MediaSource::Read r = lane.src->read(&p, error);
-            if (r == MediaSource::Read::EndOfStream && lane.next) {
+            // A switch with a cut time lands at the first packet reaching it (that packet is dropped).
+            const bool at_cut = r == MediaSource::Read::Packet && lane.next && lane.next->cut_us != kNoTime &&
+                                p.type != TrackType::Subtitle && p.pts_us != kNoTime &&
+                                p.pts_us + std::max<int64_t>(p.duration_us, 0) / 2 >= lane.next->cut_us;
+            if ((r == MediaSource::Read::EndOfStream || at_cut) && lane.next) {
                 // The old rendition ended at the switch boundary: the new one continues from there.
                 Lane::Switch sw;
                 const int from = lane.rendition;
@@ -1112,6 +1146,7 @@ struct AdaptiveSource::Impl {
                     if (interrupted) return MediaSource::Read::Interrupted;
                     return MediaSource::Read::Error;
                 }
+                if (sw.cut_us != kNoTime) lane.drop_before_us = lane.last_end_us;  // it opened early
                 ++switch_count;
                 if (lane.want_video) {
                     std::lock_guard<std::mutex> plock(pres_mutex);  // the refresher reads it
@@ -1127,8 +1162,9 @@ struct AdaptiveSource::Impl {
                     WNK_LOGI(kCat, "video %s (%dx%d %s) -> %s (%dx%d %s) at segment %zu", a.id.c_str(), a.width, a.height,
                              mbps(a.bandwidth).c_str(), b.id.c_str(), b.width, b.height, mbps(b.bandwidth).c_str(), sw.first);
                 } else {
-                    WNK_LOGI(kCat, "audio %s (%s) -> %s (%s) at segment %zu", a.id.c_str(), mbps(a.bandwidth).c_str(),
-                             b.id.c_str(), mbps(b.bandwidth).c_str(), sw.first);
+                    WNK_LOGI(kCat, "audio %s (%s) -> %s (%s) at segment %zu%s", a.id.c_str(), mbps(a.bandwidth).c_str(),
+                             b.id.c_str(), mbps(b.bandwidth).c_str(), sw.first,
+                             sw.cut_us != kNoTime ? (", " + std::to_string(sw.cut_us / 1000) + " ms").c_str() : "");
                 }
                 continue;
             }
@@ -1173,6 +1209,7 @@ struct AdaptiveSource::Impl {
                     continue;
                 }
                 lane.drop_before_us = kNoTime;
+                if (p.pts_us != kNoTime) lane.last_end_us = p.pts_us + std::max<int64_t>(p.duration_us, 0);
                 lane.pending = std::move(p);
             }
         }

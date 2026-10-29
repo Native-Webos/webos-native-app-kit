@@ -1055,8 +1055,8 @@ TEST("adaptive source: HLS audio follows the video's variant into its audio grou
         }
     }
     CHECK_EQ(video_high.size(), size_t{500});
-    // The audio matches the tier of the picture at its time but near a switch (each lane cuts at
-    // its own next boundary): at most a 2 s segment for each of the two switches.
+    // The audio changes tier with the picture, at the video's switch, however far its own download
+    // has got: a few AAC frames apart at most (the picture's tier is sampled per video frame).
     std::sort(video_high.begin(), video_high.end());
     int64_t apart_us = 0;
     bool low_seen = false;
@@ -1066,7 +1066,7 @@ TEST("adaptive source: HLS audio follows the video's variant into its audio grou
         low_seen = low_seen || !hi;
     }
     CHECK(low_seen);
-    CHECK(apart_us <= 4500000);
+    CHECK(apart_us <= 200000);
     CHECK(audio_high.back().second);  // back on the high tier, with the picture
     CHECK(video_high.back().second);
     CHECK(s.audio_switches() >= 2);

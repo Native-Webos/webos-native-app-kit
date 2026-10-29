@@ -41,6 +41,11 @@ class AutoBackend : public MediaBackend {
     // The preferred backend refused this media before its first picture: the fallback takes it, now
     // and whenever the same URI is prepared again (PlxNative learns refusals the same way).
     bool fall_back(const std::string &why) override;
+    void set_playback_speed(double speed) override {
+        MediaBackend::set_playback_speed(speed);
+        preferred_->set_playback_speed(speed);
+        fallback_->set_playback_speed(speed);
+    }
 
     // Whether `b` can be given this media's tracks (exposed for tests and logs).
     static bool takes(const MediaBackend &b, const TrackInfo *video, const TrackInfo *audio, std::string *why);

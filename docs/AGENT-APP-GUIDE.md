@@ -342,6 +342,7 @@ stubbing a lookalike.
 | DASH (`.mpd`) or HLS (`.m3u8`), including live | `AdaptiveSource` when `AdaptiveSource::handles(uri)`. |
 | Subtitles in the picture | `SubtitleView` (`wnk_media_ui`) fed by `controller->subtitles_now()`. |
 | Audio language / track menu | `snapshot().info.tracks` lists them; `set_audio_track(index)` while playing or paused; `snapshot().audio_track` is the one playing. Example D's `open_tracks`. |
+| Playback speed (0.5x-2x) | `set_speed(s)` while playing or paused; `snapshot().speed` is the one in force. File sources only; refused for DASH/HLS and where the fed frame rate would pass 60 fps. Audio is stereo while sped up. Example D's track menu. |
 | Video visible behind the UI | `ui.set_clear_color(wnk::render::kTransparent)` while the player screen is showing. Restore with `std::nullopt` on hide. |
 | Another app covering this one | `on_lifecycle`: `pause_and_release()` on `Suspended`, resume when `Resuming` returns to `Running`. |
 | Device model, webOS release, GLES limits | `ctx.device()`, `ctx.capabilities()`. |

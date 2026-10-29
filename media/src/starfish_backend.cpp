@@ -878,18 +878,19 @@ MediaBackend::Feed StarfishBackend::feed(const Packet &p) {
         if (!loaded_) return Feed::Error;
         if (p.type == TrackType::Audio && !format_.audio) return Feed::Accepted;
         object = object_;
-        if (native_seek_pending_ && p.pts_us != kNoTime) {
+        const int64_t sink_pts = to_sink(p.pts_us);  // content time divided by the playback speed
+        if (native_seek_pending_ && sink_pts != kNoTime) {
             // Content time from here on (kept non-negative: Feed reads pts as unsigned), and the
             // pipeline's new segment starts at this packet.
             native_seek_pending_ = false;
-            splice_.reanchor(p.pts_us < 0 ? -p.pts_us : 0);
-            seek_out_us = p.pts_us + splice_.shift_us();
+            splice_.reanchor(sink_pts < 0 ? -sink_pts : 0);
+            seek_out_us = sink_pts + splice_.shift_us();
             presented_out_us_ = kNoTime;  // until the new segment presents a frame
         }
         // After a seek the new content goes after the decoder's clock if it ran past what was fed.
         const int64_t before = splice_.shift_us();
         const int64_t clock = clock_out_us(paused_);
-        out_us = splice_.map(p.pts_us, clock);
+        out_us = splice_.map(sink_pts, clock);
         // The PCM lead applies to what the sink is given only (PlxNative): not to the splice or the
         // native seek's target, and the position is read from the presented video.
         if (p.type == TrackType::Audio && out_us != kNoTime) out_us += pcm_lead_us_;
@@ -1075,7 +1076,7 @@ int64_t StarfishBackend::position_us() const {
     const int64_t out = presented_out_us_.load();
     if (out == kNoTime) return kNoTime;
     std::lock_guard<std::mutex> lock(mutex_);
-    return splice_.unmap(out);
+    return from_sink(splice_.unmap(out));
 }
 
 void StarfishBackend::set_area(const Rect &pixels) {

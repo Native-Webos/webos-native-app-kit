@@ -130,6 +130,22 @@ adecsink and unknown stacks 0 (`StarfishOptions::pcm_lead_ms` overrides; Example
 `{"pcmLeadMs":N}`). The OLED65C1PTB is liblxa and its soundbar reports `external_arc`: 400 ms by
 default, not yet judged by ear.
 
+### Playback speed `[HW]`
+
+`PlaybackController::set_speed` (0.5-2x in Example D's track menu) is done in the app, as PlxNative
+does it (#805): LG's `SetPlayRate` cannot drive the buffer-feed pipeline (reset to 1x by the next
+SEGMENT, a freeze mid-play, muted audio off 1x) and is not exported on any image in the inventory.
+Packets keep content time; the backend divides every timestamp it gives the decoder by the speed
+(`MediaBackend::to_sink`) and reports positions multiplied back, so the decoder plays at its own 1x
+and is told the frame rate it is actually fed. The source decodes the audio to stereo PCM and
+time-stretches it with `TimeStretch` (WSOLA, pitch kept; host-tested at 0.5-2x: length within 50 ms,
+pitch within 4 Hz, no clicks). A change reloads the decoder at the position; a speed whose fed frame
+rate would pass 60 fps, DASH/HLS, and audio that cannot be decoded are refused.
+
+Measured on the OLED65C1PTB (player 0.27.0, 2026-10-29), a 24 fps H.264+AAC clip: the sink displayed
+36 fps at 1.5x, 48 at 2x and 12 at 0.5x, the position advanced at that rate, a native seek at 2x
+landed in 214 ms, 0 frames dropped throughout. Not judged by ear (pitch, lip sync).
+
 ### Seeking with LG's Seek `[HW]`
 
 `StarfishMediaAPIs::Seek(const char *millis)` (exported on every release 1.2-11.2) runs a

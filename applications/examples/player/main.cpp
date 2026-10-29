@@ -8,8 +8,8 @@
 // The bundled clips (tools/make-test-clips.sh) flash white and beep during the first 80 ms of every
 // second, so on the TV picture/sound sync and the NDL PTS unit can be judged by eye and ear.
 //
-// Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Up opens the audio and subtitle
-// track menu, Down cycles the subtitle tracks (a track the file marks as default starts on), Stop or
+// Player keys: OK or Play/Pause toggles pause, Left/Right seek 10 s, Up opens the audio, subtitle and
+// playback speed menu, Down cycles the subtitle tracks (a track the file marks as default starts on), Stop or
 // Back leaves. Changing the audio track reloads the decoder at the position (a short gap). Any key
 // shows the controls; they hide after 4 s of playback. Pause and seek keep the decoder loaded, so the
 // picture holds; backgrounding the app pauses playback and releases the decoder, and playback resumes
@@ -31,6 +31,7 @@
 //   {"codecs": "h264"}                     DASH/HLS: only renditions of this video codec (h264, hevc)
 //   {"audio": "5:2,9:1"}                   scripted audio track changes (seconds after the player opens:
 //                                          stream index), for checking the switch without a remote
+//   {"speeds": "5:1.5,15:1"}               scripted playback speeds (seconds after the player opens: speed)
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
 //   {"backend": "ndl"}                     force NDL (default: Starfish when the codecs suit it, else NDL)
 //   {"backend": "starfish"}                force LG's Starfish pipeline
@@ -112,6 +113,7 @@ struct Settings {
     std::string language;  // preferred audio language for DASH/HLS
     std::vector<std::pair<double, double>> seeks;  // scripted: (seconds after opening, relative seek)
     std::vector<std::pair<double, double>> audio_switches;  // scripted: (seconds after opening, audio track)
+    std::vector<std::pair<double, double>> speeds;          // scripted: (seconds after opening, playback speed)
     std::vector<std::pair<double, double>> caps;  // scripted: (seconds after opening, video cap in kb/s)
     int64_t start_bps = 0;                        // AdaptiveSourceOptions::initial_bandwidth; 0: default
     std::string codecs;                           // "h264" or "hevc": only that video codec; empty: by the TV
@@ -187,7 +189,7 @@ std::unique_ptr<MediaSource> make_source(const Settings &s, const std::string &u
 class PlayerScreen : public Screen {
  public:
     PlayerScreen(wnk::app::Context &ctx, const Settings &s, std::string uri, std::string title)
-        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks), audio_switches_(s.audio_switches), caps_(s.caps) {
+        : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks), audio_switches_(s.audio_switches), speeds_(s.speeds), caps_(s.caps) {
         name = "player";
         // Under the controls: subtitles over the whole picture.
         subs_view_ = &add<SubtitleView>();
@@ -323,6 +325,11 @@ class PlayerScreen : public Screen {
             controller_->set_audio_track(track);
             ++next_audio_;
         }
+        while (next_speed_ < speeds_.size() && ui.now_ms() - opened_ms_ >= speeds_[next_speed_].first * 1000) {
+            WNK_LOGI(kCat, "scripted speed %.2fx", speeds_[next_speed_].second);
+            controller_->set_speed(speeds_[next_speed_].second);
+            ++next_speed_;
+        }
         while (adaptive_ && next_cap_ < caps_.size() && ui.now_ms() - opened_ms_ >= caps_[next_cap_].first * 1000) {
             const int64_t bps = static_cast<int64_t>(caps_[next_cap_].second * 1000);
             WNK_LOGI(kCat, "scripted video cap %lld kb/s", static_cast<long long>(bps / 1000));
@@ -411,7 +418,7 @@ class PlayerScreen : public Screen {
     // current choices are marked and the playing audio track has focus.
     void open_tracks(Ui &ui) {
         if (tracks_.empty()) return;  // not open yet
-        auto d = std::make_unique<Dialog>("Audio and subtitles");
+        auto d = std::make_unique<Dialog>("Audio, subtitles and speed");
         Dialog *dialog = d.get();
         Button *current = nullptr;
         auto &body = d->body();
@@ -444,6 +451,24 @@ class PlayerScreen : public Screen {
         add_sub(-1, "Off");
         for (const TrackInfo &t : tracks_) {
             if (t.type == TrackType::Subtitle && t.subtitle != SubtitleKind::None) add_sub(t.index, track_name(t));
+        }
+        // Playback speed, done in the app (PlaybackController::set_speed): the speeds Plex offers.
+        body.add<Label>("Speed", TextRole::Small).set_muted(true);
+        auto &speeds = body.add<Grid>(4, 16);
+        for (const double sp : {0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0}) {
+            char text[32];
+            if (sp == 1.0) {
+                std::snprintf(text, sizeof text, "Normal%s", s.speed == 1.0 ? "  ·  on" : "");
+            } else {
+                std::snprintf(text, sizeof text, "%gx%s", sp, s.speed == sp ? "  ·  on" : "");
+            }
+            auto &b = speeds.add<Button>(text, [this, dialog, sp](Ui &u) {
+                WNK_LOGI(kCat, "tracks: speed %.2fx chosen", sp);
+                controller_->set_speed(sp);
+                dialog->dismiss(u);
+            });
+            b.name = "tracks.speed." + std::to_string(static_cast<int>(sp * 100));
+            b.set_width(Dim::fill());
         }
         d->add_button("Close").name = "tracks.close";
         ui.show_dialog(std::move(d));
@@ -510,6 +535,8 @@ class PlayerScreen : public Screen {
     size_t next_seek_ = 0;
     std::vector<std::pair<double, double>> audio_switches_;
     size_t next_audio_ = 0;
+    std::vector<std::pair<double, double>> speeds_;
+    size_t next_speed_ = 0;
     std::vector<std::pair<double, double>> caps_;
     size_t next_cap_ = 0;
     AdaptiveSource *adaptive_ = nullptr;  // owned by controller_; null for files
@@ -931,6 +958,7 @@ class Player : public wnk::app::Delegate {
             };
             timed("seeks", &s.seeks);
             timed("audio", &s.audio_switches);
+            timed("speeds", &s.speeds);
             timed("capKbps", &s.caps);
             if (params.contains("codecs") && params["codecs"].is_string()) s.codecs = params["codecs"];
             if (params.contains("startKbps") && params["startKbps"].is_number_integer()) {

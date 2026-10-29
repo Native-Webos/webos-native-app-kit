@@ -4,6 +4,7 @@
 #include "wnk/log.hpp"
 #include "wnk/media/bitstream.hpp"
 #include "wnk/media/dovi.hpp"
+#include "wnk/media/time_stretch.hpp"
 #include "wnk/media/subtitles.hpp"
 
 extern "C" {
@@ -234,6 +235,13 @@ struct FfmpegSource::Impl {
     int pcm_swr_rate = 0, pcm_swr_channels = 0;
     int64_t pcm_next_us = kNoTime, pcm_in_us = kNoTime;
     std::vector<float> pcm_out;
+    // Playback speed (set_speed): stereo PCM through `stretch`. Its output is stamped from
+    // stretch_base_us (the first frame after a reset) by the frames it gave, times the speed: content
+    // time, which the backend divides again. stretch_in_us is where the next input should start.
+    double speed = 1.0;
+    std::unique_ptr<TimeStretch> stretch;
+    int64_t stretch_base_us = kNoTime, stretch_in_us = kNoTime, stretch_frames = 0;
+    std::vector<float> stretch_in, stretch_out;
     std::map<int, AVCodecContext *> subs;  // stream index → decoder, for every decodable subtitle track
 
     void free_subtitle_decoders() {
@@ -258,6 +266,9 @@ struct FfmpegSource::Impl {
         swr_free(&pcm_swr);  // remade with an empty history by the next frame
         pcm_swr_rate = pcm_swr_channels = 0;
         pcm_next_us = pcm_in_us = kNoTime;
+        if (stretch) stretch->reset();
+        stretch_base_us = stretch_in_us = kNoTime;
+        stretch_frames = 0;
     }
 
     // Forgets the audio waiting to be encoded (seek, discontinuity).
@@ -622,7 +633,33 @@ struct FfmpegSource::Impl {
         p.data.resize(static_cast<size_t>(out_ns) * 4);
         mix_to_stereo_s16(planes.data(), ch, out_ns, order.data(), reinterpret_cast<int16_t *>(p.data.data()));
         p.pts_us = pts_us;
-        p.duration_us = static_cast<int64_t>(out_ns) * 1000000 / std::max(1, pcm_rate > 0 ? pcm_rate : f->sample_rate);
+        const int rate = std::max(1, pcm_rate > 0 ? pcm_rate : f->sample_rate);
+        p.duration_us = static_cast<int64_t>(out_ns) * 1000000 / rate;
+        if (stretch) {
+            // A gap of more than 100 ms (or the first frame) restarts the stretched timeline there.
+            if (pts_us != kNoTime && (stretch_in_us == kNoTime || std::llabs(pts_us - stretch_in_us) > 100000)) {
+                stretch->reset();
+                stretch_base_us = pts_us;
+                stretch_frames = 0;
+            }
+            if (pts_us != kNoTime) stretch_in_us = pts_us + p.duration_us;
+            if (stretch_base_us == kNoTime) return;  // wait for a timed frame
+            const auto *s16 = reinterpret_cast<const int16_t *>(p.data.data());
+            stretch_in.resize(static_cast<size_t>(out_ns) * 2);
+            for (size_t k = 0; k < stretch_in.size(); ++k) stretch_in[k] = s16[k] / 32768.0f;
+            stretch_out.clear();
+            stretch->process(stretch_in.data(), out_ns, &stretch_out);
+            const int got = static_cast<int>(stretch_out.size() / 2);
+            if (got == 0) return;  // still filling its first window
+            p.data.resize(static_cast<size_t>(got) * 4);
+            auto *o = reinterpret_cast<int16_t *>(p.data.data());
+            for (size_t k = 0; k < stretch_out.size(); ++k) {
+                o[k] = static_cast<int16_t>(std::lrint(std::clamp(stretch_out[k], -1.0f, 1.0f) * 32767.0f));
+            }
+            p.pts_us = stretch_base_us + static_cast<int64_t>(std::llround(stretch_frames * speed * 1e6 / rate));
+            p.duration_us = static_cast<int64_t>(std::llround(got * speed * 1e6 / rate));
+            stretch_frames += got;
+        }
         ready.push_back(std::move(p));
     }
 
@@ -1089,7 +1126,16 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
             return false;
         }
         const AVCodecParameters *par = m.fmt->streams[audio_track]->codecpar;
-        const AudioPath path = audio_path(caps, *t);
+        AudioPath path = audio_path(caps, *t);
+        m.stretch.reset();
+        if (m.speed != 1.0) {
+            // Sped up: always decoded to stereo PCM and stretched, even what could pass as it is.
+            if (!t->decodable || !caps.accepts(CodecId::PcmS16)) {
+                *error = "audio " + t->codec_label + " cannot be played at " + std::to_string(m.speed) + "x";
+                return false;
+            }
+            path = AudioPath::Pcm;
+        }
         if (path == AudioPath::Passthrough) {
             AudioFormat a{t->codec, t->sample_rate, t->channels, {}};
             m.adts_config.clear();
@@ -1131,6 +1177,7 @@ bool FfmpegSource::select(int video_track, int audio_track, const BackendCaps &c
             } else {
                 m.pcm_rate = pcm_output_rate(t->sample_rate, caps.pcm_rates);
                 out->audio = AudioFormat{CodecId::PcmS16, m.pcm_rate, 2, {}};
+                if (m.speed != 1.0) m.stretch = std::make_unique<TimeStretch>(2, m.pcm_rate, m.speed);
                 WNK_LOGI(kCat, "audio %s %d ch %d Hz decoded to PCM stereo %d Hz%s", t->codec_label.c_str(), t->channels,
                          t->sample_rate, m.pcm_rate, m.pcm_rate != t->sample_rate ? " (resampled)" : "");
             }
@@ -1243,6 +1290,15 @@ bool FfmpegSource::seek(int64_t pts_us, std::string *error) {
                   m.ready.end());
     m.eof = false;
     m.need_key = m.video >= 0;
+    return true;
+}
+
+bool FfmpegSource::set_speed(double speed, std::string *why) {
+    if (!(speed >= 0.25 && speed <= 4.0)) {
+        if (why != nullptr) *why = "speed out of range";
+        return false;
+    }
+    impl_->speed = speed;
     return true;
 }
 

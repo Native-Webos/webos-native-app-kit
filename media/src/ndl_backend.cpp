@@ -356,7 +356,7 @@ MediaBackend::Feed NdlBackend::feed(const Packet &p) {
     if (video && !format_.video) return Feed::Accepted;  // not loaded with that stream: drop
     if (!video && !format_.audio) return Feed::Accepted;
     const int64_t before = splice_.shift_us();
-    const int64_t out_us = splice_.map(p.pts_us);
+    const int64_t out_us = splice_.map(to_sink(p.pts_us));  // content time / playback speed
     if (splice_.shift_us() != before) {
         WNK_LOGI(kCat, "after seek: content %lld us continues at %lld us", static_cast<long long>(p.pts_us),
                  static_cast<long long>(out_us));

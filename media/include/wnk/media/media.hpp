@@ -23,6 +23,7 @@
 
 #include "wnk/geometry.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -203,6 +204,13 @@ class MediaSource {
     // Any thread: makes a blocked open/read return Interrupted (and later calls, until reset).
     virtual void interrupt() = 0;
     virtual void reset_interrupt() = 0;
+    // Deliver content for playback at `speed` from the next select() (audio decoded to stereo PCM and
+    // time-stretched, pitch kept; timestamps stay content time). False with *why when this source
+    // cannot (the default).
+    virtual bool set_speed(double speed, std::string *why) {
+        if (why != nullptr) *why = speed == 1.0 ? "" : "this source cannot change speed";
+        return speed == 1.0;
+    }
 };
 
 enum class BackendEvent : uint8_t {
@@ -249,6 +257,26 @@ class MediaBackend {
     // Error event): switch to another decoder for it if there is one that takes its tracks. True
     // means the controller should open the media again; prepare() then keeps the other decoder.
     virtual bool fall_back(const std::string & /*why*/) { return false; }
+
+    // Playback speed (PlaybackController::set_speed), set before load(). Packets keep content time;
+    // the backend presents them `speed` times faster by dividing every timestamp it hands the decoder
+    // (to_sink) and reports position_us() in content time again (from_sink), so the decoder itself
+    // always plays at 1x (LG's SetPlayRate cannot drive the buffer-feed pipeline: PlxNative #805).
+    virtual void set_playback_speed(double speed) { playback_speed_ = speed > 0 ? speed : 1.0; }
+    double playback_speed() const { return playback_speed_; }
+
+ protected:
+    int64_t to_sink(int64_t content_us) const {
+        return content_us == kNoTime || playback_speed_ == 1.0 ? content_us
+                                                               : static_cast<int64_t>(std::llround(content_us / playback_speed_));
+    }
+    int64_t from_sink(int64_t sink_us) const {
+        return sink_us == kNoTime || playback_speed_ == 1.0 ? sink_us
+                                                            : static_cast<int64_t>(std::llround(sink_us * playback_speed_));
+    }
+
+ private:
+    double playback_speed_ = 1.0;
 };
 
 }  // namespace wnk::media

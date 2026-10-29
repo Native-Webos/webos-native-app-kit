@@ -87,6 +87,7 @@ struct PlaybackSnapshot {
     uint64_t untimed_packets = 0;         // fed without a timestamp (a source bug if it grows)
     bool buffering = false;               // Playing, held until enough is queued (see above)
     uint64_t rebuffers = 0;               // times playback stopped to buffer since open
+    double speed = 1.0;                   // playback speed in force (set_speed)
 };
 
 struct PlaybackOptions {
@@ -149,6 +150,14 @@ class PlaybackController {
     // is reloaded, so there is a short gap; while paused it is reloaded on play. A track that cannot be
     // played is logged and the current one kept. Ignored before Ready.
     void set_audio_track(int track);
+
+    // Plays at `speed` (0.5-2 is what a remote offers; 0.25-4 accepted) from the current position,
+    // done in the app: the source time-stretches the audio to stereo PCM (pitch kept) and the backend
+    // divides every timestamp by the speed, so the decoder plays at its own 1x. The decoder is
+    // reloaded (a short gap), as for an audio track. Refused, and logged, where the source cannot
+    // (DASH/HLS, audio it cannot decode) or where the fed frame rate would pass 60 fps. Ignored
+    // before Ready; a new open() starts at 1x. snapshot().speed says what is in force.
+    void set_speed(double speed);
 
     // Subtitle track to show (a stream index from MediaInfo, -1 for none).
     void set_subtitle_track(int track);

@@ -34,13 +34,14 @@ class PacingBackend : public MediaBackend {
     Feed feed(const Packet &p) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (p.pts_us == kNoTime) return Feed::Accepted;
+        const int64_t pts = to_sink(p.pts_us);
         const auto now = std::chrono::steady_clock::now();
         if (base_ == kNoTime) {
-            base_ = p.pts_us;
+            base_ = pts;
             start_ = now;
         }
         const int64_t presented = base_ + std::chrono::duration_cast<std::chrono::microseconds>(now - start_).count();
-        return p.pts_us > presented + lead_ ? Feed::Full : Feed::Accepted;
+        return pts > presented + lead_ ? Feed::Full : Feed::Accepted;
     }
     bool flush(std::string *) override {
         std::lock_guard<std::mutex> lock(mutex_);

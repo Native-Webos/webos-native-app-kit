@@ -48,6 +48,17 @@ class ScriptedSource : public MediaSource {
     // Once both streams reach stall_at_us, a read waits stall_ms (a live segment not published yet).
     int64_t stall_at_us = kNoTime;
     int stall_ms = 0;
+    bool speed_ok = true;            // set_speed answers
+    std::atomic<int> speed_milli{1000};  // the speed of the last select()
+    double speed_ = 1.0;
+    bool set_speed(double s, std::string *why) override {
+        if (!speed_ok && s != 1.0) {
+            if (why != nullptr) *why = "scripted refusal";
+            return false;
+        }
+        speed_ = s;
+        return true;
+    }
 
     bool open(const std::string &uri, std::string *error) override {
         if (uri == "block") {
@@ -111,6 +122,7 @@ class ScriptedSource : public MediaSource {
             return false;
         }
         selected_audio = a;
+        speed_milli = static_cast<int>(speed_ * 1000);
         if (v >= 0) out->video = VideoFormat{CodecId::H264, 1280, 720, 25};
         if (a >= 0) {
             // As a real source would: decode to PCM when the backend does not take AAC.
@@ -200,6 +212,8 @@ class PacedBackend : public MediaBackend {
         std::atomic<int64_t> max_video_gap_us{0};  // longest wall-clock wait between two video packets
         std::atomic<bool> in_order{true};  // video PTS only ever went up (between flushes)
         std::atomic<bool> refuse_load{false};          // load() fails, as a refusing decoder does
+        std::atomic<int> loaded_fps_milli{0};          // video frame rate of the last load, x1000
+        std::atomic<int> loaded_speed_milli{0};        // playback speed at the last load, x1000
         std::atomic<int64_t> position{kNoTime};        // what position_us() answers (kNoTime: no picture yet)
         AudioFormat audio_format;
         std::mutex m;
@@ -222,6 +236,8 @@ class PacedBackend : public MediaBackend {
     bool splice_settled() const override { return log_->splice_settled; }
     bool load(const StreamFormat &f, std::string *error) override {
         ++log_->loads;
+        if (f.video) log_->loaded_fps_milli = static_cast<int>(f.video->frame_rate * 1000);
+        log_->loaded_speed_milli = static_cast<int>(playback_speed() * 1000);
         if (log_->refuse_load) {
             *error = "refused";
             return false;
@@ -1347,4 +1363,61 @@ TEST("pcm output rate: the source's when the backend can be told it, else 44.1 o
     CHECK_EQ(pcm_output_rate(96000, {}), 96000);  // a backend that takes any rate
     CHECK_EQ(pcm_output_rate(96000, {44100, 32000}), 44100);
     CHECK_EQ(pcm_output_rate(96000, {32000, 24000}), 32000);
+}
+
+TEST("controller: set_speed reloads at the position, tells the backend, and the clock runs that much faster") {
+    Rig r(std::make_unique<ScriptedSource>(60000000), /*can_pause=*/true);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10 && r.pc->state() == PlayState::Playing; }));
+    const int loads = r.log->loads.load();
+    r.pc->set_speed(2.0);
+    REQUIRE(r.wait([&] { return r.pc->snapshot().speed == 2.0 && r.log->loads.load() == loads + 1; }));
+    REQUIRE(r.wait([&] { return r.pc->state() == PlayState::Playing; }));
+    CHECK_EQ(r.log->loaded_fps_milli.load(), 50000);  // 25 fps fed at 50
+    CHECK_EQ(r.log->loaded_speed_milli.load(), 2000);
+    CHECK_EQ(r.source->speed_milli.load(), 2000);
+    std::this_thread::sleep_for(200ms);
+    const int64_t p0 = r.pc->snapshot().position_us;
+    std::this_thread::sleep_for(500ms);
+    const int64_t moved = r.pc->snapshot().position_us - p0;
+    CHECK(moved > 800000 && moved < 1300000);  // ~1 s of content in 0.5 s
+    r.pc->set_speed(1.0);
+    REQUIRE(r.wait([&] { return r.pc->snapshot().speed == 1.0 && r.log->loaded_speed_milli.load() == 1000; }));
+    CHECK_EQ(r.log->loaded_fps_milli.load(), 25000);
+    CHECK(r.pc->stop());
+}
+
+TEST("controller: a speed that would feed more than 60 fps, or one the source refuses, keeps the speed") {
+    Rig r(std::make_unique<ScriptedSource>(60000000), true);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    const int loads = r.log->loads.load();
+    r.pc->set_speed(3.0);  // 25 fps x 3 = 75
+    std::this_thread::sleep_for(150ms);
+    CHECK_EQ(r.pc->snapshot().speed, 1.0);
+    CHECK_EQ(r.log->loads.load(), loads);  // nothing reloaded
+    r.source->speed_ok = false;
+    r.pc->set_speed(1.5);
+    std::this_thread::sleep_for(150ms);
+    CHECK_EQ(r.pc->snapshot().speed, 1.0);
+    CHECK_EQ(r.log->loads.load(), loads);
+    CHECK(r.pc->state() == PlayState::Playing);
+    CHECK(r.pc->stop());
+}
+
+TEST("controller: a speed set while paused applies on play; a new open starts at 1x") {
+    Rig r(std::make_unique<ScriptedSource>(60000000), true);
+    r.pc->open("x");
+    REQUIRE(r.wait([&] { return r.log->video.load() > 10; }));
+    r.pc->pause();
+    REQUIRE(r.wait_state(PlayState::Paused));
+    r.pc->set_speed(1.5);
+    REQUIRE(r.wait([&] { return r.pc->snapshot().speed == 1.5; }));
+    CHECK(r.pc->state() == PlayState::Paused);
+    r.pc->play();
+    REQUIRE(r.wait([&] { return r.pc->state() == PlayState::Playing && r.log->loaded_speed_milli.load() == 1500; }));
+    r.pc->open("y");
+    REQUIRE(r.wait([&] { return r.pc->state() == PlayState::Playing && r.log->loaded_speed_milli.load() == 1000; }));
+    CHECK_EQ(r.pc->snapshot().speed, 1.0);
+    CHECK(r.pc->stop());
 }

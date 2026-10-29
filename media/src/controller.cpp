@@ -57,6 +57,7 @@ struct PlaybackController::Core {
 
     void set_video_area(const Rect &pixels);
     void set_audio_track(int track);
+    void set_speed(double speed);
 
     // Subtitle track to show (a stream index from MediaInfo, -1 for none).
     void set_subtitle_track(int track) { subtitle_track_.store(track); }
@@ -68,13 +69,14 @@ struct PlaybackController::Core {
     PlayState state() const;
     const char *backend_name() const { return backend_->name(); }  // may change at open (AutoBackend)
 
-    enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop, Audio, Fail };
+    enum class Cmd : uint8_t { Open, Play, Pause, Seek, Stop, Audio, Fail, Speed };
     struct Command {
         Cmd cmd;
         std::string uri;     // Fail: the backend's reason
         int64_t pts_us = 0;  // Audio: the track
         bool release = false;  // Pause: unload the decoder even if the backend can pause
         uint64_t seek_gen = 0;  // Seek: seek_gen_ when it was asked for
+        double speed = 1.0;     // Speed
     };
     // Names the call the playback thread is blocked in, for stop()'s warning when it never returns.
     struct Busy {
@@ -95,6 +97,7 @@ struct PlaybackController::Core {
     void do_pause(bool release);
     void do_resume();
     void do_audio(int track);
+    void do_speed(double speed);
     bool load_backend();
     void unload_backend();
     // A refusal before the first picture: the backend switches decoders and the media opens again
@@ -228,6 +231,7 @@ void PlaybackController::seek_relative(int64_t delta_us) { core_->seek_relative(
 bool PlaybackController::stop() { return core_->stop(); }
 void PlaybackController::set_video_area(const Rect &pixels) { core_->set_video_area(pixels); }
 void PlaybackController::set_audio_track(int track) { core_->set_audio_track(track); }
+void PlaybackController::set_speed(double speed) { core_->set_speed(speed); }
 void PlaybackController::set_subtitle_track(int track) { core_->subtitle_track_.store(track); }
 int PlaybackController::subtitle_track() const { return core_->subtitle_track_.load(); }
 std::vector<std::shared_ptr<const SubtitleCue>> PlaybackController::subtitles_now() const { return core_->subtitles_now(); }
@@ -261,6 +265,11 @@ void PlaybackController::Core::play() { post({Cmd::Play, {}, 0}); }
 void PlaybackController::Core::pause() { post({Cmd::Pause, {}, 0}); }
 void PlaybackController::Core::pause_and_release() { post({Cmd::Pause, {}, 0, true}); }
 void PlaybackController::Core::set_audio_track(int track) { post({Cmd::Audio, {}, track}); }
+void PlaybackController::Core::set_speed(double speed) {
+    Command c{Cmd::Speed, {}, 0};
+    c.speed = speed;
+    post(c);
+}
 
 void PlaybackController::Core::toggle_pause() {
     const PlayState s = state();
@@ -359,7 +368,9 @@ int64_t PlaybackController::Core::raw_position() const {
     if (paused_at_us_ != kNoTime) return paused_at_us_;
     if (!clock_running_ || clock_base_us_ == kNoTime) return clock_base_us_;
     const auto elapsed = std::chrono::steady_clock::now() - clock_start_;
-    int64_t pos = clock_base_us_ + std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+    // Content advances `speed` times as fast as the wall clock.
+    int64_t pos = clock_base_us_ + static_cast<int64_t>(
+                                       std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() * snap_.speed);
     if (snap_.duration_us != kNoTime) pos = std::min(pos, snap_.duration_us);
     return pos;
 }
@@ -509,6 +520,7 @@ bool PlaybackController::Core::apply(const Command &c) {
             set_state(PlayState::Stopped);
             return false;
         case Cmd::Audio: do_audio(static_cast<int>(c.pts_us)); break;
+        case Cmd::Speed: do_speed(c.speed); break;
         case Cmd::Fail: {
             const PlayState s = state();
             if (s != PlayState::Idle && s != PlayState::Error && s != PlayState::Stopped && !rescue(c.uri)) {
@@ -530,6 +542,7 @@ void PlaybackController::Core::do_open(const std::string &uri) {
     priming_ = true;
     source_done_ = false;
     eos_seen_ = false;
+    source_->set_speed(1.0, nullptr);  // every open starts at 1x (snap_ below resets the speed)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snap_ = PlaybackSnapshot{};
@@ -588,10 +601,15 @@ void PlaybackController::Core::do_open(const std::string &uri) {
 
 bool PlaybackController::Core::load_backend() {
     StreamFormat format;
+    double speed;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         format = snap_.format;
+        speed = snap_.speed;
     }
+    // At a speed the decoder is fed that many more frames a second: say so to it.
+    backend_->set_playback_speed(speed);
+    if (speed != 1.0 && format.video && format.video->frame_rate > 0) format.video->frame_rate *= speed;
     std::string err;
     bool loaded;
     {
@@ -667,7 +685,9 @@ void PlaybackController::Core::do_seek(int64_t pts_us) {
         // What the decoder still holds plays first: from the clock's position to the last PTS fed.
         std::lock_guard<std::mutex> lock(mutex_);
         const int64_t pos = raw_position();
-        if (resume && pos != kNoTime && last_any_pts_ != kNoTime) splice_delay = std::max<int64_t>(0, last_any_pts_ - pos);
+        if (resume && pos != kNoTime && last_any_pts_ != kNoTime) {
+            splice_delay = static_cast<int64_t>(std::max<int64_t>(0, last_any_pts_ - pos) / snap_.speed);  // wall time
+        }
         splice_delay += caps.splice_gap_us;
     }
     park_reader();
@@ -850,6 +870,92 @@ void PlaybackController::Core::do_audio(int track) {
     priming_ = true;
     if (!source_->seek(at, &err)) {
         fail("seek after audio change failed: " + err);
+        return;
+    }
+    if (!load_backend()) return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        clock_base_us_ = at;
+        paused_at_us_ = kNoTime;
+        last_primary_pts_ = kNoTime;
+        last_any_pts_ = kNoTime;
+        splice_delay_us_ = 0;
+    }
+    feeding_ = before != PlayState::Ready;
+    set_state(before == PlayState::Ready ? PlayState::Ready : PlayState::Playing);
+}
+
+void PlaybackController::Core::do_speed(double speed) {
+    const PlayState before = state();
+    if (before != PlayState::Ready && before != PlayState::Playing && before != PlayState::Paused &&
+        before != PlayState::Seeking) {
+        WNK_LOGI(kCat, "speed %.2fx ignored in %s", speed, play_state_name(before));
+        return;
+    }
+    double current;
+    int video, audio;
+    StreamFormat format;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current = snap_.speed;
+        video = snap_.video_track;
+        audio = snap_.audio_track;
+        format = snap_.format;
+    }
+    if (std::abs(speed - current) < 1e-6) return;
+    // The decoder takes the frames that many times faster; PlxNative keeps that within 60 fps.
+    if (format.video && format.video->frame_rate > 0 && format.video->frame_rate * speed > 60.5) {
+        WNK_LOGW(kCat, "speed %.2fx refused: %.3f fps would be fed at %.1f fps", speed, format.video->frame_rate,
+                 format.video->frame_rate * speed);
+        return;
+    }
+    std::string err;
+    if (!source_->set_speed(speed, &err)) {
+        WNK_LOGW(kCat, "speed %.2fx refused: %s", speed, err.c_str());
+        return;
+    }
+    int64_t at;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        at = paused_at_us_ != kNoTime ? paused_at_us_ : clock_running_ ? raw_position() : clock_base_us_;
+        if (at == kNoTime || at < 0) at = 0;
+        clock_running_ = false;
+    }
+    if (before != PlayState::Paused) set_state(PlayState::Seeking);
+    feeding_ = false;
+    park_reader();
+    leave_buffering(false);
+    clear_lanes();
+    unload_backend();
+    source_->reset_interrupt();
+    const MediaInfo &info = source_->info();
+    const TrackInfo *v = info.track(video), *a = info.track(audio);
+    backend_->prepare(info, v, a);
+    if (!source_->select(video, audio, backend_->caps(), &format, &err)) {
+        WNK_LOGW(kCat, "speed %.2fx not playable (%s); keeping %.2fx", speed, err.c_str(), current);
+        source_->set_speed(current, nullptr);
+        speed = current;
+        if (!source_->select(video, audio, backend_->caps(), &format, &err)) {
+            fail("tracks not playable: " + err);
+            return;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_.format = format;
+        snap_.speed = speed;
+    }
+    WNK_LOGI(kCat, "speed %.2fx at %.2f s", speed, at / 1e6);
+    if (before == PlayState::Paused) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        paused_at_us_ = at;
+        return;  // do_resume loads the decoder at this speed and seeks to `at`
+    }
+    source_done_ = false;
+    eos_seen_ = false;
+    priming_ = true;
+    if (!source_->seek(at, &err)) {
+        fail("seek after a speed change failed: " + err);
         return;
     }
     if (!load_backend()) return;
@@ -1146,7 +1252,7 @@ void PlaybackController::Core::feed_one() {
                                       ? pts - pos - options_.max_lead_us
                                       : 0;
             if (ahead > 0) {
-                wait_us = std::min(wait_us, ahead);
+                wait_us = std::min(wait_us, static_cast<int64_t>(ahead / snap_.speed));  // content to wall time
                 continue;
             }
             if (lane < 0 || (pts != kNoTime && heads[lane]->pts_us != kNoTime && pts < heads[lane]->pts_us)) lane = i;

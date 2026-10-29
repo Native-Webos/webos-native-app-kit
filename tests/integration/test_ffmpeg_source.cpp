@@ -807,3 +807,40 @@ TEST("ffmpeg source: 7.1 still goes to AC-3 5.1 for Starfish's stereo PCM; 48 kH
     for (const auto &p : d.audio) samples += static_cast<int64_t>(p.data.size() / 4);
     CHECK(std::llabs(samples - 96000) < 2400);
 }
+
+TEST("ffmpeg source: at 1.5x the audio is stretched stereo PCM in content time, pitch kept; AAC no longer passes") {
+    SKIP_WITHOUT_FFMPEG();
+    REQUIRE(make_clip("speed_h264_aac.mp4", "libx264", "aac"));
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(dir() + "/speed_h264_aac.mp4", &err));
+    CHECK(!s.set_speed(8.0, &err));  // out of range
+    REQUIRE(s.set_speed(1.5, &err));
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, s.info().best(TrackType::Audio)->index, starfish_pcm_caps(), &f, &err));
+    CHECK(f.audio->codec == CodecId::PcmS16);  // AAC would pass as it is at 1x
+    const Drained d = drain(s);
+    REQUIRE(d.audio.size() > 5);
+    int64_t frames = 0, content = 0;
+    int crossings = 0;
+    int16_t last = 0;
+    for (size_t i = 0; i < d.audio.size(); ++i) {
+        const auto &p = d.audio[i];
+        const auto *pcm = reinterpret_cast<const int16_t *>(p.data.data());
+        const size_t n = p.data.size() / 4;
+        for (size_t k = 0; k < n; ++k) {
+            if (frames + static_cast<int64_t>(k) > 4800 && last < 0 && pcm[k * 2] >= 0) ++crossings;  // past the first 0.1 s
+            last = pcm[k * 2];
+        }
+        frames += static_cast<int64_t>(n);
+        content += p.duration_us;
+        if (i > 0) CHECK(std::llabs(p.pts_us - (d.audio[i - 1].pts_us + d.audio[i - 1].duration_us)) <= 1000);
+    }
+    const double wall = frames / 48000.0;
+    CHECK(std::fabs(wall - 2.0 / 1.5) < 0.08);    // 2 s of content take 1.33 s
+    CHECK(std::fabs(content / 1e6 - 2.0) < 0.1);  // and still cover 2 s of content time
+    CHECK(std::fabs(crossings / (wall - 0.1) - 440) < 8);  // 440 Hz stays 440 Hz
+    REQUIRE(s.set_speed(1.0, &err));
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, s.info().best(TrackType::Audio)->index, starfish_pcm_caps(), &f, &err));
+    CHECK(f.audio->codec == CodecId::Aac);  // back to passing it as it is
+}

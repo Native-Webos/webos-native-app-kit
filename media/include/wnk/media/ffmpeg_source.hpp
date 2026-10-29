@@ -65,6 +65,9 @@ class FfmpegSource : public MediaSource {
     bool seek(int64_t pts_us, std::string *error) override;
     void interrupt() override;
     void reset_interrupt() override;
+    // Speeds other than 1: the audio is decoded, mixed to stereo PCM and time-stretched (pitch
+    // kept), whatever the backend could take as it is; a track that cannot be decoded refuses.
+    bool set_speed(double speed, std::string *why) override;
 
     // "avformat 63.1.100 / avcodec 63.1.100" etc., for logs.
     static std::string version();

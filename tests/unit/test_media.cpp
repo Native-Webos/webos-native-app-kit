@@ -622,9 +622,13 @@ TEST("controller: a subtitle file added beside the media joins the tracks, survi
     REQUIRE(r.wait_state(PlayState::Playing));
     CHECK_EQ(r.pc->subtitle_store().count(kExternalSubtitleTrack), 1u);
     // Another media: gone.
-    r.transitions.clear();  // so the wait below sees the new open, not the old Playing
+    r.transitions.clear();
     r.pc->open("y");
     r.pc->play();
+    // A Playing callback of the old media may still be queued: the new open must be seen first.
+    REQUIRE(r.wait([&r] {
+        return std::any_of(r.transitions.begin(), r.transitions.end(), [](const auto &t) { return t.second == PlayState::Opening; });
+    }));
     REQUIRE(r.wait_state(PlayState::Playing));
     CHECK_EQ(has_side(), 0);
     CHECK_EQ(r.pc->subtitle_store().count(kExternalSubtitleTrack), 0u);

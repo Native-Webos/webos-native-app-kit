@@ -279,8 +279,10 @@ bool PlaybackController::Core::add_subtitle_track(TrackInfo info, std::vector<st
     for (const auto &c : cues) {
         if (!c || c->track != info.index) return false;
     }
-    for (const auto &c : cues) subtitles_.add(c);
+    // The store and external_subs_ change together under mutex_: an open running meanwhile clears
+    // the store and refills it from external_subs_, and must not see one without the other.
     std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto &c : cues) subtitles_.add(c);
     auto same = [&info](const TrackInfo &t) { return t.index == info.index; };
     auto it = std::find_if(external_subs_.begin(), external_subs_.end(), [&same](const auto &e) { return same(e.first); });
     if (it != external_subs_.end()) {
@@ -589,9 +591,9 @@ void PlaybackController::Core::do_open(const std::string &uri) {
         paused_at_us_ = kNoTime;
         if (applied_seek_gen_ == seek_gen_) seek_target_us_ = kNoTime;  // else a seek queued behind the open keeps it
     }
-    subtitles_.clear();
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);  // with add_subtitle_track's store update
+        subtitles_.clear();
         for (const auto &e : external_subs_) {
             for (const auto &c : e.second) subtitles_.add(c);
         }

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
+foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest dlna subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -27,6 +27,8 @@ target_link_libraries(test_iptv PRIVATE wnk_media)
 target_link_libraries(test_dovi PRIVATE wnk_media)
 target_link_libraries(test_time_stretch PRIVATE wnk_media)
 target_compile_definitions(test_dovi PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+target_link_libraries(test_dlna PRIVATE wnk_media_dlna)
+target_compile_definitions(test_dlna PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(test_subtitle_view PRIVATE wnk_media_ui)
 target_compile_definitions(test_subtitle_view PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
 target_link_libraries(test_ass PRIVATE wnk_media_ui)
@@ -166,6 +168,23 @@ if (TARGET wnk-tvui)
             PASS_REGULAR_EXPRESSION "focus widgets.sound.*sound: chord.*closed; peak level 0\\.4[0-9]"
             FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
             TIMEOUT 30)
+    # DLNA browsing against tests/integration/http_server.py's stand-in media server (/upnp/): the
+    # server from its description URL, a folder, then a video (handed to Example D) or a picture.
+    function(wnk_tvui_dlna_e2e name keys pass)
+        add_test(NAME e2e.tvui.${name}
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                        "$<TARGET_FILE:wnk-tvui>" "{\"dlna\":\"@HTTP@/upnp/description.xml\"}")
+        set_tests_properties(e2e.tvui.${name} PROPERTIES
+                ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_TVUI_KEYS=${keys}"
+                PASS_REGULAR_EXPRESSION "${pass}"
+                FAIL_REGULAR_EXPRESSION "${WNK_SANITIZER_FAIL}"
+                TIMEOUT 30)
+    endfunction()
+    wnk_tvui_dlna_e2e(dlna_folder_plays_video "wait@1500,Return,wait@1500,Return,wait@1500,Return,wait@500,Escape,Escape,Escape,Escape,Escape"
+            "servers: 1.*server Test Media at .*Home: 2 objects.*Films: 2 objects.*play http://127\\.0\\.0\\.1:[0-9]+/files/clip\\.mp4 \\(video/mp4\\) in org\\.wnk\\.examples\\.player")
+    wnk_tvui_dlna_e2e(dlna_picture_and_empty_folder "wait@1500,Return,wait@1500,Down,Return,wait@1500,Escape,wait@500,Up,Return,wait@1500,Down,Return,wait@1000,Escape,Escape,Escape,Escape,Escape"
+            "Empty: 0 objects.*Films: 2 objects.*show image http://127\\.0\\.0\\.1:[0-9]+/files/none\\.png")
+
     # A game controller (SDL's virtual pad): the D-pad and A/B navigate, a held stick repeats, X goes to
     # the app's on_gamepad, and unplugging is reported.
     wnk_tvui_e2e(gamepad_navigates "pad,Z,pad+dpright,pad-dpright,pad+a,pad-a,Z,pad+b,pad-b,Z,pad+x,pad-x,padx=1,wait@800,padx=0,pad~,Z"

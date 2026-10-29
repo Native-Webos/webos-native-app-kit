@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Media model and playback controller. SDL-free; backends and sources live in their own targets.
+# The XML reader (manifests, TTML, DIDL-Lite) and DLNA browsing stand alone, so a UI app can browse
+# media servers without the media model's dependencies (libdovi brings libgcc_s.so.1).
+add_library(wnk_media_xml STATIC src/xml.cpp)
+target_include_directories(wnk_media_xml PUBLIC include)
+add_library(wnk_media_dlna STATIC src/dlna.cpp)
+target_link_libraries(wnk_media_dlna PUBLIC wnk_media_xml wnk_core wnk_async wnk_net PRIVATE wnk_logging)
+
 add_library(wnk_media STATIC src/media.cpp src/controller.cpp src/subtitles.cpp src/device_caps.cpp src/auto_backend.cpp
-        src/xml.cpp src/manifest.cpp src/webvtt.cpp src/ttml.cpp src/bitstream.cpp src/playback_headers.cpp src/iptv.cpp src/dovi.cpp src/time_stretch.cpp)
+        src/manifest.cpp src/webvtt.cpp src/ttml.cpp src/bitstream.cpp src/playback_headers.cpp src/iptv.cpp src/dovi.cpp src/time_stretch.cpp)
 target_include_directories(wnk_media PUBLIC include)
 target_compile_definitions(wnk_media PRIVATE WNK_HAVE_DOVI=${WNK_HAVE_DOVI})
 if (WNK_HAVE_DOVI)
     target_link_libraries(wnk_media PRIVATE wnk_dovi)
 endif ()
 target_include_directories(wnk_media SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
-target_link_libraries(wnk_media PUBLIC wnk_core wnk_async wnk_logging wnk_net PRIVATE wnk_platform)  # wnk_net for net::Headers
+target_link_libraries(wnk_media PUBLIC wnk_media_xml wnk_media_dlna wnk_core wnk_async wnk_logging wnk_net PRIVATE wnk_platform)  # wnk_net for net::Headers
 
 # MediaSource on the bundled FFmpeg; network URIs go through the kit's HTTP client.
 if (TARGET wnk_ffmpeg)

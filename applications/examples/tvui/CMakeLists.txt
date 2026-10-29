@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 add_executable(wnk-tvui main.cpp)
-target_link_libraries(wnk-tvui PRIVATE wnk_app)
+target_link_libraries(wnk-tvui PRIVATE wnk_app wnk_media_dlna)  # DLNA browsing (not the media model)
 target_include_directories(wnk-tvui SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party")
 
 # Fonts and the poster thumbnails shared with Example A live next to the executable and in the ipk.
@@ -16,7 +16,7 @@ wnk_add_webos_package(
         TARGET wnk-tvui
         APPID org.wnk.examples.tvui
         TITLE "WNK TV UI"
-        VERSION 0.6.9
+        VERSION 0.6.10
         VENDOR "webos-native-app-kit"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"

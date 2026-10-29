@@ -33,6 +33,11 @@ ClearKey licence route (W3C EME Clear Key), for tests/integration/test_clearkey.
                       for the test key IDs it knows (CLEARKEY_KEYS); MODE deny answers 403, empty
                       answers a key set without the requested keys
 
+DLNA routes, a stand-in media server for Example B's browsing (tests/CMakeLists.txt e2e.tvui.dlna_*):
+    /upnp/description.xml   a MediaServer device ("Test Media") with a ContentDirectory at /upnp/control
+    /upnp/control           POST Browse: "0" → folders films (a video and a picture) and empty; any
+                            other ObjectID → SOAP fault 701 over HTTP 500
+
 WebSocket routes (GET with Upgrade: websocket), for tests/integration/test_websocket_curl.cpp:
     /ws/echo     echoes messages; text commands: ping-me (server ping), close-me (server close 1000
                  "bye"), fragment-me (3-fragment text), big (200000-byte binary), bad-frame (masked
@@ -375,6 +380,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 data = f.read()
             extra = {"Set-Cookie": "gate=open; Path=/guard"} if playlist else {}
             return self._send(200, data, extra)
+        if url.path.startswith("/upnp/"):
+            return self._upnp(url.path[len("/upnp/"):], body)
         if url.path == "/echo":
             info = {"method": self.command, "body": body.decode("utf-8", "replace"),
                     "x_test": self.headers.get("X-Test", ""), "expect": self.headers.get("Expect", ""),
@@ -386,6 +393,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, gzip.compress(b"compressed body " * 100),
                               {"Content-Encoding": "gzip", "Content-Type": "text/plain"})
         return self._send(404, b"not found")
+
+    def _upnp(self, what: str, body: bytes):
+        """A tiny DLNA media server: a description and a ContentDirectory with two folders."""
+        base = "http://" + (self.headers.get("Host") or "127.0.0.1")
+        if what == "description.xml":
+            xml = ('<?xml version="1.0"?><root xmlns="urn:schemas-upnp-org:device-1-0"><specVersion><major>1</major>'
+                   '<minor>0</minor></specVersion><device><deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>'
+                   '<friendlyName>Test Media</friendlyName><manufacturer>wnk</manufacturer><modelName>http_server.py</modelName>'
+                   '<UDN>uuid:00000000-0000-0000-0000-00000000d1a7</UDN><serviceList><service>'
+                   '<serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>'
+                   '<serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId><SCPDURL>/upnp/cd.xml</SCPDURL>'
+                   '<controlURL>/upnp/control</controlURL><eventSubURL>/upnp/events</eventSubURL></service>'
+                   '</serviceList></device></root>')
+            return self._send(200, xml.encode(), {"Content-Type": "text/xml"})
+        if what != "control" or self.command != "POST":
+            return self._send(404, b"not found")
+        text = body.decode("utf-8", "replace")
+        oid = text.split("<ObjectID>", 1)[-1].split("</ObjectID>", 1)[0] if "<ObjectID>" in text else ""
+        ns = ('xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" '
+              'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"')
+        if oid == "0":
+            items = ('<container id="films" parentID="0" childCount="2" restricted="1"><dc:title>Films</dc:title>'
+                     '<upnp:class>object.container.storageFolder</upnp:class></container>'
+                     '<container id="empty" parentID="0" childCount="0" restricted="1"><dc:title>Empty</dc:title>'
+                     '<upnp:class>object.container.storageFolder</upnp:class></container>')
+        elif oid == "films":
+            items = ('<item id="clip" parentID="films" restricted="1"><dc:title>Test Clip</dc:title>'
+                     '<upnp:class>object.item.videoItem</upnp:class><res duration="0:00:10.000" resolution="320x240" '
+                     f'protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01">{base}/files/clip.mp4</res></item>'
+                     '<item id="pic" parentID="films" restricted="1"><dc:title>A Picture</dc:title>'
+                     '<upnp:class>object.item.imageItem.photo</upnp:class>'
+                     f'<res protocolInfo="http-get:*:image/png:*">{base}/files/none.png</res></item>')
+        elif oid == "empty":
+            items = ""
+        else:
+            fault = ('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>'
+                     '<s:Fault><faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring><detail>'
+                     '<UPnPError xmlns="urn:schemas-upnp-org:control-1-0"><errorCode>701</errorCode>'
+                     '<errorDescription>No such object</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>')
+            return self._send(500, fault.encode(), {"Content-Type": "text/xml"})
+        didl = f"<DIDL-Lite {ns}>{items}</DIDL-Lite>"
+        n = didl.count("<item ") + didl.count("<container ")
+        escaped = didl.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        env = ('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>'
+               '<u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
+               f'<Result>{escaped}</Result><NumberReturned>{n}</NumberReturned><TotalMatches>{n}</TotalMatches>'
+               '<UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>')
+        return self._send(200, env.encode(), {"Content-Type": 'text/xml; charset="utf-8"'})
 
     do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = do_PATCH = _route
 

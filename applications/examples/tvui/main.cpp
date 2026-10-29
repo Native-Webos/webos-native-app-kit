@@ -13,6 +13,8 @@
 //   * OK on a card pushes a details screen (navigation stack); Back pops it and focus returns to
 //     the card it came from;
 //   * Widgets shows buttons, a modal dialog, a toast, a spinner and progress bars;
+//   * Widgets > Media servers browses DLNA servers on the network (media_servers.hpp): folders open,
+//     videos and music start Example D, pictures show here ({"dlna":"<description URL>"} opens one);
 //   * Back at the root shows "Press Back again to exit"; Exit quits (both handled by the shell);
 //   * Magic Remote pointer: hovering focuses, clicking is OK, the wheel scrolls the page or grid;
 //   * leaving the app (Home, another app) suspends drawing; returning resumes it;
@@ -31,6 +33,7 @@
 #include "wnk/ui/navigation.hpp"
 #include "wnk/ui/ui.hpp"
 #include "wnk/ui/widgets.hpp"
+#include "media_servers.hpp"
 
 #include <GLES2/gl2.h>
 #include <nlohmann/json.hpp>
@@ -269,11 +272,18 @@ class HomeScreen : public Screen {
             ctx_.open_url("https://www.webosbrew.org/", [](bool ok) { WNK_LOGI(kCat, "run: url %s", ok ? "accepted" : "refused"); });
         } else if (what == "devices") {
             find_devices(ui);
+        } else if (what == "servers") {
+            open_media(ui, {});
         } else if (what == "chord") {
             sounds_.play(sounds_.chord);
         } else {
             WNK_LOGW(kCat, "run: unknown action %s", what.c_str());
         }
+    }
+
+    // DLNA media servers: those on the network, or the one described at `description_url`.
+    void open_media(Ui &ui, const std::string &description_url) {
+        nav_.push(ui, std::make_unique<tvui_media::MediaListScreen>(ctx_, nav_, description_url));
     }
 
     void show_network(const wnk::platform::NetworkStatus &s) {
@@ -354,6 +364,7 @@ class HomeScreen : public Screen {
             ctx_.system_toast("Hello from WNK TV", [&ui](bool ok) { ui.toast(ok ? "Sent to the TV" : "The TV refused the notification"); });
         }).name = "widgets.notify";
         system.add<Button>("Find devices", [this](Ui &ui) { find_devices(ui); }).name = "widgets.devices";
+        system.add<Button>("Media servers", [this](Ui &ui) { open_media(ui, {}); }).name = "widgets.media";
         auto &buttons = col.add<Row>(24);
         buttons.add<Button>("Show a dialog", [](Ui &ui) {
             auto d = std::make_unique<Dialog>("Remove from list?",
@@ -593,6 +604,9 @@ class TvUi : public wnk::app::Delegate {
         ui.focus_within(&home_->first_rail());
         if (params.is_object() && params.contains("section") && params["section"].is_number_integer()) {
             home_->open_section(ui, params["section"].get<int>());
+        }
+        if (params.is_object() && params.contains("dlna") && params["dlna"].is_string()) {
+            home_->open_media(ui, params["dlna"].get<std::string>());  // a media server's description URL
         }
         if (params.is_object() && params.contains("run") && params["run"].is_array()) {
             for (const auto &a : params["run"]) {

@@ -20,6 +20,8 @@ docs/research/PACKAGING-AND-FIRMWARE.md A.2):
     ("Failed to extract package", error -5).
   * usr/palm/packages/<id>/packageinfo.json is generated; without it an install registers nothing.
   * Installed-Size is in KiB, as opkg expects.
+  * <app>/.wnk-state/ is added with mode 1777: the only directory the jailed app can write, used by
+    the kit to tell a reinstall from an update (everything else is root:root 0755/0644).
 """
 from __future__ import annotations
 
@@ -37,6 +39,7 @@ from pathlib import Path
 
 EPOCH = 1262304000  # fixed mtime (2010-01-01) for every archive member
 PACKAGER = "wnk-mkipk/1"
+STATE_DIR = ".wnk-state"
 APP_ID_RE = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)+$")
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
@@ -139,6 +142,13 @@ def build(app_dir: Path, out_dir: Path, maintainer: str, description: str | None
             payload_bytes += len(blob)
             executable = bool(p.stat().st_mode & 0o111)
             data.append((f"{root}/{rel}", blob, 0o755 if executable else 0o644))
+    # The one directory the jailed app may write in: the kit's install marker (wnk/storage/kv.hpp,
+    # reconcile_install). It goes with the app on uninstall and keeps its files across updates.
+    # Sticky, so other apps (which share the jail group) cannot remove or rename the app's files.
+    state = f"{root}/{STATE_DIR}"
+    if any(name == state for name, _, _ in data):
+        raise PackageError(f"{STATE_DIR}/ is the kit's; do not stage it")
+    data.append((state, None, 0o1777))
 
     # Key order follows what ares-package writes (per PlxNative), so packages diff cleanly.
     packageinfo = (json.dumps({

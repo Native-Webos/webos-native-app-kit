@@ -93,6 +93,17 @@ class MkipkTests(unittest.TestCase):
             for m in tf.getmembers():
                 self.assertEqual((m.uid, m.gid, m.uname, m.gname, m.mtime), (0, 0, "root", "root", mkipk.EPOCH))
 
+    def test_state_dir_is_the_only_writable_one(self):
+        ipk = build(make_stage(self.tmp), self.tmp / "out")
+        with tarfile.open(fileobj=io.BytesIO(dict(wnk_ipk.read_ar(ipk.read_bytes()))["data.tar.gz"]), mode="r:gz") as tf:
+            modes = {m.name: m.mode for m in tf.getmembers()}
+        self.assertEqual(modes["usr/palm/applications/org.example.demo/.wnk-state"], 0o1777)
+        self.assertEqual([n for n, m in modes.items() if m & 0o022], ["usr/palm/applications/org.example.demo/.wnk-state"])
+        stage = make_stage(self.tmp / "taken")
+        (stage / ".wnk-state").mkdir()
+        with self.assertRaises(mkipk.PackageError):
+            build(stage, self.tmp / "o")
+
     def test_rejects_bad_version_id_and_symlink(self):
         with self.assertRaises(mkipk.PackageError):
             build(make_stage(self.tmp / "v", version="1.2"), self.tmp / "o")
@@ -121,6 +132,32 @@ class CheckPackageTests(unittest.TestCase):
         needed = wnk_elf.parse(HOST_ELF.read_bytes()).needed
         failures, out = self.run_check(ipk, needed)
         self.assertEqual(failures, [], out)
+
+    def repack(self, ipk: Path, change) -> Path:
+        """The same package with data.tar.gz entries changed: change(name, mode) -> mode or None (drop)."""
+        members = dict(wnk_ipk.read_ar(ipk.read_bytes()))
+        entries = []
+        with tarfile.open(fileobj=io.BytesIO(members["data.tar.gz"]), mode="r:gz") as tf:
+            for m in tf.getmembers():
+                mode = change(m.name, m.mode)
+                if mode is not None:
+                    entries.append((m.name, None if m.isdir() else tf.extractfile(m).read(), mode))
+        out = self.tmp / "repacked" / ipk.name
+        out.parent.mkdir(exist_ok=True)
+        out.write_bytes(mkipk.ar_archive([("debian-binary", members["debian-binary"]),
+                                          ("control.tar.gz", members["control.tar.gz"]),
+                                          ("data.tar.gz", mkipk.targz(entries))]))
+        return out
+
+    def test_writable_payload_or_missing_state_dir_fails(self):
+        ipk = build(make_stage(self.tmp), self.tmp / "out")
+        needed = wnk_elf.parse(HOST_ELF.read_bytes()).needed
+        writable = self.repack(ipk, lambda n, m: 0o666 if n.endswith("/icon.png") else m)
+        failures, _ = self.run_check(writable, needed)
+        self.assertTrue(any("writable" in f for f in failures), failures)
+        missing = self.repack(ipk, lambda n, m: None if n.endswith("/.wnk-state") else m)
+        failures, _ = self.run_check(missing, needed)
+        self.assertTrue(any(".wnk-state" in f for f in failures), failures)
 
     def test_missing_licences_fail(self):
         ipk = build(make_stage(self.tmp, licences=False), self.tmp / "out")

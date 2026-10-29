@@ -518,8 +518,17 @@ from a worker via `run_then_post`. Never from `draw` or `on_frame`.
 
 There is **no durable app-writable filesystem** in the Developer Mode jail (measured on
 OLED65C1PTB, webOS 6.5.3). `/tmp/<app id>` is tmpfs. Do not "save settings to a file" on webOS.
-DB8 survived relaunch, reinstall, and reboot on that TV. The store is not secret: anything that
-can read the app's DB8 kind can read values.
+DB8 survives relaunch, updates (installing over the app) and reboot on that TV. Uninstalling does
+not clear it: webOS has no uninstall hook for native apps and leaves an app-registered kind in
+place, so a reinstalled app used to find the old one's data. `open_default_store` (used by the
+shell's `Context::store()`) now tells the cases apart. Every kit package carries
+`<app>/.wnk-state/` (mode 1777, the only directory the jailed app may write; it goes with the app
+on uninstall and keeps its files through updates), and the store and a file there share a random
+install token. A new install that finds data with a token but no file deletes the app's kind
+before the app reads it; the log says `install reinstalled`. Data written by a kit version without
+this is kept on the first run after the update and is tracked from then on. Apps that call
+`open_db8_store` directly should call `reconcile_install` first. The store is not secret: anything
+that can read the app's DB8 kind can read values.
 
 ### Secrets
 

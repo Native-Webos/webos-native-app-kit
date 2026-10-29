@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "wnk/storage/kv.hpp"
 
+#include "wnk/log.hpp"
 #include "wnk/platform/luna.hpp"
 #include "wnk/platform/process.hpp"
 
@@ -11,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 
 #include <fcntl.h>
@@ -441,8 +443,162 @@ std::unique_ptr<KeyValueStore> open_db8_store(const std::string &app_id, std::un
     return std::make_unique<Db8Store>(app_id, std::move(transport), max_value_bytes);
 }
 
+// ---- install tracking ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr const char *kInstallKey = "wnk.install";
+
+std::string new_token() {
+    std::array<unsigned char, 16> b{};
+    bool ok = false;
+    if (FILE *f = std::fopen("/dev/urandom", "rb")) {
+        ok = std::fread(b.data(), 1, b.size(), f) == b.size();
+        std::fclose(f);
+    }
+    if (!ok) {  // not secret, only unique per install
+        uint64_t x = static_cast<uint64_t>(time(nullptr)) ^ (static_cast<uint64_t>(getpid()) << 32) ^
+                     reinterpret_cast<uintptr_t>(&b);
+        for (auto &c : b) {
+            x = x * 6364136223846793005ull + 1442695040888963407ull;
+            c = static_cast<unsigned char>(x >> 56);
+        }
+    }
+    static const char *hex = "0123456789abcdef";
+    std::string out;
+    for (unsigned char c : b) out += hex[c >> 4], out += hex[c & 15];
+    return out;
+}
+
+bool read_token(const std::string &path, std::string *out) {
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) return false;
+    char buf[80];
+    const size_t n = std::fread(buf, 1, sizeof buf, f);
+    std::fclose(f);
+    out->assign(buf, n);
+    while (!out->empty() && (out->back() == '\n' || out->back() == '\r' || out->back() == ' ')) out->pop_back();
+    return !out->empty();
+}
+
+bool write_file_synced(const std::string &path, const std::string &text, std::string *why) {
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        *why = "cannot write " + path + ": " + std::strerror(errno);
+        return false;
+    }
+    const bool ok = ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size()) && ::fsync(fd) == 0;
+    if (!ok) *why = "cannot write " + path + ": " + std::strerror(errno);
+    ::close(fd);
+    if (!ok) ::unlink(path.c_str());
+    return ok;
+}
+
+}  // namespace
+
+const char *install_check_name(InstallCheck c) {
+    switch (c) {
+        case InstallCheck::Same: return "same";
+        case InstallCheck::First: return "first";
+        case InstallCheck::Reinstalled: return "reinstalled";
+        case InstallCheck::Untracked: return "untracked";
+    }
+    return "?";
+}
+
+std::string install_marker_path(const std::string &app_dir) { return app_dir + "/.wnk-state/install"; }
+
+std::string installed_app_dir() {
+    std::string dir = platform::dirname_of(platform::executable_path());
+    for (int i = 0; i < 3 && !dir.empty(); ++i) {
+        if (::access((dir + "/appinfo.json").c_str(), F_OK) == 0) return dir;
+        const std::string up = platform::dirname_of(dir);
+        if (up == dir) break;
+        dir = up;
+    }
+    return {};
+}
+
+InstallCheck reconcile_install(const std::string &app_id, const std::string &marker_path,
+                               const std::function<std::unique_ptr<Db8Transport>()> &transport, std::string *detail) {
+    auto say = [detail](std::string text) {
+        if (detail != nullptr) *detail = std::move(text);
+    };
+    std::string file_token;
+    const bool have_file = read_token(marker_path, &file_token);
+    auto store = open_db8_store(app_id, transport());
+    Entry stored;
+    const Status s = store->get(kInstallKey, &stored);
+    if (s != Status::Ok && s != Status::NotFound) {
+        say(std::string("store ") + status_name(s));
+        return InstallCheck::Untracked;
+    }
+    const bool have_token = s == Status::Ok;
+    if (have_file) {
+        if (!have_token || stored.value != file_token) {
+            // The store was cleared or replaced under this install: it takes the install's token.
+            const PutResult r = store->put(kInstallKey, file_token);
+            say(r.status == Status::Ok ? "store took the install's token" : std::string("store ") + status_name(r.status));
+        }
+        return InstallCheck::Same;
+    }
+    // No file: this install has not run with tracking yet. Prove the file can be written before
+    // deleting anything, or a read-only app directory would clear the data on every start.
+    const std::string token = new_token();
+    const std::string tmp = marker_path + ".tmp";
+    std::string why;
+    if (!write_file_synced(tmp, token + "\n", &why)) {
+        say(why);
+        return InstallCheck::Untracked;
+    }
+    if (have_token) {
+        // The data belongs to an earlier install whose directory (and file) went with it.
+        auto t = transport();
+        std::string reply;
+        const std::string payload = json{{"id", app_id + ".kv:1"}}.dump();
+        bool deleted = t && t->call("delKind", payload, &reply);
+        if (deleted) {
+            const json r = json::parse(reply, nullptr, false);
+            deleted = r.is_object() && r.value("returnValue", false);
+            if (!deleted) why = r.is_object() ? r.value("errorText", std::string("delKind refused")) : "delKind: bad reply";
+        } else {
+            why = "delKind: no reply";
+        }
+        if (!deleted) {
+            ::unlink(tmp.c_str());
+            say(why);
+            return InstallCheck::Untracked;
+        }
+        store = open_db8_store(app_id, transport());  // registers the kind again
+    }
+    const PutResult r = store->put(kInstallKey, token);
+    if (r.status != Status::Ok) {
+        ::unlink(tmp.c_str());
+        say(std::string("store ") + status_name(r.status));
+        return InstallCheck::Untracked;
+    }
+    if (::rename(tmp.c_str(), marker_path.c_str()) != 0) {
+        why = "cannot rename to " + marker_path + ": " + std::strerror(errno);
+        ::unlink(tmp.c_str());
+        store->remove(kInstallKey);  // else the next start would take the data for an old install's
+        say(why);
+        return InstallCheck::Untracked;
+    }
+    say(have_token ? "data of an earlier install deleted" : "install token written");
+    return have_token ? InstallCheck::Reinstalled : InstallCheck::First;
+}
+
 std::unique_ptr<KeyValueStore> open_default_store(const std::string &app_id, std::string *error) {
     if (platform::kIsWebOS) {
+        if (const std::string dir = installed_app_dir(); !dir.empty()) {
+            std::string detail;
+            const InstallCheck c = reconcile_install(app_id, install_marker_path(dir), [] { return luna_db8_transport(); }, &detail);
+            if (c == InstallCheck::Untracked) {
+                WNK_LOGW("storage", "install not tracked (%s): data of an uninstalled copy would stay", detail.c_str());
+            } else if (c != InstallCheck::Same) {
+                WNK_LOGI("storage", "install %s: %s", install_check_name(c), detail.c_str());
+            }
+        }
         auto store = open_db8_store(app_id, luna_db8_transport());
         // Probe once so a missing permission or DB8 problem is reported at startup, not on first save.
         const Status s = store->get("wnk.probe", nullptr);

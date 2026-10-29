@@ -4,7 +4,9 @@
 //
 // Backends:
 //   * Db8Store  — webOS: DB8 called from the app process over Luna (ADR-010). On an OLED65C1PTB,
-//                 webOS 6.5.3, data survived relaunch, reinstall and a full reboot. Requires
+//                 webOS 6.5.3, data survived relaunch, updates and a full reboot; an uninstall
+//                 leaves it behind, so open_default_store clears it on the next install
+//                 (reconcile_install below). Requires
 //                 "requiredPermissions": ["database.operation"] in appinfo.json.
 //   * FileStore — host, and disposable caches on the TV: one file per key, atomic replace.
 //
@@ -21,6 +23,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -93,7 +96,35 @@ std::unique_ptr<KeyValueStore> open_db8_store(const std::string &app_id, std::un
                                               size_t max_value_bytes = kDefaultMaxValueBytes);
 
 // The platform default: DB8 on webOS, a FileStore under $XDG_DATA_HOME/<app_id>/kv (created) on the
-// host. Returns nullptr with *error set if no durable store is available.
+// host. Returns nullptr with *error set if no durable store is available. On webOS it first runs
+// reconcile_install for the app's own directory, so data left by an uninstalled copy is gone.
 std::unique_ptr<KeyValueStore> open_default_store(const std::string &app_id, std::string *error = nullptr);
+
+// Uninstalling a Developer Mode app leaves its DB8 data behind: webOS gives a native app no
+// uninstall hook, appinstalld's removal and DB8's removeAppData do not touch a kind the app
+// registered itself, and a kind declared in the package (configuration/db/kinds) is never
+// registered for an app under /media/developer (TV-tested on an OLED65C1PTB, webOS 6.5.3,
+// 2026-10-29). So a reinstalled app found the old one's settings and downloads.
+//
+// The app directory, though, goes with the app and keeps files written into it across updates
+// (same test). Every kit package has <app>/.wnk-state/ (mode 1777, tools/mkipk.py), the one
+// directory the jailed app may write. So the store and a file there hold a random install token:
+//   file and store agree             same install: nothing changes                 → Same
+//   no file, no token in the store   first run, or the first run of an update from a kit version
+//                                    without this: the data stays                   → First
+//   no file, a token in the store    a new install of an app that was removed: the kind is deleted
+//                                    (every key/value, blob and secret envelope)    → Reinstalled
+//   file, other or no token          the store was replaced or cleared: it takes the file's token
+// When the file cannot be written (a package without .wnk-state, or a jail that mounts the app
+// directory read-only, as the Homebrew Channel's /media/cryptofs one) nothing is deleted → Untracked
+// The token is the store key "wnk.install"; the file is install_marker_path(app_dir).
+enum class InstallCheck { Same, First, Reinstalled, Untracked };
+const char *install_check_name(InstallCheck c);
+InstallCheck reconcile_install(const std::string &app_id, const std::string &marker_path,
+                               const std::function<std::unique_ptr<Db8Transport>()> &transport,
+                               std::string *detail = nullptr);
+std::string install_marker_path(const std::string &app_dir);  // <app_dir>/.wnk-state/install
+// The directory holding appinfo.json at or up to two levels above the executable's, or empty.
+std::string installed_app_dir();
 
 }  // namespace wnk::storage

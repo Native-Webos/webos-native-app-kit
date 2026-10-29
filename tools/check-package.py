@@ -47,6 +47,7 @@ DENY_IN_PRIVATE_RUNTIME = [
 ]
 EM_AARCH64 = 183
 PRIVATE_RUNTIME_MACHINES = {"arm": {wnk_elf.EM_ARM, EM_AARCH64}, "x86_64": {wnk_elf.EM_X86_64}}
+STATE_DIR = ".wnk-state"  # tools/mkipk.py
 MAINTAINER_RE = re.compile(r"[^<>]+ <[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}>")
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
@@ -132,7 +133,8 @@ def check_ipk(path: Path, expected_needed: list[str] | None, arch: str,
     files: dict[str, bytes] = {}
     modes: dict[str, int] = {}
     total = 0
-    unsafe, links, specials, not_root = [], [], [], []
+    dir_modes: dict[str, int] = {}
+    unsafe, links, specials, not_root, writable = [], [], [], [], []
     with tarfile.open(fileobj=io.BytesIO(blobs["data.tar.gz"]), mode="r:gz") as tf:
         for m in tf.getmembers():
             name = m.name[2:] if m.name.startswith("./") else m.name
@@ -149,13 +151,23 @@ def check_ipk(path: Path, expected_needed: list[str] | None, arch: str,
                 files[norm] = tf.extractfile(m).read()
                 modes[norm] = m.mode & 0o7777
                 total += m.size
-            elif not m.isdir():
+                if m.mode & 0o022:
+                    writable.append(name)
+            elif m.isdir():
+                dir_modes[norm] = m.mode & 0o7777
+                if m.mode & 0o022 and norm != app_root + STATE_DIR:
+                    writable.append(name)
+            else:
                 specials.append(name)
     r.check(not unsafe, "every payload path is under usr/palm/ and relative"
             + (f" (bad: {unsafe[:5]})" if unsafe else ""))
     r.check(not links, "payload has no symlinks or hard links" + (f" (found: {links[:5]})" if links else ""))
     r.check(not specials, "payload has only files and directories" + (f" (found: {specials[:5]})" if specials else ""))
     r.check(not not_root, "payload is owned by root:root" + (f" (not: {not_root[:5]})" if not_root else ""))
+    r.check(not writable, f"nothing but {STATE_DIR}/ is group- or world-writable"
+            + (f" (writable: {writable[:5]})" if writable else ""))
+    r.check(dir_modes.get(app_root + STATE_DIR) == 0o1777,
+            f"{STATE_DIR}/ is present with mode 1777 (install tracking, wnk/storage/kv.hpp)")
 
     kib = int(control.get("Installed-Size", "0") or 0)
     r.check(abs(kib - (total + 1023) // 1024) <= 1, f"Installed-Size {kib} KiB matches payload ({total} bytes)")

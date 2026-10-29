@@ -32,6 +32,7 @@ struct FakeDb8 {
     bool offline = false;
     std::string forced_error;                  // reply with this errorText to every call
     std::function<void()> before_put;          // simulate another writer racing us
+    bool refuse_delkind = false;
 
     static std::string error(int code, const std::string &text) {
         return json{{"returnValue", false}, {"errorCode", code}, {"errorText", text}}.dump();
@@ -106,6 +107,17 @@ struct FakeDb8 {
                 }
             }
             *reply = json{{"returnValue", true}, {"results", results}}.dump();
+        } else if (method == "delKind") {
+            const std::string id = p.at("id");
+            if (refuse_delkind || !kinds.count(id)) {
+                *reply = error(-3970, "kind not registered");
+                return true;
+            }
+            kinds.erase(id);
+            for (auto it = objects.begin(); it != objects.end();) {
+                it = it->second["_kind"] == id ? objects.erase(it) : std::next(it);
+            }
+            *reply = R"({"returnValue":true})";
         } else if (method == "del") {
             json results = json::array();
             for (const auto &id : p.at("ids")) {
@@ -338,4 +350,75 @@ TEST("default store on the host is a file store under XDG_DATA_HOME") {
     struct stat st{};
     CHECK(stat((dir + "/org.example.app/kv/x.kv").c_str(), &st) == 0);
     remove_tree(dir);
+}
+
+TEST("install tracking: data stays through the first run and updates, goes after a reinstall") {
+    FakeDb8 db;
+    auto transport = [&db] { return std::unique_ptr<Db8Transport>(new FakeTransport(&db)); };
+    const std::string dir = temp_dir();
+    REQUIRE(!dir.empty());
+    REQUIRE(mkdir((dir + "/.wnk-state").c_str(), 01777) == 0);
+    const std::string marker = install_marker_path(dir);
+    auto put = [&](const std::string &k, const std::string &v) { return open_db8_store("org.x", transport())->put(k, v).status; };
+    auto has = [&](const std::string &k) { return open_db8_store("org.x", transport())->get(k, nullptr) == Status::Ok; };
+    // Data written by a kit version without tracking: kept, the install starts being tracked.
+    REQUIRE(put("plugins", "a,b") == Status::Ok);
+    std::string detail;
+    CHECK(reconcile_install("org.x", marker, transport, &detail) == InstallCheck::First);
+    CHECK(has("plugins"));
+    CHECK(access(marker.c_str(), F_OK) == 0);
+    CHECK(access((marker + ".tmp").c_str(), F_OK) != 0);
+    // Later starts, and an update (the directory keeps the file): nothing changes.
+    CHECK(reconcile_install("org.x", marker, transport) == InstallCheck::Same);
+    CHECK(has("plugins"));
+    // Uninstalled (the directory and its file go, DB8 keeps the kind), then installed again.
+    REQUIRE(unlink(marker.c_str()) == 0);
+    CHECK(reconcile_install("org.x", marker, transport, &detail) == InstallCheck::Reinstalled);
+    CHECK(!has("plugins"));
+    CHECK(has("wnk.install"));
+    CHECK(reconcile_install("org.x", marker, transport) == InstallCheck::Same);
+    REQUIRE(put("plugins", "c") == Status::Ok);  // the new install's data is its own
+    CHECK(reconcile_install("org.x", marker, transport) == InstallCheck::Same);
+    CHECK(has("plugins"));
+    std::remove(marker.c_str());
+    rmdir((dir + "/.wnk-state").c_str());
+    rmdir(dir.c_str());
+}
+
+TEST("install tracking: a read-only directory or a refused delete deletes nothing; a cleared store takes the token") {
+    FakeDb8 db;
+    auto transport = [&db] { return std::unique_ptr<Db8Transport>(new FakeTransport(&db)); };
+    auto store = [&] { return open_db8_store("org.x", transport()); };
+    REQUIRE(store()->put("wnk.install", "old").status == Status::Ok);
+    REQUIRE(store()->put("plugins", "a").status == Status::Ok);
+    std::string detail;
+    // The file cannot be written (a package without .wnk-state).
+    CHECK(reconcile_install("org.x", "/nonexistent-wnk/.wnk-install", transport, &detail) == InstallCheck::Untracked);
+    CHECK(detail.find("cannot write") != std::string::npos);
+    CHECK(store()->get("plugins", nullptr) == Status::Ok);
+    const std::string dir = temp_dir();
+    REQUIRE(!dir.empty());
+    REQUIRE(mkdir((dir + "/.wnk-state").c_str(), 01777) == 0);
+    const std::string marker = install_marker_path(dir);
+    db.refuse_delkind = true;
+    CHECK(reconcile_install("org.x", marker, transport, &detail) == InstallCheck::Untracked);
+    CHECK(store()->get("plugins", nullptr) == Status::Ok);
+    CHECK(access(marker.c_str(), F_OK) != 0);
+    CHECK(access((marker + ".tmp").c_str(), F_OK) != 0);
+    db.refuse_delkind = false;
+    // DB8 unreachable: untracked, the file is not written either.
+    db.offline = true;
+    CHECK(reconcile_install("org.x", marker, transport) == InstallCheck::Untracked);
+    CHECK(access(marker.c_str(), F_OK) != 0);
+    db.offline = false;
+    // The file is there but the store lost its token (cleared, or restored from elsewhere).
+    REQUIRE(reconcile_install("org.x", marker, transport) == InstallCheck::Reinstalled);
+    REQUIRE(store()->remove("wnk.install") == Status::Ok);
+    REQUIRE(store()->put("plugins", "b").status == Status::Ok);
+    CHECK(reconcile_install("org.x", marker, transport, &detail) == InstallCheck::Same);
+    CHECK(store()->get("wnk.install", nullptr) == Status::Ok);
+    CHECK(store()->get("plugins", nullptr) == Status::Ok);
+    std::remove(marker.c_str());
+    rmdir((dir + "/.wnk-state").c_str());
+    rmdir(dir.c_str());
 }

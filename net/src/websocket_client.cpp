@@ -127,8 +127,10 @@ WebSocketClient::WebSocketClient(async::MainDispatcher &main, WebSocketOptions o
 
 WebSocketClient::~WebSocketClient() {
     if (thread_.joinable()) {
-        close(ws::kGoingAway, "client shutting down");
+        // stop first: the thread may act on the close at once, and must already see it is a shutdown
+        // (a short wait for the peer's answer, not close_timeout_ms).
         impl_->stop = true;  // also abandons a close handshake still waiting for the peer
+        close(ws::kGoingAway, "client shutting down");
         impl_->poke();
         thread_.join();
     }
@@ -336,7 +338,7 @@ void WebSocketClient::run(std::string url) {
             });
             bool close_sent = false;
             auto last_rx = Clock::now();
-            Clock::time_point pong_deadline{}, close_deadline{};
+            Clock::time_point pong_deadline{}, close_deadline{}, stop_cap{};
             bool waiting_pong = false;
             const auto io_deadline = [] { return Clock::now() + std::chrono::seconds(10); };
             auto send_close = [&](int code, const std::string &reason) {
@@ -375,6 +377,13 @@ void WebSocketClient::run(std::string url) {
                 if (m.stop && !close_sent) want_close = true, want_code = ws::kGoingAway;
                 if (want_close && !close_sent) send_close(want_code, want_reason);
                 if (m.stop && close_sent && options_.close_timeout_ms <= 0) break;
+                if (m.stop && close_sent) {
+                    // A close sent before the shutdown (the app's own close()) waits no longer either.
+                    if (stop_cap == Clock::time_point{}) {
+                        stop_cap = Clock::now() + std::chrono::milliseconds(std::min(500, options_.close_timeout_ms));
+                    }
+                    close_deadline = std::min(close_deadline, stop_cap);
+                }
 
                 // Incoming: read until libcurl has nothing buffered (TLS may hold data the socket no
                 // longer signals), then decode.

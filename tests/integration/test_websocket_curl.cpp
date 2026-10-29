@@ -220,3 +220,19 @@ TEST("websocket: no pong within the timeout ends the connection; destruction is 
     q.ws.reset();  // close 1001, short wait for the (absent) answer, join
     CHECK(std::chrono::steady_clock::now() - t0 < 10s);
 }
+
+TEST("websocket: destroying a client already waiting for the peer's close answer is prompt") {
+    // The app's own close() starts the close handshake with the full close_timeout_ms; the
+    // destructor then must not wait it out. This was also what a destructor met when its thread
+    // took the close request before seeing the shutdown (once in a loaded run: 30 s).
+    WebSocketOptions o;
+    o.close_timeout_ms = 30000;
+    Rig r(o);
+    REQUIRE(r.ws->connect(ws_base() + "/ws/silent"));
+    REQUIRE(r.wait([&] { return r.opened; }));
+    r.ws->close(1000, "done");
+    REQUIRE(r.wait([&] { return r.ws->state() == WsState::Closing; }, 3000ms));
+    auto t0 = std::chrono::steady_clock::now();
+    r.ws.reset();
+    CHECK(std::chrono::steady_clock::now() - t0 < 2s);
+}

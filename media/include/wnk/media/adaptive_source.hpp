@@ -18,6 +18,9 @@
 //             backend has adaptive_resolution). A switch ends the current rendition's reader after
 //             the segment it is downloading, so its demuxer meets a clean end exactly at a segment
 //             boundary, and the next rendition, already prefetching from there, takes over.
+//             DASH audio does the same within its AdaptationSet's Representations of one codec,
+//             channel count and sample rate, over what the video's bitrate leaves of the estimate
+//             (and of the limit), so the backend's audio format never changes.
 //   seek()    reopens each rendition at the segment holding the target (the audio one at or before the
 //             video's), so the first video packet is the segment's keyframe; nothing before the
 //             target is downloaded.
@@ -52,7 +55,7 @@
 // when a Period ends, and a seek starts in the Period holding the target. Bitrate switching and
 // subtitles follow the first Period's renditions only.
 // WebM renditions (VP9, Opus) play like fMP4 ones; with SegmentBase their Cues are the index.
-// Not yet: audio bitrate switching, TTML in HLS (IMSC in fMP4), encrypted renditions without ClearKey keys
+// Not yet: audio bitrate switching in HLS (audio groups per variant), TTML in HLS (IMSC in fMP4), encrypted renditions without ClearKey keys
 // (refused), hierarchical sidx indexes.
 #pragma once
 
@@ -81,7 +84,7 @@ struct AdaptiveSourceOptions {
     int64_t max_bandwidth = 0;                // bits per second; 0: no limit
     bool dolby_vision = false;                // prefer Dolby Vision renditions (else avoid them)
     std::string language;                     // preferred audio language ("de", "en-US"), else the default
-    bool adaptive_bitrate = true;             // switch video renditions with the measured throughput
+    bool adaptive_bitrate = true;             // switch video (and DASH audio) renditions with the measured throughput
     int64_t initial_bandwidth = 6000000;      // assumed before the first measurement (bits per second)
     // Media downloaded ahead of the demuxer, per rendition (rounded up to whole segments, at least
     // two). A bitrate switch plays this much of the old rendition out first.
@@ -145,7 +148,8 @@ class AdaptiveSource : public MediaSource {
     // takes effect at the next segment boundary.
     void set_bandwidth_limit(int64_t bps);
     int64_t throughput_estimate() const;  // bits per second, 0 while unknown
-    int switches() const;                 // bitrate switches since open()
+    int switches() const;                 // bitrate switches since open(), video and audio
+    int audio_switches() const;           // of those, audio ones
 
     struct Impl;
 

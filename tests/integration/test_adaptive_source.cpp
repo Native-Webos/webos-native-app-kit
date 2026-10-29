@@ -108,6 +108,15 @@ bool make_presentations() {
             "-f dash -seg_duration 2 -adaptation_sets 'id=0,streams=v id=1,streams=a' "
             "-init_seg_name 'l-init-$RepresentationID$.m4s' -media_seg_name 'l-$RepresentationID$-$Number%05d$.m4s' l.mpd";
         if (std::system(ladder.c_str()) != 0) return false;
+        // An audio ladder: two AAC Representations (48 and 160 kb/s) in one AdaptationSet, 20 s.
+        const std::string audio_ladder =
+            "cd '" + d + "' && ffmpeg -hide_banner -loglevel error -y "
+            "-f lavfi -i testsrc2=size=320x240:rate=25:duration=20 "
+            "-f lavfi -i sine=frequency=440:sample_rate=48000:duration=20 -map 0:v -map 1:a -map 1:a "
+            "-c:v libx264 -g 25 -keyint_min 25 -sc_threshold 0 -b:v 300k -c:a aac -b:a:0 48k -b:a:1 160k "
+            "-f dash -seg_duration 2 -adaptation_sets 'id=0,streams=v id=1,streams=a' "
+            "-init_seg_name 'la-init-$RepresentationID$.m4s' -media_seg_name 'la-$RepresentationID$-$Number%05d$.m4s' la.mpd";
+        if (std::system(audio_ladder.c_str()) != 0) return false;
         // Subtitles: ten cues "Cue N" at N.2-N.8 s, as HLS WebVTT segments (no X-TIMESTAMP-MAP from
         // ffmpeg) and as a DASH text/vtt file added to a copy of d.mpd.
         std::string srt, vtt = "WEBVTT\n\n";
@@ -937,6 +946,62 @@ TEST("adaptive source: bitrate switches up on a fast link and down under a limit
     CHECK(s.switches() >= 2);
     CHECK_EQ(height(s.video_rendition()), 120);  // ended on the lowest rung
     CHECK(s.throughput_estimate() > 1500000);   // localhost is fast
+}
+
+TEST("adaptive source: DASH audio switches bitrate within its AdaptationSet, beside the video, seamlessly") {
+    SKIP_UNLESS_READY();
+    AdaptiveSourceOptions o = options();
+    o.max_ahead_us = 4000000;
+    AdaptiveSource probe(o);
+    std::string err;
+    REQUIRE(probe.open(url("la.mpd"), &err));
+    const Presentation &pp = probe.presentation();
+    int64_t video_bw = 0;
+    std::vector<int64_t> audio_bw;
+    for (const Rendition &r : pp.renditions) {
+        if (r.type == TrackType::Video) video_bw = r.bandwidth;
+        if (r.type == TrackType::Audio) audio_bw.push_back(r.bandwidth);
+    }
+    REQUIRE(audio_bw.size() == 2);
+    std::sort(audio_bw.begin(), audio_bw.end());
+    // Room beside the video for the low rung only: it starts there, then the fast link takes it up.
+    o.initial_bandwidth = video_bw + (audio_bw[0] + audio_bw[1]) / 2;
+    AdaptiveSource s(o);
+    REQUIRE(s.open(url("la.mpd"), &err));
+    const Presentation &pres = s.presentation();
+    REQUIRE(s.info().tracks.size() == 2);  // one audio track: the rungs are one choice
+    StreamFormat f;
+    REQUIRE(s.select(0, 1, starfish_like(), &f, &err));
+    auto bw = [&](int r) { return pres.renditions[static_cast<size_t>(r)].bandwidth; };
+    CHECK_EQ(bw(s.audio_rendition()), audio_bw[0]);
+    Packet p;
+    std::vector<int64_t> audio;
+    size_t video = 0;
+    bool limited = false;
+    int64_t peak = 0;
+    while (s.read(&p, &err) == MediaSource::Read::Packet) {
+        if (p.type == TrackType::Video) ++video;
+        if (p.type != TrackType::Audio) continue;
+        audio.push_back(p.pts_us);
+        peak = std::max(peak, bw(s.audio_rendition()));
+        if (!limited && p.pts_us > 10000000) {
+            limited = true;
+            s.set_bandwidth_limit(video_bw + (audio_bw[0] + audio_bw[1]) / 2);  // the high rung no longer fits
+        }
+    }
+    CHECK_EQ(video, size_t{500});
+    CHECK_EQ(peak, audio_bw[1]);                   // went up
+    CHECK_EQ(bw(s.audio_rendition()), audio_bw[0]);  // and came down under the limit
+    CHECK(s.audio_switches() >= 2);
+    CHECK_EQ(s.video_rendition() >= 0, true);
+    // Every AAC frame once, in order: 20 s at 1024 samples / 48 kHz, no gap or overlap at a switch.
+    CHECK(audio.size() >= 935 && audio.size() <= 940);
+    bool even = true;
+    for (size_t i = 1; i < audio.size(); ++i) {
+        const int64_t step = audio[i] - audio[i - 1];
+        even = even && step > 20000 && step < 22700;
+    }
+    CHECK(even);
 }
 
 TEST("adaptive source live: a DASH bitrate switch lands on the current segment of the new rendition") {

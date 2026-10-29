@@ -315,7 +315,8 @@ video bitrate with the measured throughput (TV: Mux 720p to 1080p seamlessly); 0
 subtitles (HLS WebVTT, DASH text/vtt and wvtt); 0.12 plays live DASH and HLS (TV: livesim2 and Unified
 Streaming). Live subtitles
 follow their lists (0.13). DASH TTML subtitles (files and `stpp`) and TTML files beside the media
-(0.30, host tests). Open: audio bitrate switching, TTML in HLS,
+(0.30, host tests). DASH audio switches bitrate within its AdaptationSet (host tests). Open: HLS audio
+bitrate switching, TTML in HLS,
 live, subtitles from manifests, WebM renditions, DRM (refused).
 Several Periods in a static MPD play in sequence and WebM DASH (VP9, Opus, Cues index) plays
 (2026-10-20, host tests; public multi-Period and WebM streams on the host).

@@ -727,8 +727,10 @@ HLS `EXT-X-KEY` needs nothing from the app: METHOD=AES-128 segments (MPEG-TS or 
 they download, with the key from its URI (sent with `headers` and `license_headers`) and rotating
 keys followed per segment; SAMPLE-AES / SAMPLE-AES-CTR in fMP4 go through the CENC path with the
 URI's key. SAMPLE-AES in MPEG-TS and FairPlay (`skd://`) are refused with the reason. TTML in HLS
-(IMSC in fMP4) is listed and not decoded. Audio bitrate switching is not implemented; video bitrate switching is
-(`adaptive_bitrate`, default on).
+(IMSC in fMP4) is listed and not decoded. Video bitrate switching is on (`adaptive_bitrate`, default on), and so is DASH audio within its
+AdaptationSet: Representations of the same codec, channels and sample rate, chosen from what the
+video's bitrate leaves of the throughput estimate and of `set_bandwidth_limit`, so the backend's
+audio format never changes. `audio_switches()` counts them. HLS audio stays on its rendition.
 
 A static MPD may have several Periods (chapters, inserted clips). Each rendition continues into the
 matching one of the next Period (same AdaptationSet and Representation ids, else same type, language
@@ -865,7 +867,7 @@ Say these are missing. Do not emulate them with a fake.
 | No second window, no overlay window | One SDL window, one GLES context. |
 | No durable filesystem on Developer Mode webOS | Persist with DB8. |
 | `keymanager3` absent on webOS 6.5.3 | Secrets are plain envelopes there unless `protection()` says otherwise. |
-| TTML in HLS, TTML styling and images, audio-only bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
+| TTML in HLS, TTML styling and images, HLS audio bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
 | Home and Exit as background/close paths | Not fully measured. The shell already handles `SDL_QUIT` and background events. |
 | Jellyfin/Plex/Emby clients | Not in the tree. A client would be an app on top of HTTP + this UI + this player, not a change to `media/`. |
 

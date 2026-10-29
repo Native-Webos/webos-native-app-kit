@@ -2,6 +2,7 @@
 #define WNK_TEST_MAIN
 #include "wnk_test.hpp"
 
+#include "wnk/media/ass_renderer.hpp"
 #include "wnk/media/subtitle_view.hpp"
 #include "wnk/render/font.hpp"
 #include "wnk/ui/ui.hpp"
@@ -170,4 +171,41 @@ TEST("subtitle view: bitmaps map from their canvas onto the video; one upload wh
     e.frame();
     CHECK_EQ(e.r.destroyed, 1);
     CHECK_EQ(e.view->textures(), 0u);
+}
+
+TEST("subtitle view: an ASS track draws styled images at the clock's time instead of plain text") {
+    if (!AssRenderer::available()) {
+        std::printf("  SKIP: built without libass\n");
+        return;
+    }
+    Env e;
+    e.view->set_video_rect({0, 0, 1920, 1080});
+    int64_t now = 1500000;
+    e.view->set_clock([&now] { return now; });
+    const std::string header =
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 360\n\n[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, Bold\nStyle: Default,Atkinson Hyperlegible,32,&H00FFFFFF,0\n";
+    REQUIRE(e.view->set_ass_track(header, {}, WNK_TEST_FONT_DIR "/AtkinsonHyperlegible-Regular.ttf", 1920, 1080));
+    auto c = std::make_shared<SubtitleCue>();
+    c->start_us = 1000000;
+    c->end_us = 2000000;
+    c->text = "Hello";
+    c->ass_events.push_back("0,0,Default,,0,0,0,,{\\an8}Hello");  // top centre
+    e.cues = {c};
+    e.frame();
+    CHECK(e.r.white().empty());  // no plain text
+    REQUIRE(!e.r.images.empty());
+    CHECK(e.r.images[0].y < 200);  // where the tags put it
+    const int uploads = e.r.created;
+    e.frame();  // same time: drawn again from the same textures
+    CHECK_EQ(e.r.created, uploads);
+    CHECK(!e.r.images.empty());
+    CHECK_EQ(e.view->ass_renderer()->stats().events, size_t{1});  // fed once
+    now = 2500000;  // past the end
+    e.frame();
+    CHECK(e.r.images.empty());
+    // Back to plain text when the track is not ASS.
+    e.view->clear_ass_track();
+    e.frame();
+    CHECK_EQ(e.r.white().size(), size_t{1});
 }

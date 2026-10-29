@@ -25,8 +25,11 @@ if (WNK_WEBOS)
 endif ()
 
 # Drawing subtitles over the video with the UI toolkit (keeps ui/ free of media types).
-add_library(wnk_media_ui STATIC src/subtitle_view.cpp)
+add_library(wnk_media_ui STATIC src/subtitle_view.cpp src/ass_renderer.cpp)
 target_link_libraries(wnk_media_ui PUBLIC wnk_media wnk_ui)
+if (WNK_HAVE_LIBASS)
+    target_link_libraries(wnk_media_ui PRIVATE wnk_libass)
+endif ()
 
 # LG StarfishMediaAPIs backend (webOS 3.4+). Builds everywhere: libplayerAPIs and libAcbAPI are
 # dlopened and the SDL-webOS exported-window functions are looked up at runtime.

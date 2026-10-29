@@ -7,16 +7,20 @@
 //   bitmaps  PGS/DVD/DVB images mapped from their canvas onto the video rectangle (the canvas is the
 //            coded frame, so an anamorphic DVD canvas stretches with its picture). Each bitmap is
 //            uploaded once while its cue shows and released when it no longer does.
+//   ASS/SSA  with set_ass_track() (and libass in the build): drawn styled by AssRenderer at the
+//            clock's time (fonts, colours, positions, karaoke as authored); plain text otherwise.
 //
 // Lives in wnk_media_ui (ui + media) so that ui/ stays free of media types. Main thread only.
 #pragma once
 
+#include "wnk/media/ass_renderer.hpp"
 #include "wnk/media/media.hpp"
 #include "wnk/render/renderer.hpp"
 #include "wnk/ui/view.hpp"
 
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,6 +43,18 @@ class SubtitleView : public ui::View {
     SubtitleView &set_text_scale(float fraction_of_video_height);  // default 0.055
     // Space kept free at the bottom of the video, as a fraction of its height (e.g. for controls).
     SubtitleView &set_bottom_margin(float fraction_of_video_height);  // default 0.07
+    // The playback position in microseconds (e.g. [&] { return controller.snapshot().position_us; }),
+    // which styled ASS is rendered at.
+    SubtitleView &set_clock(std::function<int64_t()> clock);
+
+    // Styled ASS/SSA for the selected track: its TrackInfo::ass_header, the media's fonts, a font file
+    // for families the media does not carry, and the video's coded size. Cues with ass_events are then
+    // drawn by libass. False (plain text stays) when the build has no libass or it fails to start.
+    bool set_ass_track(const std::string &header, const std::vector<FontAttachment> &fonts,
+                       const std::string &default_font, int video_width, int video_height);
+    void clear_ass_track();
+    bool ass_active() const { return ass_ != nullptr; }
+    const AssRenderer *ass_renderer() const { return ass_.get(); }  // stats, tests
 
     // Text lines laid out for the last frame (for tests and logs).
     const std::vector<std::string> &lines() const { return lines_; }
@@ -52,6 +68,13 @@ class SubtitleView : public ui::View {
     void draw(ui::Ui &ui) override;
 
  private:
+    struct AssTexture {
+        render::TextureId id = render::kNoTexture;
+        Rect at;  // relative to the video rectangle, in the units render() was given
+    };
+    void draw_ass(render::Renderer &r, const Rect &video);
+    void release_ass_textures();
+
     struct Texture {
         render::TextureId id = render::kNoTexture;
         std::shared_ptr<const SubtitleCue> cue;  // keeps the key alive
@@ -70,6 +93,14 @@ class SubtitleView : public ui::View {
     std::vector<std::string> lines_;
     std::map<std::pair<const SubtitleCue *, size_t>, Texture> textures_;
     render::Renderer *renderer_ = nullptr;  // for releasing textures outside draw()
+    std::function<int64_t()> clock_;
+    std::unique_ptr<AssRenderer> ass_;
+    std::set<const SubtitleCue *> ass_fed_;  // cues whose events libass has
+    Cues ass_keep_;                          // keeps those pointers unique while fed
+    int ass_storage_w_ = 0, ass_storage_h_ = 0;
+    int64_t ass_pruned_us_ = 0;
+    std::vector<AssTexture> ass_textures_;
+    std::vector<AssRenderer::Region> ass_regions_;
 };
 
 }  // namespace wnk::media

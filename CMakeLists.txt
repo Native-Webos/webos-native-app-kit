@@ -41,6 +41,9 @@ include(LibWebp)
 # libdovi (static, pinned crate, built with cargo) for Dolby Vision Profile 7 -> 8.1 in media/.
 include(LibDovi)
 
+# libass and its font stack (static, pinned releases) for styled ASS/SSA subtitles in media/.
+include(LibAss)
+
 # SDL2: system SDL on the host, webosbrew SDL-webOS built from a pinned tag on webOS (ADR-003).
 if (WNK_WEBOS)
     include(SdlWebOS)

@@ -59,6 +59,15 @@ struct TrackInfo {
     bool decodable = false;      // audio the source can decode to PCM
     bool ac3_encodable = false;  // audio the source can decode and re-encode to AC-3
     SubtitleKind subtitle = SubtitleKind::None;  // subtitle tracks the source can decode
+    // ASS/SSA tracks: the script header ([Script Info], [V4+ Styles], ...), for a styled renderer
+    // (AssRenderer). Their cues then carry the raw events too. Empty for every other track.
+    std::string ass_header;
+};
+
+// A font the media carries for its styled subtitles (a Matroska attachment).
+struct FontAttachment {
+    std::string name;  // the file name the media gives it
+    std::shared_ptr<const std::vector<uint8_t>> data;
 };
 
 struct MediaInfo {
@@ -67,6 +76,7 @@ struct MediaInfo {
     int64_t duration_us = kNoTime;
     bool seekable = false;
     std::vector<TrackInfo> tracks;
+    std::vector<FontAttachment> fonts;  // for ASS tracks (TrackInfo::ass_header)
 
     const TrackInfo *track(int index) const;
     // First default track of the type, else the first of the type; nullptr if none.
@@ -124,9 +134,12 @@ struct SubtitleCue {
     int64_t start_us = kNoTime;
     int64_t end_us = kNoTime;       // kNoTime: until the next cue of the track
     std::string text;
+    // Tracks with TrackInfo::ass_header: the events as FFmpeg gives them ("ReadOrder,Layer,Style,Name,
+    // MarginL,MarginR,MarginV,Effect,Text"), for AssRenderer. `text` is still their plain form.
+    std::vector<std::string> ass_events;
     std::vector<SubtitleBitmap> bitmaps;
     int canvas_w = 0, canvas_h = 0;
-    bool empty() const { return text.empty() && bitmaps.empty(); }
+    bool empty() const { return text.empty() && bitmaps.empty() && ass_events.empty(); }
 };
 
 struct Packet {

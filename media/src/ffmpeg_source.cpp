@@ -22,6 +22,7 @@ extern "C" {
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstring>
@@ -73,6 +74,16 @@ SubtitleKind subtitle_kind(AVCodecID id) {
         case AV_CODEC_ID_DVB_SUBTITLE: return SubtitleKind::Bitmap;
         default: return SubtitleKind::None;
     }
+}
+
+// A Matroska attachment that is a font, by MIME type or file name.
+bool font_attachment(const std::string &mime, const std::string &name) {
+    std::string n = name;
+    for (char &c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto ends = [&n](const char *e) { return n.size() > std::strlen(e) && n.compare(n.size() - std::strlen(e), std::string::npos, e) == 0; };
+    return mime.rfind("font/", 0) == 0 || mime == "application/x-truetype-font" || mime == "application/x-font-ttf" ||
+           mime == "application/x-font-otf" || mime == "application/vnd.ms-opentype" || mime == "application/x-font" ||
+           ends(".ttf") || ends(".otf") || ends(".ttc");
 }
 
 std::string meta(AVDictionary *d, const char *key) {
@@ -683,11 +694,14 @@ struct FfmpegSource::Impl {
         }
         cue->canvas_w = ctx->width;
         cue->canvas_h = ctx->height;
+        const TrackInfo *track = info.track(p->stream_index);
+        const bool styled = track != nullptr && !track->ass_header.empty();
         for (unsigned r = 0; r < sub.num_rects; ++r) {
             const AVSubtitleRect *rect = sub.rects[r];
             std::string line;
             if (rect->type == SUBTITLE_ASS && rect->ass != nullptr) {
                 line = ass_event_text(rect->ass);
+                if (styled) cue->ass_events.emplace_back(rect->ass);
             } else if (rect->type == SUBTITLE_TEXT && rect->text != nullptr) {
                 line = rect->text;
             } else if (rect->type == SUBTITLE_BITMAP && rect->w > 0 && rect->h > 0 && rect->data[0] != nullptr &&
@@ -1017,7 +1031,23 @@ bool FfmpegSource::open_input(const std::string &name, const std::string &uri, s
                 // Only what this FFmpeg build can decode is offered.
                 t.subtitle = avcodec_find_decoder(par->codec_id) != nullptr ? subtitle_kind(par->codec_id)
                                                                              : SubtitleKind::None;
+                if ((par->codec_id == AV_CODEC_ID_ASS || par->codec_id == AV_CODEC_ID_SSA) && par->extradata_size > 0 &&
+                    t.subtitle != SubtitleKind::None) {
+                    t.ass_header.assign(reinterpret_cast<const char *>(par->extradata), static_cast<size_t>(par->extradata_size));
+                }
                 break;
+            case AVMEDIA_TYPE_ATTACHMENT: {
+                // Fonts for styled subtitles; at most 64 MB of them, the rest is left out.
+                const std::string file = meta(st->metadata, "filename");
+                size_t total = 0;
+                for (const auto &f : info.fonts) total += f.data->size();
+                const auto size = static_cast<size_t>(std::max(0, par->extradata_size));
+                if (size > 0 && total + size <= (64u << 20) && font_attachment(meta(st->metadata, "mimetype"), file)) {
+                    info.fonts.push_back({file, std::make_shared<const std::vector<uint8_t>>(par->extradata, par->extradata + size)});
+                }
+                t.type = TrackType::Other;
+                break;
+            }
             default: t.type = TrackType::Other; break;
         }
         info.tracks.push_back(t);

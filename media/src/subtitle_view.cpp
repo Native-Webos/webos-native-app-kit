@@ -13,6 +13,47 @@ SubtitleView::SubtitleView() = default;
 SubtitleView::~SubtitleView() {
     for (auto &[key, t] : textures_) t.used = false;
     release_unused();
+    release_ass_textures();
+}
+
+SubtitleView &SubtitleView::set_clock(std::function<int64_t()> clock) {
+    clock_ = std::move(clock);
+    return *this;
+}
+
+bool SubtitleView::set_ass_track(const std::string &header, const std::vector<FontAttachment> &fonts,
+                                 const std::string &default_font, int video_width, int video_height) {
+    clear_ass_track();
+    if (header.empty()) return false;
+    std::string err;
+    auto r = AssRenderer::create(default_font, &err);
+    if (r == nullptr) return false;
+    for (const FontAttachment &f : fonts) {
+        if (f.data) r->add_font(f.name, *f.data);
+    }
+    if (!r->set_track(header)) return false;
+    ass_ = std::move(r);
+    ass_storage_w_ = video_width;
+    ass_storage_h_ = video_height;
+    return true;
+}
+
+void SubtitleView::clear_ass_track() {
+    release_ass_textures();
+    ass_.reset();
+    ass_fed_.clear();
+    ass_keep_.clear();
+    ass_regions_.clear();
+    ass_pruned_us_ = 0;
+}
+
+void SubtitleView::release_ass_textures() {
+    if (renderer_ != nullptr) {
+        for (const AssTexture &t : ass_textures_) {
+            if (t.id != render::kNoTexture) renderer_->destroy_texture(t.id);
+        }
+    }
+    ass_textures_.clear();
 }
 
 SubtitleView &SubtitleView::set_provider(std::function<Cues()> provider) {
@@ -52,6 +93,49 @@ Rect SubtitleView::place_bitmap(const SubtitleBitmap &b, int canvas_w, int canva
 
 void SubtitleView::update(ui::Ui &, float) {
     cues_ = provider_ ? provider_() : Cues{};
+    if (ass_ == nullptr) return;
+    // libass keeps every event it is given and draws whichever is due, so each cue goes in once.
+    for (const auto &cue : cues_) {
+        if (cue->ass_events.empty() || !ass_fed_.insert(cue.get()).second) continue;
+        ass_->add_events(*cue);
+        ass_keep_.push_back(cue);
+    }
+}
+
+void SubtitleView::draw_ass(render::Renderer &r, const Rect &video) {
+    const int64_t now = clock_ ? clock_() : kNoTime;
+    const int w = static_cast<int>(video.w + 0.5f), h = static_cast<int>(video.h + 0.5f);
+    if (now == kNoTime || w <= 0 || h <= 0) return;
+    bool changed = false;
+    if (!ass_->render(now, w, h, ass_storage_w_, ass_storage_h_, &ass_regions_, &changed)) return;
+    if (changed) {
+        release_ass_textures();
+        for (const auto &g : ass_regions_) {
+            AssTexture t;
+            t.id = r.create_texture(g.width, g.height, g.rgba.data());
+            t.at = {static_cast<float>(g.x), static_cast<float>(g.y), static_cast<float>(g.width), static_cast<float>(g.height)};
+            ass_textures_.push_back(t);
+        }
+    }
+    for (const AssTexture &t : ass_textures_) {
+        if (t.id != render::kNoTexture) r.draw_image(t.id, {video.x + t.at.x, video.y + t.at.y, t.at.w, t.at.h});
+    }
+    // Events that ended a minute ago are not needed again unless the viewer seeks back, when the
+    // store offers them again (their cues are forgotten here too).
+    if (now - ass_pruned_us_ > 60000000) {
+        const int64_t before = now - 60000000;
+        ass_->prune(before);
+        for (auto it = ass_keep_.begin(); it != ass_keep_.end();) {
+            const int64_t end = (*it)->end_us != kNoTime ? (*it)->end_us : (*it)->start_us;
+            if (end < before) {
+                ass_fed_.erase(it->get());
+                it = ass_keep_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        ass_pruned_us_ = now;
+    }
 }
 
 void SubtitleView::release_unused() {
@@ -72,9 +156,12 @@ void SubtitleView::draw(ui::Ui &ui) {
     const Rect video = video_rect();
     lines_.clear();
 
+    if (ass_ != nullptr) draw_ass(r, video);
+
     // Bitmaps first; text cues of the same track rarely coexist with them.
     std::string text;
     for (const auto &cue : cues_) {
+        if (ass_ != nullptr && !cue->ass_events.empty()) continue;  // drawn styled above
         for (size_t i = 0; i < cue->bitmaps.size(); ++i) {
             const SubtitleBitmap &b = cue->bitmaps[i];
             if (b.width <= 0 || b.height <= 0) continue;

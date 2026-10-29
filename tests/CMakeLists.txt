@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
+foreach (t log platform input focus font storage async http http_stream segment_reader image ui lifecycle crash capabilities media manifest subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -28,6 +28,9 @@ target_link_libraries(test_dovi PRIVATE wnk_media)
 target_link_libraries(test_time_stretch PRIVATE wnk_media)
 target_compile_definitions(test_dovi PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(test_subtitle_view PRIVATE wnk_media_ui)
+target_compile_definitions(test_subtitle_view PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
+target_link_libraries(test_ass PRIVATE wnk_media_ui)
+target_compile_definitions(test_ass PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
 target_link_libraries(test_starfish PRIVATE wnk_media_starfish)
 target_link_libraries(test_secret PRIVATE wnk_storage)
 target_link_libraries(test_websocket PRIVATE wnk_net)
@@ -334,6 +337,7 @@ if (TARGET wnk_media_ffmpeg)
     add_executable(test_ffmpeg_source integration/test_ffmpeg_source.cpp)
     target_include_directories(test_ffmpeg_source PRIVATE unit)
     target_link_libraries(test_ffmpeg_source PRIVATE wnk_media_ffmpeg)
+    target_compile_definitions(test_ffmpeg_source PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
     add_test(NAME integration.ffmpeg_source COMMAND test_ffmpeg_source)
     if (Python3_FOUND)
         # The same suite with a local HTTP server: clips streamed through HttpStream + custom AVIO.
@@ -385,6 +389,12 @@ if (TARGET wnk-player)
     wnk_player_e2e(subtitle_file_beside_media
             "{\"autoplay\":0,\"subs\":\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/subtitles/side.srt\"}" "Z,Z,Z,Z,Z,Z,Z,Z"
             "subtitle file side.srt: 2 cues as track 1000.*subtitles: track 1000, Subtitles: side.srt \\(subrip\\).*subtitle shown: Sidecar file cue")
+    # An ASS file is drawn styled by libass (when the build has it), not as plain text.
+    if (WNK_HAVE_LIBASS)
+        wnk_player_e2e(ass_styled_by_libass
+                "{\"autoplay\":0,\"subs\":\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/subtitles/styled.ass\"}" "Z,Z,Z,Z,Z,Z,Z,Z,Z,Z"
+                "subtitles: ASS styled by libass.*subtitles: track 1000.*ass: [1-9][0-9]* frames rendered")
+    endif ()
     # The track menu (Up) opens on the playing English audio track; Right, OK plays the French one from
     # the position, with the decoder reloaded.
     wnk_player_e2e(tracks_menu_switches_audio "{\"autoplay\":3}" "Z,Z,Z,Z,Up,Right,Return,Z,Z,Z,Z,Z,Z"

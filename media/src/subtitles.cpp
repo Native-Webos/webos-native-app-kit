@@ -18,6 +18,7 @@ uint64_t fnv(uint64_t h, const void *data, size_t n) {
 
 uint64_t content_hash(const SubtitleCue &c) {
     uint64_t h = fnv(14695981039346656037ull, c.text.data(), c.text.size());
+    for (const std::string &e : c.ass_events) h = fnv(h, e.data(), e.size());  // same text, other style or ReadOrder
     for (const SubtitleBitmap &b : c.bitmaps) {
         const int geom[4] = {b.x, b.y, b.width, b.height};
         h = fnv(h, geom, sizeof geom);

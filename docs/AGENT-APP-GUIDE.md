@@ -341,6 +341,7 @@ stubbing a lookalike.
 | File or HTTP video, pause, seek | `FfmpegSource` + `PlaybackController` + `AutoBackend` (Starfish preferred, NDL fallback). Example D. |
 | DASH (`.mpd`) or HLS (`.m3u8`), including live | `AdaptiveSource` when `AdaptiveSource::handles(uri)`. |
 | Subtitles in the picture | `SubtitleView` (`wnk_media_ui`) fed by `controller->subtitles_now()`. |
+| Styled ASS/SSA subtitles | `SubtitleView::set_ass_track` with the track's `ass_header` and `snapshot().info.fonts`, plus `set_clock`. Example D. |
 | Subtitle file next to the video (`.srt`, `.vtt`, `.ass`) | `load_subtitle_file` on a worker, then `controller->add_subtitle_track`. Example D's `{"subs"}`. |
 | Audio language / track menu | `snapshot().info.tracks` lists them; `set_audio_track(index)` while playing or paused; `snapshot().audio_track` is the one playing. Example D's `open_tracks`. |
 | Playback speed (0.5x-2x) | `set_speed(s)` while playing or paused; `snapshot().speed` is the one in force. File sources only; refused for DASH/HLS and where the fed frame rate would pass 60 fps. Audio is stereo while sped up. Example D's track menu. |
@@ -728,7 +729,13 @@ the first Period; a rendition with no match in the next Period ends there. A liv
 its first Period. WebM renditions (VP9, Opus) play too, indexed by the file's Cues.
 
 Subtitles the FFmpeg source can decode (SubRip, ASS/SSA, WebVTT, MP4 timed text, PGS, DVD, DVB)
-become cues. ASS styling is stripped to plain text. Manifest subtitles: HLS WebVTT, DASH
+become cues. ASS/SSA tracks also keep their script header (`TrackInfo::ass_header`), their raw events
+(`SubtitleCue::ass_events`) and the media's font attachments (`MediaInfo::fonts`). Then
+`SubtitleView::set_ass_track(header, fonts, default_font, video_w, video_h)` plus `set_clock(...)` draws
+them styled with libass: fonts, colours, positions, rotation, karaoke and drawings as authored. Without
+libass (`-DWNK_LIBASS=OFF`), or for other formats, the plain text is drawn. libass has no font provider on
+the TV, so a family the media does not carry falls back to `default_font`. Give the app's own faces
+as extra fonts so a bold style gets the bold face (Example D's `select_subtitles`). Manifest subtitles: HLS WebVTT, DASH
 `text/vtt` and `wvtt`. A subtitle file beside the media (SubRip, WebVTT, ASS; a path or http(s) URL)
 is read whole on a worker with `load_subtitle_file(url, kExternalSubtitleTrack + n, options, &file, &err)`
 and handed to `controller->add_subtitle_track(file.info, file.cues)`. It joins the track list and is
@@ -848,7 +855,7 @@ Say these are missing. Do not emulate them with a fake.
 | No second window, no overlay window | One SDL window, one GLES context. |
 | No durable filesystem on Developer Mode webOS | Persist with DB8. |
 | `keymanager3` absent on webOS 6.5.3 | Secrets are plain envelopes there unless `protection()` says otherwise. |
-| TTML subtitles, ASS styling, audio-only bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
+| TTML subtitles, audio-only bitrate switching, DASH sidx boxes that index other sidx boxes | Not implemented. |
 | Home and Exit as background/close paths | Not fully measured. The shell already handles `SDL_QUIT` and background events. |
 | Jellyfin/Plex/Emby clients | Not in the tree. A client would be an app on top of HTTP + this UI + this player, not a change to `media/`. |
 

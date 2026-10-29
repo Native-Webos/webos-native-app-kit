@@ -687,6 +687,47 @@ TEST("subtitle file: a file without subtitles, a missing file and cancelling are
     CHECK_EQ(err, std::string("cancelled"));
 }
 
+TEST("ffmpeg source: an ASS track keeps its script header and raw events; attached fonts are listed") {
+    SKIP_WITHOUT_FFMPEG();
+    REQUIRE(make_clip("h264_aac.mp4", "libx264", "aac"));
+    const std::string ass = write_text("styled.ass", kAss);
+    const std::string out = dir() + "/styled_font.mkv";
+    const std::string cmd = "ffmpeg -hide_banner -loglevel error -y -i '" + dir() + "/h264_aac.mp4' -i '" + ass +
+                            "' -map 0 -map 1 -c copy -attach '" WNK_TEST_FONT_DIR "/AtkinsonHyperlegible-Bold.ttf' "
+                            "-metadata:s:t mimetype=application/x-truetype-font '" + out + "'";
+    REQUIRE(std::system(cmd.c_str()) == 0);
+    FfmpegSource s;
+    std::string err;
+    REQUIRE(s.open(out, &err));
+    const TrackInfo *t = s.info().best(TrackType::Subtitle);
+    REQUIRE(t != nullptr);
+    CHECK(t->ass_header.find("[Script Info]") != std::string::npos);
+    CHECK(t->ass_header.find("Style: Default") != std::string::npos);
+    REQUIRE(s.info().fonts.size() == 1u);
+    CHECK_EQ(s.info().fonts[0].name, std::string("AtkinsonHyperlegible-Bold.ttf"));
+    CHECK(s.info().fonts[0].data->size() > 10000u);
+    StreamFormat f;
+    REQUIRE(s.select(s.info().best(TrackType::Video)->index, -1, ndl_like_caps(), &f, &err));
+    const auto subs = subtitle_packets(s);
+    REQUIRE(subs.size() == 2u);
+    const SubtitleCue &first = *subs[0].subtitle;
+    REQUIRE(first.ass_events.size() == 1u);
+    CHECK(first.ass_events[0].find("{\\b1}Hello{\\b0} there") != std::string::npos);  // tags kept for libass
+    CHECK_EQ(first.text, std::string("Hello there"));                                   // plain form as before
+}
+
+TEST("subtitle file: an .ass file gives its header and events; SubRip gives neither") {
+    SubtitleFile f;
+    std::string err;
+    REQUIRE(load_subtitle_file(write_text("hdr.ass", kAss), kExternalSubtitleTrack, {}, &f, &err));
+    CHECK(f.info.ass_header.find("PlayResX: 640") != std::string::npos);
+    REQUIRE(!f.cues.empty());
+    CHECK(!f.cues[0]->ass_events.empty());
+    REQUIRE(load_subtitle_file(write_text("plain.srt", kSrt), kExternalSubtitleTrack, {}, &f, &err));
+    CHECK(f.info.ass_header.empty());
+    CHECK(f.cues[0]->ass_events.empty());
+}
+
 // ---- over HTTP (needs http_server.py: WNK_TEST_HTTP_BASE and WNK_TEST_FILES_DIR) ------------------
 
 namespace {

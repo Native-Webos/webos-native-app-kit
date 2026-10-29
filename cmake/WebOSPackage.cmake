@@ -126,6 +126,9 @@ of the same version and options.
             "${_kit}/third_party/nanosvg/LICENSE.txt" "${_kit}/third_party/licenses/libwebp-BSD-3-Clause.txt"
             "${_kit}/third_party/licenses/libwebp-PATENTS.txt"
             "${_kit}/third_party/licenses/libdovi-crates.txt"
+            "${_kit}/third_party/licenses/libass-ISC.txt" "${_kit}/third_party/licenses/libass-FreeType-LICENSE.txt"
+            "${_kit}/third_party/licenses/libass-FreeType-FTL.txt" "${_kit}/third_party/licenses/libass-FriBidi-LGPL-2.1.txt"
+            "${_kit}/third_party/licenses/libass-HarfBuzz-MIT.txt" "${_kit}/third_party/licenses/libass-libunibreak-Zlib.txt"
             "${_kit}/third_party/curl/COPYING")
 
     set(_strip "${WNK_NDK_PREFIX}strip")
@@ -142,6 +145,12 @@ of the same version and options.
             COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libwebp-BSD-3-Clause.txt" "${_stage}/licenses/libwebp-BSD-3-Clause.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libwebp-PATENTS.txt" "${_stage}/licenses/libwebp-PATENTS.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libdovi-crates.txt" "${_stage}/licenses/libdovi-crates.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libass-ISC.txt" "${_stage}/licenses/libass-ISC.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libass-FreeType-LICENSE.txt" "${_stage}/licenses/libass-FreeType-LICENSE.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libass-FreeType-FTL.txt" "${_stage}/licenses/libass-FreeType-FTL.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libass-FriBidi-LGPL-2.1.txt" "${_stage}/licenses/libass-FriBidi-LGPL-2.1.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libass-HarfBuzz-MIT.txt" "${_stage}/licenses/libass-HarfBuzz-MIT.txt"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/licenses/libass-libunibreak-Zlib.txt" "${_stage}/licenses/libass-libunibreak-Zlib.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_kit}/third_party/curl/COPYING" "${_stage}/licenses/curl-headers.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_source_txt}" "${_stage}/licenses/SOURCE.txt"
             COMMAND "${CMAKE_COMMAND}" -E copy "${_appinfo}" "${_stage}/appinfo.json"

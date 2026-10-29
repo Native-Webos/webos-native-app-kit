@@ -199,6 +199,7 @@ class PlayerScreen : public Screen {
         subs_view_ = &add<SubtitleView>();
         subs_view_->set_width(Dim::fill()).set_height(Dim::fill());
         subs_view_->set_provider([this] { return controller_ ? controller_->subtitles_now() : SubtitleView::Cues{}; });
+        subs_view_->set_clock([this] { return controller_ ? controller_->snapshot().position_us : kNoTime; });
         bar_ = &add<Column>(14);
         bar_->set_align(Align::Stretch, Align::End);
         bar_->set_padding({80, 40, 80, 60});
@@ -378,6 +379,15 @@ class PlayerScreen : public Screen {
             shown_ = shown;
             if (!shown.empty()) WNK_LOGI(kCat, "subtitle shown: %s", shown.c_str());
         }
+        if (const AssRenderer *ass = subs_view_->ass_renderer(); ass != nullptr) {
+            const AssRenderer::Stats st = ass->stats();
+            if (st.frames != ass_frames_logged_ && ui.now_ms() - last_ass_log_ms_ >= 2000) {
+                last_ass_log_ms_ = ui.now_ms();
+                ass_frames_logged_ = st.frames;
+                WNK_LOGI(kCat, "ass: %llu frames rendered, last %.1f ms, max %.1f ms, %zu events",
+                         static_cast<unsigned long long>(st.frames), st.last_ms, st.max_ms, st.events);
+            }
+        }
         // Once a second: what the controller has fed, for the PTS-unit experiment.
         if (ui.now_ms() - last_log_ms_ >= 1000 && s.state == PlayState::Playing) {
             last_log_ms_ = ui.now_ms();
@@ -482,6 +492,22 @@ class PlayerScreen : public Screen {
         WNK_LOGI(kCat, "tracks menu open, focus=%s", f != nullptr ? f->name.c_str() : "<none>");
     }
 
+    // The app's own faces, so a script asking for its family in bold gets the bold one. Read once.
+    const std::vector<FontAttachment> &app_fonts() {
+        if (app_fonts_.empty()) {
+            for (const char *name : {"AtkinsonHyperlegible-Regular.ttf", "AtkinsonHyperlegible-Bold.ttf"}) {
+                std::vector<uint8_t> data;
+                if (FILE *f = std::fopen((ctx_.launch().app_dir + "/fonts/" + name).c_str(), "rb")) {
+                    uint8_t buf[65536];
+                    for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) data.insert(data.end(), buf, buf + n);
+                    std::fclose(f);
+                }
+                if (!data.empty()) app_fonts_.push_back({name, std::make_shared<const std::vector<uint8_t>>(std::move(data))});
+            }
+        }
+        return app_fonts_;
+    }
+
     // A subtitle file beside the media: read whole on a worker, then added as a track and shown if
     // nothing else is.
     void load_subtitles(const std::string &url, int track) {
@@ -528,9 +554,22 @@ class PlayerScreen : public Screen {
     void select_subtitles(int track) {
         controller_->set_subtitle_track(track);
         std::string label = "Subtitles off";
+        subs_view_->clear_ass_track();
         for (const TrackInfo &t : tracks_) {
             if (t.index != track) continue;
             label = "Subtitles: " + track_name(t);
+            if (!t.ass_header.empty()) {
+                // Styled: the media's fonts first, the app's own for any family it lacks.
+                const PlaybackSnapshot snap = controller_->snapshot();
+                const TrackInfo *v = snap.info.best(TrackType::Video);
+                std::vector<FontAttachment> fonts = snap.info.fonts;
+                fonts.insert(fonts.end(), app_fonts().begin(), app_fonts().end());
+                const bool styled = subs_view_->set_ass_track(t.ass_header, fonts,
+                                                              ctx_.launch().app_dir + "/fonts/AtkinsonHyperlegible-Regular.ttf",
+                                                              v != nullptr ? v->width : 0, v != nullptr ? v->height : 0);
+                WNK_LOGI(kCat, "subtitles: ASS %s, %zu embedded font(s)", styled ? "styled by libass" : "as plain text",
+                         snap.info.fonts.size());
+            }
         }
         subs_label_->set_text(label);
         WNK_LOGI(kCat, "subtitles: track %d, %s", track, label.c_str());
@@ -579,6 +618,9 @@ class PlayerScreen : public Screen {
     std::vector<std::pair<double, double>> caps_;
     size_t next_cap_ = 0;
     std::vector<std::string> subtitle_files_;
+    std::vector<FontAttachment> app_fonts_;
+    uint64_t ass_frames_logged_ = 0;
+    double last_ass_log_ms_ = 0;
     std::shared_ptr<wnk::net::HttpTransport> http_;
     AdaptiveSource *adaptive_ = nullptr;  // owned by controller_; null for files
     wnk::async::Lifetime life_;  // last: worker results for a closed screen are dropped

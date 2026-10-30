@@ -45,12 +45,12 @@ See "Recipe: add the app" in `docs/AGENT-APP-GUIDE.md`.
 | Path | Contents |
 |---|---|
 | `logging/` | Thread-safe structured logger, secret redaction, safe log files (0640, no symlinks) |
-| `platform/` | Process setup, launch params, app/runtime paths, device and storage probe, Luna calls |
+| `platform/` | Process setup, launch params, app/runtime paths, device and storage probe, Luna calls; USB drives, folder listings and subtitle files beside a video |
 | `core/` | Shared geometry (logical 1920x1080 units) |
 | `input/` | Raw key → semantic `Action` mapping with per-entry provenance; SDL adapter in `input/sdl` |
 | `focus/` | Focus manager: directional navigation, explicit neighbours, scopes, modal trapping, history |
 | `async/` | Cancellation tokens, worker pool, main-thread dispatcher, lifetime guards |
-| `net/` | HTTP(S) client: libcurl loaded at runtime, cancellation, limits, retries, main-thread delivery; WebSocket client (RFC 6455 over curl CONNECT_ONLY) |
+| `net/` | HTTP(S) client: libcurl loaded at runtime, cancellation, limits, retries, main-thread delivery; a private HTTP disk cache that follows the servers' caching headers; WebSocket client (RFC 6455 over curl CONNECT_ONLY); LAN discovery (mDNS, SSDP/UPnP), Wake-on-LAN |
 | `image/` | Image service: fetch, decode (PNG, JPEG, GIF, BMP, WebP via a static libwebp, SVG via nanosvg drawn at display size), downscale, memory and disk caches, coalescing; textures via the renderer |
 | `storage/` | Key/value store with revisions: DB8 on the TV, atomic files on the host; secret store (keymanager3 AES-GCM where available) |
 | `render/` | Renderer interface, fonts/UTF-8/atlas packing (CPU), GLES2 backend in `render/gles2` |
@@ -60,11 +60,11 @@ See "Recipe: add the app" in `docs/AGENT-APP-GUIDE.md`.
 | `app/` | App shell (`wnk::app::run` + `Delegate`): SDL/GL setup, main loop, input routing, lifecycle state machine (Running ⇄ Suspended), timed shutdown under a watchdog, metrics overlay |
 | `diagnostics/` | Frame timing (per loop phase), process memory, crash record (async-signal-safe; `tools/symbolize-crash.py` resolves it offline), capabilities (Supported/Unsupported/Unknown) and device info without identifiers |
 | `services/auth/` | Optional sign-in service: credentials sealed through `SecretStore`, account list, session state, authorized requests with single-flight token refresh, sign-out |
-| `media/` | Media model, playback controller, FFmpeg source (bundled FFmpeg via `tools/build-ffmpeg.sh`), NDL v2 backend, no-output pacing backend |
+| `media/` | Media model, playback controller, FFmpeg source (bundled FFmpeg via `tools/build-ffmpeg.sh`), DASH/HLS adaptive source, Starfish and NDL v2 backends, subtitles (SRT, WebVTT, TTML, ASS), seek previews (DASH/HLS/WebVTT thumbnail tracks), DLNA media server browsing |
 | `applications/examples/hello/` | Example A: diagnostics without the app shell: tile grid with focus ring, modal dialog, key log, device and network probes |
-| `applications/examples/tvui/` | Example B: sidebar, poster rails, 1000-item grid, details screen, dialogs, a settings page of form controls and a QR code; `ui/` on the `app/` shell |
+| `applications/examples/tvui/` | Example B: sidebar, poster rails, 1000-item grid, details screen, dialogs, a settings page of form controls and a QR code, DLNA media servers; `ui/` on the `app/` shell |
 | `applications/examples/shows/` | Example C: networked app on the TVmaze API: paged grid, search, details, cancellation, error states, saved copy and favourites in DB8 |
-| `applications/examples/player/` | Example D: playback of bundled A/V-sync clips (`tools/make-test-clips.sh`) and public DASH/HLS streams through Starfish or NDL, with seek, pause, and an audio and subtitle track menu |
+| `applications/examples/player/` | Example D: playback of bundled A/V-sync clips (`tools/make-test-clips.sh`) and public DASH/HLS streams through Starfish or NDL, with seek (and seek previews), pause, an audio and subtitle track menu, and videos and music from USB drives |
 | `cmake/` | Target detection, SDL-webOS build, `wnk_add_webos_package()` |
 | `tools/` | `mkipk.py` (reproducible ipk), `check-package.py`, `fw-check.py`, shell tools |
 | `tests/` | C++ unit tests and Python packaging tests |
@@ -81,6 +81,23 @@ build/host-debug/applications/examples/tvui/wnk-tvui        # Example B; WNK_TVU
 build/host-debug/applications/examples/shows/wnk-shows      # Example C (needs the network); WNK_SHOWS_KEYS / _SHOT
 build/host-debug/applications/examples/player/wnk-player    # Example D (no picture on the host: pacing backend); WNK_PLAYER_KEYS / _SHOT
 ```
+
+## Proposed features: help wanted
+
+These would make the kit useful for more kinds of app. None is started; each is a self-contained
+piece of work. **If you would like to implement one, you are very welcome:** open an issue saying
+which one you are taking (so two people do not build the same thing), read `CONTRIBUTING.md` and
+`docs/AGENT-APP-GUIDE.md`, and ask in the issue if anything is unclear. A pull request with host
+tests is a great start even without a TV; say so, and someone with a TV can try it.
+
+| Feature | What it would take | Where to start |
+|---|---|---|
+| **Chapters** | Read chapter markers from MKV and MP4 (FFmpeg's `AVFormatContext::chapters`), expose them in `MediaInfo`, show them on Example D's progress bar and let the remote jump between them. | `media/src/ffmpeg_source.cpp`, `media/include/wnk/media/media.hpp`, Example D's `PlayerScreen` |
+| **Arabic, Hebrew and Indic text** | Text shaping and right-to-left layout. The renderer draws per character with font fallback today; these scripts need HarfBuzz (the TV ships `libharfbuzz.so.0`, so it could be loaded at runtime like libcurl) and bidi ordering (FriBidi is already built for libass). | `render/` (font and text layout), `ui/` `Label` and `TextField`, `tools/fw-lib-matrix.py` for the firmware check |
+| **Game sprites** | Sprite sheets (frames, animation), a tile-map helper and a fixed-step scene loop on top of the existing custom drawing, gamepads and app sound, with a small example game. | `render/renderer.hpp` (`draw_image` with UV rectangles), `ui::GlView`, `audio/`, `input/gamepad.hpp` |
+| **Gamepad rumble** | Vibration through `SDL_GameControllerRumble`, exposed on the gamepad API and tried on the TV with the pads it supports. | `input/gamepad.hpp`, `input/sdl` |
+
+Bigger ideas are welcome in issues too.
 
 ## Releasing
 

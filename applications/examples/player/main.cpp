@@ -32,6 +32,7 @@
 //   {"audio": "5:2,9:1"}                   scripted audio track changes (seconds after the player opens:
 //                                          stream index), for checking the switch without a remote
 //   {"speeds": "5:1.5,15:1"}               scripted playback speeds (seconds after the player opens: speed)
+//   {"browse": ""}                         the USB drives ({"browse": "/tmp/usb/sda/sda1/Films"}: that folder)
 //   {"thumbs": "http://.../thumbs.vtt"}   seek previews for a plain file (WebVTT cues naming
 //                                          "sheet.jpg#xywh=x,y,w,h"); DASH/HLS bring their own
 //   {"subs": ["http://.../film.srt"]}      subtitle files beside the media (SubRip, WebVTT, ASS, TTML; a
@@ -65,8 +66,10 @@
 #include "wnk/media/starfish_backend.hpp"
 #include "wnk/media/subtitle_view.hpp"
 #include "wnk/media/thumbnails.hpp"
+#include "wnk/platform/files.hpp"
 #include "wnk/platform/luna.hpp"
 #include "wnk/platform/process.hpp"
+#include "wnk/ui/collection.hpp"
 #include "wnk/ui/navigation.hpp"
 #include "wnk/ui/widgets.hpp"
 
@@ -1017,6 +1020,142 @@ class DrmTestScreen : public Screen {
 
 // ---- clip list -------------------------------------------------------------------------------------
 
+std::string size_text(uint64_t bytes) {
+    char b[32];
+    if (bytes >= (1ull << 30)) {
+        std::snprintf(b, sizeof b, "%.1f GB", static_cast<double>(bytes) / (1ull << 30));
+    } else {
+        std::snprintf(b, sizeof b, "%.0f MB", static_cast<double>(bytes) / (1ull << 20));
+    }
+    return b;
+}
+
+// USB drives (wnk/platform/files.hpp): with no path, the drives the TV has mounted, checked every
+// 2 s so plugging one in or pulling it out shows; with a path, that folder. Folders open; videos
+// and music play, with the subtitle files beside them as tracks.
+class FilesScreen : public Screen {
+ public:
+    FilesScreen(wnk::app::Context &ctx, Navigator &nav, const Settings &settings, std::string path, std::string title)
+        : Screen(std::move(title)), ctx_(ctx), nav_(nav), settings_(settings), path_(std::move(path)) {
+        name = "files";
+        set_padding({120, 70, 120, 40});
+        auto &col = add<Column>(20);
+        col.set_height(Dim::fill());
+        col.add<Label>(this->title(), TextRole::Title);
+        status_ = &col.add<Label>(path_.empty() ? "Looking for USB drives…" : "Reading the folder…");
+        status_->set_muted(true);
+        list_ = &col.add<CollectionView>(Axis::Vertical, 1, wnk::Size{1680, 72}, 12);
+        list_->set_width(Dim::fill());
+        list_->set_height(Dim::fill());
+        list_->name = "files.rows";
+        list_->on_activate = [this](Ui &ui, size_t i) { open(ui, i); };
+        if (!path_.empty()) load_folder();
+    }
+
+ protected:
+    void update(Ui &ui, float) override {
+        if (!path_.empty() || ui.now_ms() < next_check_ms_) return;
+        next_check_ms_ = ui.now_ms() + 2000;
+        auto volumes = wnk::platform::removable_volumes();
+        std::string key;
+        for (const auto &v : volumes) key += v.path + "\n";
+        if (key == volumes_key_ && checked_) return;
+        checked_ = true;
+        volumes_key_ = key;
+        WNK_LOGI(kCat, "usb: %zu drive(s)", volumes.size());
+        std::vector<Row> rows;
+        for (const auto &v : volumes) {
+            WNK_LOGI(kCat, "usb: %s at %s (%s%s)", v.name.c_str(), v.path.c_str(), v.fs_type.c_str(), v.read_only ? ", read-only" : "");
+            Row r;
+            r.text = v.name + (v.total_bytes > 0 ? "   ·   " + size_text(v.free_bytes) + " free of " + size_text(v.total_bytes) : "");
+            r.path = v.path;
+            r.kind = wnk::platform::FileKind::Folder;
+            r.title = v.name;
+            rows.push_back(std::move(r));
+        }
+        show(std::move(rows), "Plug in a USB drive: it shows here.");
+    }
+
+ private:
+    struct Row {
+        std::string text, path, title;
+        wnk::platform::FileKind kind = wnk::platform::FileKind::Other;
+    };
+
+    void show(std::vector<Row> rows, const std::string &empty_text) {
+        rows_ = std::move(rows);
+        status_->set_text(rows_.empty() ? empty_text : std::to_string(rows_.size()) + (rows_.size() == 1 ? " entry" : " entries"));
+        list_->set_items(rows_.size(), [this](Ui &, size_t i) {
+            auto b = std::make_unique<Button>(rows_[i].text);  // no handler: OK goes to on_activate
+            b->name = "files.row" + std::to_string(i);
+            return b;
+        });
+        if (!rows_.empty()) list_->focus_index(ctx_.ui(), 0);
+    }
+
+    // On a worker: a USB stick can take a while to answer.
+    void load_folder() {
+        struct Listing {
+            std::vector<wnk::platform::FileEntry> entries;
+            std::string error;
+            bool ok = false;
+        };
+        wnk::async::run_then_post<Listing>(
+            ctx_.pool(), ctx_.dispatcher(), life_.weak(), {},
+            [path = path_](const wnk::async::CancellationToken &) {
+                Listing l;
+                l.ok = wnk::platform::list_folder(path, &l.entries, &l.error);
+                return l;
+            },
+            [this](Listing l) {
+                std::vector<Row> rows;
+                size_t other = 0;
+                for (auto &e : l.entries) {
+                    using wnk::platform::FileKind;
+                    if (e.kind != FileKind::Folder && e.kind != FileKind::Video && e.kind != FileKind::Audio) {
+                        ++other;
+                        continue;
+                    }
+                    Row r;
+                    r.kind = e.kind;
+                    r.path = e.path;
+                    r.title = e.name;
+                    r.text = std::string(e.kind == FileKind::Folder ? "Folder" : e.kind == FileKind::Video ? "Video" : "Music") +
+                             "   ·   " + e.name + (e.kind == FileKind::Folder ? "" : "   ·   " + size_text(e.size));
+                    rows.push_back(std::move(r));
+                }
+                WNK_LOGI(kCat, "folder: %zu playable entries, %zu other%s%s", rows.size(), other, l.ok ? "" : ": ", l.error.c_str());
+                show(std::move(rows), l.ok ? "Nothing here to play." : "Cannot read it: " + l.error);
+            });
+    }
+
+    void open(Ui &ui, size_t i) {
+        if (i >= rows_.size()) return;
+        const Row &r = rows_[i];
+        if (r.kind == wnk::platform::FileKind::Folder) {
+            nav_.push(ui, std::make_unique<FilesScreen>(ctx_, nav_, settings_, r.path, r.title));
+            return;
+        }
+        Settings s = settings_;
+        for (const std::string &sub : wnk::platform::sidecar_subtitles(r.path)) s.subtitle_files.push_back(sub);
+        WNK_LOGI(kCat, "usb: play a %s file with %zu subtitle file(s) beside it", wnk::platform::file_kind_name(r.kind),
+                 s.subtitle_files.size() - settings_.subtitle_files.size());
+        nav_.push(ui, std::make_unique<PlayerScreen>(ctx_, s, "file://" + r.path, r.title));
+    }
+
+    wnk::app::Context &ctx_;
+    Navigator &nav_;
+    Settings settings_;
+    std::string path_;
+    Label *status_ = nullptr;
+    CollectionView *list_ = nullptr;
+    std::vector<Row> rows_;
+    std::string volumes_key_;
+    bool checked_ = false;
+    double next_check_ms_ = 0;
+    wnk::async::Lifetime life_;
+};
+
 class HomeScreen : public Screen {
  public:
     HomeScreen(wnk::app::Context &ctx, Navigator &nav, Settings settings, const std::vector<Clip> &clips,
@@ -1040,6 +1179,9 @@ class HomeScreen : public Screen {
             b.set_align(Align::Start, Align::Start);
             b.name = "clip" + std::to_string(i);
         }
+        list.add<Button>("USB drives   —   videos and music on a stick or disk plugged into the TV", [this](Ui &ui) { browse(ui, {}); })
+            .set_align(Align::Start, Align::Start)
+            .name = "usb";
         list.add<Label>("Streams (DASH / HLS over the network)", TextRole::Small).set_muted(true).set_padding({0, 12, 0, 0});
         for (size_t i = 0; i < streams.size(); ++i) {
             const Stream st = streams[i];
@@ -1057,6 +1199,12 @@ class HomeScreen : public Screen {
         info += settings_.pts_unit == PtsUnit::Milliseconds ? "ms" : "µs";
         info += "   ·   " + FfmpegSource::version();
         col.add<Label>(info, TextRole::Small).set_muted(true).set_padding({0, 30, 0, 0});
+    }
+
+    // The USB drives, or a folder on one.
+    void browse(Ui &ui, const std::string &path) {
+        const std::string title = path.empty() ? "USB drives" : path.substr(path.find_last_of('/') + 1);
+        nav_.push(ui, std::make_unique<FilesScreen>(ctx_, nav_, settings_, path, title));
     }
 
     void drm_test(Ui &ui, DrmTest t) {
@@ -1084,7 +1232,8 @@ struct OpenRequest {
     std::string uri;
     int autoplay = -1;
     std::optional<DrmTest> drm_test;
-    bool any() const { return !uri.empty() || autoplay >= 0 || drm_test.has_value(); }
+    std::optional<std::string> browse;  // {"browse":""}: the USB drives; {"browse":"/tmp/usb/sda/sda1/Films"}: a folder
+    bool any() const { return !uri.empty() || autoplay >= 0 || drm_test.has_value() || browse.has_value(); }
 };
 
 OpenRequest open_request(const nlohmann::json &params) {
@@ -1103,6 +1252,7 @@ OpenRequest open_request(const nlohmann::json &params) {
         r.drm_test->transport_in_option = d.value("transportInOption", r.drm_test->transport_in_option);
     }
     if (params.contains("autoplay") && params["autoplay"].is_number_integer()) r.autoplay = params["autoplay"];
+    if (params.contains("browse") && params["browse"].is_string()) r.browse = params["browse"].get<std::string>();
     return r;
 }
 
@@ -1252,6 +1402,8 @@ class Player : public wnk::app::Delegate {
         const int n_clips = static_cast<int>(clips_.size());
         if (r.drm_test) {
             home_->drm_test(ui, *r.drm_test);
+        } else if (r.browse) {
+            home_->browse(ui, *r.browse);
         } else if (!r.uri.empty()) {
             home_->play(ui, r.uri, r.uri.substr(r.uri.find_last_of('/') + 1));
         } else if (r.autoplay >= 0 && r.autoplay < n_clips) {

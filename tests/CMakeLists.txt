@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_cache http_stream segment_reader image ui lifecycle crash capabilities media manifest dlna thumbnails subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
+foreach (t log platform files input focus font storage async http http_cache http_stream segment_reader image ui lifecycle crash capabilities media manifest dlna thumbnails subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
 endforeach ()
 target_link_libraries(test_log PRIVATE wnk_logging)
 target_link_libraries(test_platform PRIVATE wnk_platform)
+target_link_libraries(test_files PRIVATE wnk_platform)
 target_link_libraries(test_input PRIVATE wnk_input)
 target_link_libraries(test_focus PRIVATE wnk_focus)
 target_link_libraries(test_font PRIVATE wnk_render)
@@ -396,6 +397,16 @@ if (TARGET wnk-player)
                 FAIL_REGULAR_EXPRESSION "-> Error|${WNK_SANITIZER_FAIL}"
                 TIMEOUT 60)
     endfunction()
+    # A folder as on a USB stick: a clip, a subtitle file beside it, a document. OK plays the clip
+    # with the subtitles as a track.
+    set(WNK_E2E_USB "${CMAKE_CURRENT_BINARY_DIR}/e2e-usb/Films")
+    add_test(NAME e2e.player.usb_setup COMMAND sh -c
+            "rm -rf '${WNK_E2E_USB}' && mkdir -p '${WNK_E2E_USB}/Season 1' && cp '$<TARGET_FILE_DIR:wnk-player>/clips/h264-aac.mp4' '${WNK_E2E_USB}/Test Clip.mp4' && cp '${CMAKE_CURRENT_SOURCE_DIR}/fixtures/subtitles/side.srt' '${WNK_E2E_USB}/Test Clip.en.srt' && echo notes > '${WNK_E2E_USB}/notes.txt'")
+    set_tests_properties(e2e.player.usb_setup PROPERTIES FIXTURES_SETUP player_usb)
+    wnk_player_e2e(usb_folder_plays_with_sidecar_subtitles "{\"browse\":\"${WNK_E2E_USB}\"}" "Z,Z,Z,Z,Down,Return,Z,Z,Z,Z,Z"
+            "folder: 2 playable entries, 2 other.*usb: play a video file with 1 subtitle file\\(s\\) beside it.*subtitle file Test Clip\\.en\\.srt: [0-9]+ cues.*subtitle shown: Sidecar file cue")
+    set_tests_properties(e2e.player.usb_folder_plays_with_sidecar_subtitles PROPERTIES FIXTURES_REQUIRED player_usb)
+
     # Seek previews from a WebVTT thumbnails file served by the test server: Right shows the tile.
     add_test(NAME e2e.player.seek_preview_from_vtt
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"

@@ -35,7 +35,7 @@ wnk_add_webos_package(
         TARGET wnk-player
         APPID org.wnk.examples.player
         TITLE "WNK Player"
-        VERSION 0.33.0
+        VERSION 0.34.0
         VENDOR "webos-native-app-kit"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.png"
         LARGE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/largeIcon.png"

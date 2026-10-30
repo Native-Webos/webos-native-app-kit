@@ -897,6 +897,42 @@ bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out
                     *error = "Representation " + r.id + ": " + why;
                     return false;
                 }
+                // Seek previews (DASH-IF IOP 6.2.6): an image Representation of tiled sheets.
+                std::string tiles;
+                for (const XmlNode *holder : {rep, as}) {
+                    for (const char *prop : {"EssentialProperty", "SupplementalProperty"}) {
+                        for (const XmlNode *p : holder->children_named(prop)) {
+                            if (tiles.empty() && p->attribute_or("schemeIdUri", "").find("thumbnail_tile") != std::string::npos) {
+                                tiles = p->attribute_or("value", "1x1");
+                            }
+                        }
+                    }
+                }
+                const bool image = r.mime_type.rfind("image/", 0) == 0 || as->attribute_or("contentType", "") == "image";
+                int columns = 1, rows = 1;
+                if (image && !tiles.empty() && parse_tile_layout(tiles, &columns, &rows)) {
+                    auto track = std::find_if(out->thumbnails.begin(), out->thumbnails.end(),
+                                              [&](const ThumbnailTrack &t) { return t.id == as_id + "/" + r.id; });
+                    if (track == out->thumbnails.end()) {
+                        out->thumbnails.emplace_back();
+                        track = std::prev(out->thumbnails.end());
+                        track->id = as_id + "/" + r.id;
+                        track->tile_width = r.width / columns;
+                        track->tile_height = r.height / rows;
+                    }
+                    for (const MediaSegment &seg : r.segments) {
+                        ThumbnailTrack::Sheet sheet;
+                        sheet.url = seg.url;
+                        sheet.start_us = seg.start_us;
+                        sheet.duration_us = seg.duration_us;
+                        sheet.columns = columns;
+                        sheet.rows = rows;
+                        sheet.tile_width = r.width / columns;
+                        sheet.tile_height = r.height / rows;
+                        track->sheets.push_back(std::move(sheet));
+                    }
+                    continue;  // not a media rendition
+                }
                 out->renditions.push_back(std::move(r));
             }
         }
@@ -969,6 +1005,21 @@ bool parse_hls(const std::string &text, const std::string &url, Presentation *ou
             }
             r.playlist_url = resolve_url(url, *uri);
             media.push_back(std::move(r));
+        } else if (l.rfind("#EXT-X-IMAGE-STREAM-INF:", 0) == 0) {
+            const auto a = hls_attributes(l.substr(24));
+            const std::string *uri = find(a, "URI");
+            if (uri == nullptr) continue;
+            Presentation::ImagePlaylist p;
+            p.url = resolve_url(url, *uri);
+            if (const std::string *v = find(a, "BANDWIDTH")) to_i64(*v, &p.bandwidth);
+            if (const std::string *v = find(a, "RESOLUTION")) {
+                const size_t x = v->find('x');
+                if (x != std::string::npos) {
+                    p.width = std::atoi(v->substr(0, x).c_str());
+                    p.height = std::atoi(v->substr(x + 1).c_str());
+                }
+            }
+            out->image_playlists.push_back(std::move(p));
         } else if (l.rfind("#EXT-X-STREAM-INF:", 0) == 0) {
             const auto a = hls_attributes(l.substr(18));
             size_t j = i + 1;
@@ -1398,6 +1449,58 @@ bool parse_sidx(const uint8_t *d, size_t size, int64_t box_offset, const std::st
         out->push_back(std::move(s));
         offset += len;
         t += dur;
+    }
+    return true;
+}
+
+bool parse_hls_image_playlist(const std::string &text, const std::string &url, ThumbnailTrack *out, std::string *error) {
+    *out = ThumbnailTrack{};
+    out->id = url;
+    const std::vector<std::string> lines = lines_of(text);
+    if (lines.empty() || lines[0] != "#EXTM3U") {
+        if (error != nullptr) *error = "not an HLS playlist (no #EXTM3U)";
+        return false;
+    }
+    int64_t t = 0, duration = -1;
+    ThumbnailTrack::Sheet pending;
+    bool tiled = false;
+    for (size_t i = 1; i < lines.size(); ++i) {
+        const std::string &l = lines[i];
+        if (l.rfind("#EXTINF:", 0) == 0) {
+            duration = static_cast<int64_t>(std::llround(to_double(l.substr(8)) * 1e6));
+        } else if (l.rfind("#EXT-X-TILES:", 0) == 0) {
+            const auto a = hls_attributes(l.substr(13));
+            int columns = 1, rows = 1;
+            if (const std::string *v = find(a, "LAYOUT")) parse_tile_layout(*v, &columns, &rows);
+            pending.columns = columns;
+            pending.rows = rows;
+            if (const std::string *v = find(a, "RESOLUTION")) {
+                const size_t x = v->find('x');
+                if (x != std::string::npos) {
+                    pending.tile_width = std::atoi(v->substr(0, x).c_str());
+                    pending.tile_height = std::atoi(v->substr(x + 1).c_str());
+                }
+            }
+            if (const std::string *v = find(a, "DURATION")) pending.tile_duration_us = static_cast<int64_t>(std::llround(to_double(*v) * 1e6));
+            tiled = true;
+        } else if (l[0] != '#') {
+            if (duration > 0) {
+                ThumbnailTrack::Sheet s = tiled ? pending : ThumbnailTrack::Sheet{};
+                s.url = resolve_url(url, l);
+                s.start_us = t;
+                s.duration_us = duration;
+                if (out->tile_width == 0) out->tile_width = s.tile_width, out->tile_height = s.tile_height;
+                out->sheets.push_back(std::move(s));
+                t += duration;
+            }
+            duration = -1;
+            pending = ThumbnailTrack::Sheet{};
+            tiled = false;
+        }
+    }
+    if (out->sheets.empty()) {
+        if (error != nullptr) *error = "no images in the playlist";
+        return false;
     }
     return true;
 }

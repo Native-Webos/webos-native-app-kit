@@ -144,6 +144,9 @@ class ImageView : public View {
     // Animated GIF and WebP play (their own frame times and loop count) unless this is off; off
     // shows the first frame.
     ImageView &set_animate(bool on);
+    // Show only the region (x, y, w, h) of the image, in the image's own pixels (a tile of a sprite
+    // sheet: seek previews). The image is then loaded at its original size. w 0: the whole image.
+    ImageView &set_region(int x, int y, int w, int h);
     const std::string &url() const { return url_; }
     enum class State : uint8_t { Empty, Loading, Ready, Failed };
     State state() const { return state_; }
@@ -166,6 +169,7 @@ class ImageView : public View {
     int img_w_ = 0, img_h_ = 0;
     int reloads_ = 0;
     bool animate_ = true;
+    int region_x_ = 0, region_y_ = 0, region_w_ = 0, region_h_ = 0;
     std::vector<int> delays_;  // of the loaded animation
     int loops_ = 0, played_ = 0;
     size_t frame_ = 0;

@@ -9,6 +9,8 @@
 #include "wnk/media/adaptive_source.hpp"
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <atomic>
 #include <chrono>
 #include <ctime>
@@ -1014,6 +1016,61 @@ TEST("adaptive source: DASH audio switches bitrate within its AdaptationSet, bes
         even = even && step > 20000 && step < 22700;
     }
     CHECK(even);
+}
+
+TEST("adaptive source: seek previews from a DASH image AdaptationSet and from an HLS image playlist") {
+    SKIP_UNLESS_READY();
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    // l.mpd with a thumbnail_tile AdaptationSet: one 4x3 sheet for its 20 s.
+    std::string mpd;
+    {
+        std::ifstream f(d + "/l.mpd");
+        std::stringstream ss;
+        ss << f.rdbuf();
+        mpd = ss.str();
+    }
+    const size_t end = mpd.rfind("</Period>");
+    REQUIRE(end != std::string::npos);
+    mpd.insert(end, "<AdaptationSet id=\"9\" contentType=\"image\" mimeType=\"image/jpeg\">"
+                    "<SegmentTemplate media=\"sheet-$Number$.jpg\" duration=\"20\" startNumber=\"1\"/>"
+                    "<Representation id=\"t\" bandwidth=\"1000\" width=\"640\" height=\"270\">"
+                    "<EssentialProperty schemeIdUri=\"http://dashif.org/thumbnail_tile\" value=\"4x3\"/>"
+                    "</Representation></AdaptationSet>");
+    write_file(d + "/lt.mpd", mpd);
+    AdaptiveSource dash(options());
+    std::string err;
+    REQUIRE(dash.open(url("lt.mpd"), &err));
+    ThumbnailTrack t;
+    REQUIRE(dash.thumbnails(320, &t, {}, &err));
+    CHECK_EQ(t.tile_width, 160);
+    REQUIRE(t.sheets.size() == 1);
+    CHECK_EQ(t.sheets[0].url, url("sheet-1.jpg"));
+    auto tile = t.at(11000000);  // 20 s / 12 tiles: tile 6 → column 2, row 1
+    REQUIRE(tile.has_value());
+    CHECK_EQ(tile->x, 320);
+    CHECK_EQ(tile->y, 90);
+    // The image AdaptationSet is no track: one video, one audio.
+    CHECK_EQ(dash.info().tracks.size(), size_t{2});
+
+    // ts.m3u8 behind a master with an image playlist, which thumbnails() fetches.
+    write_file(d + "/ti.m3u8", "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=320x240\nts.m3u8\n"
+                               "#EXT-X-IMAGE-STREAM-INF:BANDWIDTH=2000,RESOLUTION=160x90,URI=\"tiles.m3u8\"\n");
+    write_file(d + "/tiles.m3u8", "#EXTM3U\n#EXT-X-IMAGES-ONLY\n#EXTINF:10.0,\n#EXT-X-TILES:RESOLUTION=160x90,LAYOUT=2x2,DURATION=2.5\n"
+                                  "tiles.jpg\n#EXT-X-ENDLIST\n");
+    AdaptiveSource hls(options());
+    REQUIRE(hls.open(url("ti.m3u8"), &err));
+    REQUIRE(hls.thumbnails(320, &t, {}, &err));
+    CHECK_EQ(t.id, url("tiles.m3u8"));
+    auto h = t.at(8000000);  // tile 3 → column 1, row 1
+    REQUIRE(h.has_value());
+    CHECK_EQ(h->url, url("tiles.jpg"));
+    CHECK_EQ(h->x, 160);
+    CHECK_EQ(h->y, 90);
+    // Without any: a reason.
+    AdaptiveSource plain(options());
+    REQUIRE(plain.open(url("d.mpd"), &err));
+    CHECK(!plain.thumbnails(320, &t, {}, &err));
+    CHECK(err.find("no thumbnails") != std::string::npos);
 }
 
 TEST("adaptive source: HLS audio follows the video's variant into its audio group, seamlessly") {

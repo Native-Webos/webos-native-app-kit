@@ -20,6 +20,7 @@ Byte-range routes (Range: bytes=FIRST- or FIRST-LAST, answered with 206/416), fo
     /range?n=N        N bytes, byte i = i % 251; &noranges=1 ignores Range (200, whole body);
                       &drop=K closes every connection after K body bytes
     /files/NAME       a file from the served directory
+    /fixtures/PATH    a file under tests/fixtures (read-only)
 
 Catalogue routes, a synthetic stand-in for the TVmaze API used by Example C (applications/examples/shows):
     /catalogue[/MODE]/shows?page=N   page 0: 250 shows, page 1: 50, later pages 404 (like TVmaze)
@@ -371,6 +372,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if url.path == "/cookie/check":
             ok = "session=abc123" in (self.headers.get("Cookie") or "")
             return self._send(200 if ok else 403, b"cookie ok" if ok else b"no cookie")
+        if url.path.startswith("/fixtures/"):
+            # tests/fixtures, read-only (seek preview sheets and their WebVTT files for e2e runs).
+            root = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fixtures"))
+            path = os.path.realpath(os.path.join(root, urllib.parse.unquote(url.path[len("/fixtures/"):])))
+            if not path.startswith(root + os.sep) or not os.path.isfile(path):
+                return self._send(404, b"not found")
+            with open(path, "rb") as f:
+                data = f.read()
+            kind = "image/jpeg" if path.endswith(".jpg") else "text/vtt" if path.endswith(".vtt") else "application/octet-stream"
+            return self._send(200, data, {"Content-Type": kind})
         if url.path.startswith("/guard/") and FILES_DIR["path"]:
             # A stream behind its site's headers: Referer and Origin on every request, and the cookie
             # the playlist response sets on every segment.

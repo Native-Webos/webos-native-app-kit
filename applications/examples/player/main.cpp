@@ -32,6 +32,8 @@
 //   {"audio": "5:2,9:1"}                   scripted audio track changes (seconds after the player opens:
 //                                          stream index), for checking the switch without a remote
 //   {"speeds": "5:1.5,15:1"}               scripted playback speeds (seconds after the player opens: speed)
+//   {"thumbs": "http://.../thumbs.vtt"}   seek previews for a plain file (WebVTT cues naming
+//                                          "sheet.jpg#xywh=x,y,w,h"); DASH/HLS bring their own
 //   {"subs": ["http://.../film.srt"]}      subtitle files beside the media (SubRip, WebVTT, ASS, TTML; a
 //                                          string or a list), added as tracks; the first is shown
 //   {"ptsUnit": "ms"}                      feed NDL millisecond PTS instead of microseconds (experiment)
@@ -62,6 +64,7 @@
 #include "wnk/media/pacing_backend.hpp"
 #include "wnk/media/starfish_backend.hpp"
 #include "wnk/media/subtitle_view.hpp"
+#include "wnk/media/thumbnails.hpp"
 #include "wnk/platform/luna.hpp"
 #include "wnk/platform/process.hpp"
 #include "wnk/ui/navigation.hpp"
@@ -124,7 +127,10 @@ struct Settings {
     ContentKeys keys;         // ClearKey content keys ({"keys": ...})
     std::string license_url;  // ClearKey licence server ({"licenseUrl": ...}); else the manifest's
     std::vector<std::string> subtitle_files;  // {"subs": ...}: added as tracks beside the media
+    std::string thumbs;  // {"thumbs": ".../thumbs.vtt"}: seek previews for a plain file
 };
+
+constexpr int kPreviewWidth = 320;  // seek preview tiles: the closest width the stream offers, not wider
 
 std::string clock_text(int64_t us) {
     if (us == kNoTime || us < 0) return "--:--";
@@ -195,6 +201,7 @@ class PlayerScreen : public Screen {
         : Screen(title), ctx_(ctx), uri_(std::move(uri)), seeks_(s.seeks), audio_switches_(s.audio_switches), speeds_(s.speeds), caps_(s.caps),
           subtitle_files_(s.subtitle_files), http_(s.http) {
         name = "player";
+        thumbs_url_ = s.thumbs;
         // Under the controls: subtitles over the whole picture.
         subs_view_ = &add<SubtitleView>();
         subs_view_->set_width(Dim::fill()).set_height(Dim::fill());
@@ -209,6 +216,17 @@ class PlayerScreen : public Screen {
         title_->set_width(Dim::fill());
         status_ = &top.add<Label>("Opening…");
         status_->set_muted(true).set_align(Align::Start, Align::End);
+        // A seek preview over the progress bar, at the target's place along it (while seeking).
+        preview_row_ = &bar_->add<Row>(0);
+        auto &preview = preview_row_->add<Column>(6);
+        preview.set_background(wnk::render::Color::hex(0x000000E0), 8);
+        preview.set_padding(Insets::all(6));
+        preview_ = &preview.add<ImageView>();
+        preview_->set_fit(ImageFit::Contain);
+        preview_->set_size(kPreviewWidth, kPreviewWidth * 9 / 16);
+        preview_time_ = &preview.add<Label>("", TextRole::Small);
+        preview_time_->set_text_align(Align::Center);
+        preview_row_->set_visible(false);
         progress_ = &bar_->add<ProgressBar>();
         auto &bottom = bar_->add<Row>(24);
         time_ = &bottom.add<Label>("--:-- / --:--");
@@ -230,6 +248,7 @@ class PlayerScreen : public Screen {
                      snap.error.empty() ? "" : ": ", snap.error.c_str());
             if (to == PlayState::Ready) {
                 controller_->set_video_area({0, 0, 1920, 1080});  // again, now the stream size is known
+                load_thumbnails();
                 describe(snap);
                 tracks_ = snap.info.tracks;
                 for (const TrackInfo &t : tracks_) {
@@ -299,9 +318,9 @@ class PlayerScreen : public Screen {
             case Action::Play: controller_->play(); return true;
             case Action::Pause: controller_->pause(); return true;
             case Action::Left:
-            case Action::Rewind: controller_->seek_relative(-10000000); return true;
+            case Action::Rewind: seek_by(ui, -10000000); return true;
             case Action::Right:
-            case Action::FastForward: controller_->seek_relative(10000000); return true;
+            case Action::FastForward: seek_by(ui, 10000000); return true;
             case Action::Stop: {
                 wnk::input::ActionEvent back;
                 back.action = Action::Back;
@@ -322,7 +341,7 @@ class PlayerScreen : public Screen {
         if (opened_ms_ < 0) opened_ms_ = ui.now_ms();
         while (next_seek_ < seeks_.size() && ui.now_ms() - opened_ms_ >= seeks_[next_seek_].first * 1000) {
             WNK_LOGI(kCat, "scripted seek %+.0f s", seeks_[next_seek_].second);
-            controller_->seek_relative(static_cast<int64_t>(seeks_[next_seek_].second * 1e6));
+            seek_by(ui, static_cast<int64_t>(seeks_[next_seek_].second * 1e6));  // as a key would
             ++next_seek_;
         }
         while (next_audio_ < audio_switches_.size() && ui.now_ms() - opened_ms_ >= audio_switches_[next_audio_].first * 1000) {
@@ -357,6 +376,7 @@ class PlayerScreen : public Screen {
         time_->set_text(clock_text(s.position_us) + " / " + (live ? std::string("LIVE") : clock_text(s.duration_us)) +
                         (s.position_estimated ? "" : " ·"));
         if (s.duration_us > 0 && s.position_us != kNoTime) progress_->set_value(static_cast<float>(s.position_us) / s.duration_us);
+        show_preview(ui, s);
         if (s.state == PlayState::Error) detail_->set_text(s.error);
         if (s.audio_track != audio_track_) {
             audio_track_ = s.audio_track;
@@ -510,6 +530,83 @@ class PlayerScreen : public Screen {
 
     // A subtitle file beside the media: read whole on a worker, then added as a track and shown if
     // nothing else is.
+    // Seek previews: the stream's own (DASH/HLS) or a WebVTT thumbnails file from the launch params.
+    void load_thumbnails() {
+        if (thumbs_requested_) return;
+        thumbs_requested_ = true;
+        if (adaptive_ == nullptr && thumbs_url_.empty()) return;
+        struct Loaded {
+            bool ok = false;
+            ThumbnailTrack track;
+            std::string error;
+        };
+        wnk::async::run_then_post<Loaded>(
+            ctx_.pool(), ctx_.dispatcher(), life_.weak(), {},
+            [adaptive = adaptive_, url = thumbs_url_, http = http_](const wnk::async::CancellationToken &cancel) {
+                Loaded l;
+                if (!url.empty()) {
+                    if (!http) {
+                        l.error = "no HTTP transport";
+                        return l;
+                    }
+                    wnk::net::HttpRequest req;
+                    req.url = url;
+                    req.max_response_bytes = 4u << 20;
+                    const wnk::net::HttpResponse r = http->perform(req, cancel);
+                    if (!r.ok()) {
+                        l.error = r.error != wnk::net::NetError::None ? wnk::net::error_name(r.error) : "HTTP " + std::to_string(r.status);
+                        return l;
+                    }
+                    l.ok = parse_thumbnail_vtt(r.body, r.effective_url.empty() ? url : r.effective_url, &l.track, &l.error);
+                } else {
+                    l.ok = adaptive->thumbnails(kPreviewWidth, &l.track, cancel, &l.error);
+                }
+                return l;
+            },
+            [this](Loaded l) {
+                if (!l.ok) {
+                    WNK_LOGI(kCat, "seek previews: none (%s)", l.error.c_str());
+                    return;
+                }
+                WNK_LOGI(kCat, "seek previews: %zu sheets, tiles %dx%d (%s)", l.track.sheets.size(), l.track.tile_width,
+                         l.track.tile_height, l.track.id.c_str());
+                thumbs_ = std::move(l.track);
+            });
+    }
+
+    // A relative seek. The preview follows its target, counted from the last target while seeks come
+    // in a row: the reported position may still show the old place for a moment (seen on a C1).
+    void seek_by(Ui &ui, int64_t delta_us) {
+        const PlaybackSnapshot s = controller_->snapshot();
+        const bool row = ui.now_ms() - seek_ms_ < 2000 && preview_target_us_ != kNoTime;
+        const int64_t base = row ? preview_target_us_ : s.position_us == kNoTime ? 0 : s.position_us;
+        preview_target_us_ = std::max<int64_t>(0, base + delta_us);
+        if (s.duration_us > 0) preview_target_us_ = std::min(preview_target_us_, s.duration_us);
+        seek_ms_ = ui.now_ms();
+        show_controls();
+        controller_->seek_relative(delta_us);
+    }
+
+    // While seeking (and a moment after), the tile for the target over its place on the bar.
+    void show_preview(Ui &ui, const PlaybackSnapshot &s) {
+        const bool seeking = ui.now_ms() - seek_ms_ < 2000 && preview_target_us_ != kNoTime;
+        const auto tile = !thumbs_.empty() && seeking && s.duration_us > 0 ? thumbs_.at(preview_target_us_) : std::nullopt;
+        preview_row_->set_visible(tile.has_value());
+        if (!tile) return;
+        preview_->set_url(tile->url).set_region(tile->x, tile->y, tile->width, tile->height);
+        preview_time_->set_text(clock_text(preview_target_us_));
+        const float frac = std::clamp(static_cast<float>(preview_target_us_) / static_cast<float>(s.duration_us), 0.0f, 1.0f);
+        const float track = 1920.0f - 160.0f;  // the bar's padding
+        const float box = kPreviewWidth + 12.0f;
+        preview_row_->set_padding({std::clamp(frac * track - box / 2, 0.0f, track - box), 0, 0, 0});
+        const std::string shown = tile->url + " tile " + std::to_string(tile->x) + "," + std::to_string(tile->y) + " " +
+                                  std::to_string(tile->width) + "x" + std::to_string(tile->height);
+        if (shown != preview_shown_) {
+            preview_shown_ = shown;
+            WNK_LOGI(kCat, "seek preview %s for %s", shown.c_str(), clock_text(preview_target_us_).c_str());
+        }
+    }
+
     void load_subtitles(const std::string &url, int track) {
         FfmpegSourceOptions o;
         o.http = http_;
@@ -603,6 +700,15 @@ class PlayerScreen : public Screen {
     Column *bar_;
     Label *title_, *status_, *time_, *detail_;
     ProgressBar *progress_;
+    Row *preview_row_ = nullptr;
+    ImageView *preview_ = nullptr;
+    Label *preview_time_ = nullptr;
+    std::string thumbs_url_;
+    bool thumbs_requested_ = false;
+    ThumbnailTrack thumbs_;
+    double seek_ms_ = -1e9;
+    int64_t preview_target_us_ = kNoTime;
+    std::string preview_shown_;
     Spinner *spinner_;
     bool opened_ = false;
     double last_input_ms_ = 0;
@@ -1045,6 +1151,7 @@ class Player : public wnk::app::Delegate {
             timed("speeds", &s.speeds);
             timed("capKbps", &s.caps);
             if (params.contains("codecs") && params["codecs"].is_string()) s.codecs = params["codecs"];
+            if (params.contains("thumbs") && params["thumbs"].is_string()) s.thumbs = params["thumbs"];
             if (params.contains("subs") && params["subs"].is_string()) s.subtitle_files.push_back(params["subs"]);
             if (params.contains("subs") && params["subs"].is_array()) {
                 for (const auto &f : params["subs"]) {
@@ -1168,7 +1275,11 @@ int main(int argc, char **argv) {
     wnk::app::AppConfig config;
     config.fallback_app_id = "org.wnk.examples.player";
     config.title = "wnk player";
-    config.images = false;
+    // Images only for seek previews (one sheet at a time): small budgets. The shell's HTTP (with its
+    // disk cache) loads them; media keeps its own transport.
+    config.http = true;
+    config.image_memory_bytes = 8u << 20;
+    config.texture_bytes = 8u << 20;
     config.script_env_prefix = "WNK_PLAYER";
     config.metrics_toggle = Action::Blue;
     return wnk::app::run(argc, argv, config, [] { return std::make_unique<Player>(); });

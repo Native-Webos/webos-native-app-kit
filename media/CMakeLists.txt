@@ -8,7 +8,7 @@ add_library(wnk_media_dlna STATIC src/dlna.cpp)
 target_link_libraries(wnk_media_dlna PUBLIC wnk_media_xml wnk_core wnk_async wnk_net PRIVATE wnk_logging)
 
 add_library(wnk_media STATIC src/media.cpp src/controller.cpp src/subtitles.cpp src/device_caps.cpp src/auto_backend.cpp
-        src/manifest.cpp src/webvtt.cpp src/ttml.cpp src/bitstream.cpp src/playback_headers.cpp src/iptv.cpp src/dovi.cpp src/time_stretch.cpp)
+        src/manifest.cpp src/thumbnails.cpp src/webvtt.cpp src/ttml.cpp src/bitstream.cpp src/playback_headers.cpp src/iptv.cpp src/dovi.cpp src/time_stretch.cpp)
 target_include_directories(wnk_media PUBLIC include)
 target_compile_definitions(wnk_media PRIVATE WNK_HAVE_DOVI=${WNK_HAVE_DOVI})
 if (WNK_HAVE_DOVI)

@@ -1780,6 +1780,51 @@ int64_t AdaptiveSource::throughput_estimate() const { return impl_->estimator.es
 int AdaptiveSource::switches() const { return impl_->switch_count.load(); }
 int AdaptiveSource::audio_switches() const { return impl_->audio_switch_count.load(); }
 
+bool AdaptiveSource::thumbnails(int want_width, ThumbnailTrack *out, const async::CancellationToken &token,
+                                std::string *error) const {
+    const Impl &m = *impl_;
+    if (m.pres.renditions.empty()) {
+        *error = "not open";
+        return false;
+    }
+    if (m.pres.live) {
+        *error = "live: no seek previews";
+        return false;
+    }
+    const int dash = choose_thumbnail_track(m.pres.thumbnails, want_width);
+    if (dash >= 0) {
+        *out = m.pres.thumbnails[static_cast<size_t>(dash)];
+        return true;
+    }
+    if (m.pres.image_playlists.empty()) {
+        *error = "no thumbnails in the manifest";
+        return false;
+    }
+    // The image playlist whose tiles are closest to the width without going over it.
+    const Presentation::ImagePlaylist *pick = nullptr;
+    for (const auto &p : m.pres.image_playlists) {
+        const bool fits = p.width <= want_width;
+        if (pick == nullptr || (fits && (pick->width > want_width || p.width > pick->width)) ||
+            (!fits && pick->width > want_width && p.width < pick->width)) {
+            pick = &p;
+        }
+    }
+    if (!m.opt.http) {
+        *error = "no HTTP transport";
+        return false;
+    }
+    net::HttpRequest req;
+    req.url = pick->url;
+    req.headers = m.opt.headers;
+    req.max_response_bytes = 4u << 20;
+    const net::HttpResponse r = m.opt.http->perform(req, token);
+    if (!r.ok()) {
+        *error = "image playlist: " + (r.error != net::NetError::None ? std::string(net::error_name(r.error)) : "HTTP " + std::to_string(r.status));
+        return false;
+    }
+    return parse_hls_image_playlist(r.body, r.effective_url.empty() ? pick->url : r.effective_url, out, error);
+}
+
 bool AdaptiveSource::open(const std::string &uri, std::string *error) {
     Impl &m = *impl_;
     m.stop_subtitles();

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-foreach (t log platform input focus font storage async http http_cache http_stream segment_reader image ui lifecycle crash capabilities media manifest dlna subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
+foreach (t log platform input focus font storage async http http_cache http_stream segment_reader image ui lifecycle crash capabilities media manifest dlna thumbnails subtitles subtitle_view ass starfish secret websocket auth i18n audio lan blob bitstream iptv dovi time_stretch)
     add_executable(test_${t} unit/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE unit)
     add_test(NAME unit.${t} COMMAND test_${t})
@@ -29,6 +29,8 @@ target_link_libraries(test_time_stretch PRIVATE wnk_media)
 target_compile_definitions(test_dovi PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(test_dlna PRIVATE wnk_media_dlna)
 target_link_libraries(test_http_cache PRIVATE wnk_net)
+target_link_libraries(test_thumbnails PRIVATE wnk_media)
+target_compile_definitions(test_thumbnails PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_compile_definitions(test_dlna PRIVATE WNK_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(test_subtitle_view PRIVATE wnk_media_ui)
 target_compile_definitions(test_subtitle_view PRIVATE WNK_TEST_FONT_DIR="${PROJECT_SOURCE_DIR}/assets/fonts")
@@ -394,6 +396,15 @@ if (TARGET wnk-player)
                 FAIL_REGULAR_EXPRESSION "-> Error|${WNK_SANITIZER_FAIL}"
                 TIMEOUT 60)
     endfunction()
+    # Seek previews from a WebVTT thumbnails file served by the test server: Right shows the tile.
+    add_test(NAME e2e.player.seek_preview_from_vtt
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/http_server.py"
+                    "$<TARGET_FILE:wnk-player>" "{\"autoplay\":0,\"thumbs\":\"@HTTP@/fixtures/thumbs/thumbs.vtt\"}")
+    set_tests_properties(e2e.player.seek_preview_from_vtt PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=offscreen;${WNK_LSAN};WNK_PLAYER_KEYS=Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Right,Z,Z,Z"
+            PASS_REGULAR_EXPRESSION "seek previews: 12 sheets, tiles 160x90.*seek preview http://127\\.0\\.0\\.1:[0-9]+/fixtures/thumbs/sheet\\.jpg tile [0-9]+,[0-9]+ 160x90 for 0:1[0-9]"
+            FAIL_REGULAR_EXPRESSION "-> Error|${WNK_SANITIZER_FAIL}"
+            TIMEOUT 60)
     wnk_player_e2e(pause_seek_resume "{\"autoplay\":0}" "Space,Right,Space"
             "Playing -> Paused.*Paused -> Seeking.*Seeking -> Paused.*Paused -> Playing")
     # Backgrounding releases the decoder; playback resumes on return only if it was playing.

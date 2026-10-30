@@ -29,6 +29,7 @@
 #pragma once
 
 #include "wnk/media/media.hpp"
+#include "wnk/media/thumbnails.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -128,6 +129,16 @@ struct Presentation {
     int64_t time_shift_us = kNoTime;          // timeShiftBufferDepth
     int64_t live_delay_us = kNoTime;          // suggestedPresentationDelay
     std::string utc_timing_scheme, utc_timing_value;  // the first UTCTiming element
+    // Seek previews (thumbnails.hpp). DASH: every thumbnail_tile Representation, sheets ready (one
+    // track per Representation, across Periods). HLS: the image playlists, to load and parse with
+    // parse_hls_image_playlist when previews are wanted.
+    std::vector<ThumbnailTrack> thumbnails;
+    struct ImagePlaylist {
+        std::string url;
+        int width = 0, height = 0;  // RESOLUTION: of one tile
+        int64_t bandwidth = 0;
+    };
+    std::vector<ImagePlaylist> image_playlists;
 };
 
 // "2026-10-12T08:30:00Z", "...00.250+02:00" → microseconds since the Unix epoch; false if malformed.

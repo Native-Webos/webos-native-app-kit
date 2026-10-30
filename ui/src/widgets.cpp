@@ -415,6 +415,19 @@ ImageView &ImageView::set_url(std::string url) {
     return *this;
 }
 
+ImageView &ImageView::set_region(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) x = y = w = h = 0;
+    const bool reload = (w > 0) != (region_w_ > 0);  // the image is requested at another size
+    region_x_ = x, region_y_ = y, region_w_ = w, region_h_ = h;
+    if (reload && state_ != State::Empty) {
+        cancel();
+        state_ = State::Empty;
+        key_.clear();
+        reloads_ = 0;
+    }
+    return *this;
+}
+
 ImageView &ImageView::set_fit(ImageFit fit) {
     fit_ = fit;
     return *this;
@@ -437,8 +450,9 @@ void ImageView::start(Ui &ui) {
     const Rect f = frame();
     // Cover crops one dimension, so ask for the larger side in both directions.
     const int big = static_cast<int>(std::ceil(std::max(f.w, f.h)));
-    const int w = fit_ == ImageFit::Cover ? big : static_cast<int>(std::ceil(f.w));
-    const int h = fit_ == ImageFit::Cover ? big : static_cast<int>(std::ceil(f.h));
+    // A region is in the original's pixels: load it whole.
+    const int w = region_w_ > 0 ? 0 : fit_ == ImageFit::Cover ? big : static_cast<int>(std::ceil(f.w));
+    const int h = region_w_ > 0 ? 0 : fit_ == ImageFit::Cover ? big : static_cast<int>(std::ceil(f.h));
     state_ = State::Loading;
     // `this` is safe: the destructor cancels the ticket and the source never calls back after that.
     ticket_ = source_->load(url_, w, h, [this](ImageSource::Loaded l) {
@@ -484,7 +498,13 @@ void ImageView::draw(Ui &ui) {
     if (state_ == State::Ready && source_ != nullptr) {
         const render::TextureId tex = frame_ == 0 ? source_->texture(key_) : source_->texture(key_, frame_);
         if (tex != render::kNoTexture && img_w_ > 0 && img_h_ > 0) {
-            const float ia = static_cast<float>(img_w_) / static_cast<float>(img_h_);
+            // The part of the texture shown as "the image": all of it, or the region.
+            Rect src{0, 0, 1, 1};
+            if (region_w_ > 0) {
+                src = {static_cast<float>(region_x_) / static_cast<float>(img_w_), static_cast<float>(region_y_) / static_cast<float>(img_h_),
+                       static_cast<float>(region_w_) / static_cast<float>(img_w_), static_cast<float>(region_h_) / static_cast<float>(img_h_)};
+            }
+            const float ia = (src.w * static_cast<float>(img_w_)) / (src.h * static_cast<float>(img_h_));
             const float fa = f.w / f.h;
             Rect dst = f, uv{0, 0, 1, 1};
             if (fit_ == ImageFit::Cover) {
@@ -502,7 +522,8 @@ void ImageView::draw(Ui &ui) {
                 dst.w = f.h * ia;
                 dst.x += (f.w - dst.w) * 0.5f;
             }
-            r.draw_image(tex, dst, ui.fade(render::kWhite), uv);
+            const Rect in_src{src.x + uv.x * src.w, src.y + uv.y * src.h, uv.w * src.w, uv.h * src.h};
+            r.draw_image(tex, dst, ui.fade(render::kWhite), in_src);
             return;
         }
         // Pixels evicted from memory before upload: load again (bounded).

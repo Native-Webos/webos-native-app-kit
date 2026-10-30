@@ -152,6 +152,11 @@ class AdaptiveSource : public MediaSource {
     int64_t throughput_estimate() const;  // bits per second, 0 while unknown
     int switches() const;                 // bitrate switches since open(), video and audio
     int audio_switches() const;           // of those, audio ones
+    // Seek previews (thumbnails.hpp) after open(): the track whose tiles are closest to `want_width`
+    // pixels wide without going over. DASH tracks come with the MPD; an HLS image playlist is fetched
+    // here, so call it from a worker. False (with a reason) when there are none, the presentation is
+    // live, or the fetch fails. Any thread.
+    bool thumbnails(int want_width, ThumbnailTrack *out, const async::CancellationToken &token, std::string *error) const;
 
     struct Impl;
 

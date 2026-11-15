@@ -15,6 +15,10 @@
 # zlib licence asks of altered versions):
 #   sdl-webos-relaunch-message.patch  keeps the relaunch lifecycle message, which SDL-webOS dropped,
 #                                     for SDL_webOSTakeRelaunchMessage (app shell: Delegate::on_relaunch)
+#   sdl-webos-key-mask.patch          adds the keys asked for with the KEYS_BACK/EXIT/HOME hints to the
+#                                     window's key mask: inside a surface group the compositor delivers
+#                                     only keys in the mask (luna-surfacemanager WebOSSurfaceItem::
+#                                     processKeyEvent), so Back never reached a group owner
 
 include(ExternalProject)
 
@@ -23,8 +27,10 @@ set(WNK_SDL_WEBOS_REPO "https://github.com/webosbrew/SDL-webOS.git" CACHE STRING
 
 set(_wnk_sdl_prefix "${CMAKE_BINARY_DIR}/third_party/sdl-webos")
 set(_wnk_sdl_patch "${CMAKE_CURRENT_LIST_DIR}/patches/sdl-webos-relaunch-message.patch")
-# The hash is part of the command so an edited patch rebuilds SDL; applying twice is a no-op.
+set(_wnk_sdl_patch2 "${CMAKE_CURRENT_LIST_DIR}/patches/sdl-webos-key-mask.patch")
+# The hashes are part of the command so an edited patch rebuilds SDL; applying twice is a no-op.
 file(SHA256 "${_wnk_sdl_patch}" _wnk_sdl_patch_sha)
+file(SHA256 "${_wnk_sdl_patch2}" _wnk_sdl_patch2_sha)
 set(WNK_SDL_WEBOS_LIBRARY "${_wnk_sdl_prefix}/lib/libSDL2-2.0.so.0" CACHE INTERNAL "")
 
 ExternalProject_Add(wnk_sdl_webos_ext
@@ -33,8 +39,9 @@ ExternalProject_Add(wnk_sdl_webos_ext
         GIT_SHALLOW ON
         GIT_PROGRESS OFF
         UPDATE_DISCONNECTED ON
-        PATCH_COMMAND "${CMAKE_COMMAND}" -E env "WNK_PATCH_SHA256=${_wnk_sdl_patch_sha}"
+        PATCH_COMMAND "${CMAKE_COMMAND}" -E env "WNK_PATCH_SHA256=${_wnk_sdl_patch_sha}-${_wnk_sdl_patch2_sha}"
             sh -c "git apply --reverse --check '${_wnk_sdl_patch}' 2>/dev/null || git apply '${_wnk_sdl_patch}'"
+        COMMAND sh -c "git apply --reverse --check '${_wnk_sdl_patch2}' 2>/dev/null || git apply '${_wnk_sdl_patch2}'"
         PREFIX "${CMAKE_BINARY_DIR}/third_party/sdl-webos-build"
         INSTALL_DIR "${_wnk_sdl_prefix}"
         CMAKE_ARGS

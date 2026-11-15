@@ -1,0 +1,62 @@
+diff --git a/src/video/wayland/SDL_waylandwebos.c b/src/video/wayland/SDL_waylandwebos.c
+index f429008..4cea333 100644
+--- a/src/video/wayland/SDL_waylandwebos.c
++++ b/src/video/wayland/SDL_waylandwebos.c
+@@ -132,6 +132,37 @@ void WaylandWebOS_VideoCleanUp(_THIS)
+     }
+ }
+ 
++/* webos-native-app-kit addition: in a surface group (a window that owns one, or joins one), the compositor
++ * delivers a key only if the window's key mask has it, and the default mask leaves out Home, Back and Exit; the
++ * _WEBOS_ACCESS_POLICY_KEYS_* properties count only outside groups (luna-surfacemanager
++ * WebOSSurfaceItem::processKeyEvent). So the keys an app asks for go into its key mask as well. */
++/* A hint's value, or `changed_value` while its callback runs (SDL calls hint callbacks before storing the value). */
++static SDL_bool WaylandWebOS_KeyHint(const char *hint, const char *changed_name, const char *changed_value)
++{
++    if (changed_name != NULL && SDL_strcmp(changed_name, hint) == 0) {
++        return SDL_GetStringBoolean(changed_value, SDL_FALSE);
++    }
++    return SDL_GetHintBoolean(hint, SDL_FALSE);
++}
++
++static void WaylandWebOS_UpdateKeyMask(SDL_WindowData *data, const char *changed_name, const char *changed_value)
++{
++    uint32_t mask = 0xFFFFFFF8u; /* wl_webos_shell_surface webos_key "default" */
++    if (data == NULL || data->shell_surface.webos.webos == NULL) {
++        return;
++    }
++    if (WaylandWebOS_KeyHint(SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_HOME, changed_name, changed_value)) {
++        mask |= 1u; /* home */
++    }
++    if (WaylandWebOS_KeyHint(SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_BACK, changed_name, changed_value)) {
++        mask |= 2u; /* back */
++    }
++    if (WaylandWebOS_KeyHint(SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_EXIT, changed_name, changed_value)) {
++        mask |= 4u; /* exit */
++    }
++    wl_webos_shell_surface_set_key_mask(data->shell_surface.webos.webos, mask);
++}
++
+ int WaylandWebOS_SetupSurface(_THIS, SDL_WindowData *data)
+ {
+     const char *appId;
+@@ -177,6 +208,7 @@ int WaylandWebOS_SetupSurface(_THIS, SDL_WindowData *data)
+         }
+     }
+     wl_webos_shell_surface_set_property(data->shell_surface.webos.webos, "_WEBOS_ACCESS_POLICY_FORCESTRETCH", "true");
++    WaylandWebOS_UpdateKeyMask(data, NULL, NULL); /* webos-native-app-kit addition */
+     return 0;
+ }
+ 
+@@ -243,6 +275,11 @@ static void WindowHintsCallback(void *userdata, const char *name, const char *ol
+     if (win_data == NULL) {
+         return;
+     }
++    /* webos-native-app-kit addition: keep the key mask in step with the access-policy hints. */
++    if (SDL_strcmp(name, SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_BACK) == 0 || SDL_strcmp(name, SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_EXIT) == 0 ||
++        SDL_strcmp(name, SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_HOME) == 0) {
++        WaylandWebOS_UpdateKeyMask(win_data, name, newValue);
++    }
+     if (SDL_strcmp(name, SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_BACK) == 0) {
+         wl_webos_shell_surface_set_property(win_data->shell_surface.webos.webos, "_WEBOS_ACCESS_POLICY_KEYS_BACK",
+                                             SDL_GetStringBoolean(newValue, SDL_FALSE) ? "true" : "false");

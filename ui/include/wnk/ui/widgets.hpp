@@ -239,6 +239,12 @@ class TextField : public View {
     TextField &set_placeholder(std::string placeholder);
     TextField &set_password(bool on);        // shows a bullet per character
     TextField &set_max_length(size_t code_points);  // 0: unlimited; longer input is cut
+    // No box of its own (no fill, no editing border): for a field inside a container that draws the frame,
+    // such as a browser's address pill. Text, placeholder and caret are drawn as usual.
+    TextField &set_chromeless(bool on) {
+        chromeless_ = on;
+        return *this;
+    }
     TextField &set_on_change(TextHandler h);  // after every edit
     TextField &set_on_submit(TextHandler h);  // OK/Enter while editing
     const std::string &text() const { return text_; }
@@ -272,6 +278,7 @@ class TextField : public View {
     size_t max_length_ = 0;
     bool password_ = false;
     bool editing_ = false;
+    bool chromeless_ = false;
     float scroll_ = 0;          // horizontal, keeps the cursor in view
     double caret_since_ = 0;    // the caret blinks from here (reset by every edit)
     TextHandler on_change_, on_submit_;

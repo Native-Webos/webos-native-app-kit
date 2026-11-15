@@ -260,8 +260,10 @@ void TextField::draw(Ui &ui) {
     const Theme &t = ui.theme();
     const Rect f = frame();
     const bool focused = ui.is_focused(this);
-    r.fill_rect(f, ui.fade(!enabled() || editing_ ? t.surface : focused ? t.raised_focused : t.raised), radius_);
-    if (editing_) r.stroke_rect(f, ui.fade(t.accent), 3, radius_);
+    if (!chromeless_) {
+        r.fill_rect(f, ui.fade(!enabled() || editing_ ? t.surface : focused ? t.raised_focused : t.raised), radius_);
+        if (editing_) r.stroke_rect(f, ui.fade(t.accent), 3, radius_);
+    }
 
     const Rect c = content_rect();
     const render::TextStyle s{t.regular, t.text_size, ui.fade(enabled() ? t.text : t.text_disabled)};

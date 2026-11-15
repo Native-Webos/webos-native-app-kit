@@ -69,6 +69,11 @@ class Dialog : public View {
     bool back_dismisses = true;
     std::function<void(Ui &)> on_dismiss;
     Column &body() { return *body_; }  // for extra content above the buttons
+    // Layout options, e.g. for a drop-down menu: panel width and padding, and an anchor that places the
+    // panel's top-right corner at `p` (logical units) instead of centring it. An empty title adds no title line.
+    Dialog &set_panel_width(float width);
+    Dialog &set_panel_padding(Insets padding);
+    Dialog &anchor_top_right(Point p);
 
  protected:
     void layout_content(Ui &ui, const Rect &content) override;
@@ -84,6 +89,8 @@ class Dialog : public View {
     Row *buttons_;
     Tween appear_;
     bool dismissed_ = false;
+    bool anchored_ = false;
+    Point anchor_{};
 };
 
 }  // namespace wnk::ui

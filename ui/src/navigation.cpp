@@ -108,7 +108,7 @@ Dialog::Dialog(std::string title, std::string message) {
     panel_->set_width(Dim::fixed(920));
     panel_->set_align(Align::Center, Align::Center);
     panel_->set_padding(Insets::all(56));
-    panel_->add<Label>(std::move(title), TextRole::Title).set_max_lines(2);
+    if (!title.empty()) panel_->add<Label>(std::move(title), TextRole::Title).set_max_lines(2);
     if (!message.empty()) panel_->add<Label>(std::move(message)).set_muted(true).set_max_lines(6);
     body_ = &panel_->add<Column>(16);
     buttons_ = &panel_->add<Row>(24);
@@ -133,7 +133,32 @@ void Dialog::dismiss(Ui &ui) {
 
 Size Dialog::measure_content(Ui &, Size available) { return available; }
 
-void Dialog::layout_content(Ui &ui, const Rect &content) { panel_->layout(ui, place(ui, *panel_, content)); }
+Dialog &Dialog::set_panel_width(float width) {
+    panel_->set_width(Dim::fixed(width));
+    return *this;
+}
+
+Dialog &Dialog::set_panel_padding(Insets padding) {
+    panel_->set_padding(padding);
+    return *this;
+}
+
+Dialog &Dialog::anchor_top_right(Point p) {
+    anchored_ = true;
+    anchor_ = p;
+    return *this;
+}
+
+void Dialog::layout_content(Ui &ui, const Rect &content) {
+    if (!anchored_) {
+        panel_->layout(ui, place(ui, *panel_, content));
+        return;
+    }
+    const Size s = panel_->measure(ui, {content.w, content.h});
+    const float x = std::max(content.x, anchor_.x - s.w);
+    const float y = std::min(anchor_.y, std::max(content.y, content.bottom() - s.h));
+    panel_->layout(ui, {x, y, s.w, std::min(s.h, content.bottom() - y)});
+}
 
 bool Dialog::on_action(Ui &ui, const input::ActionEvent &e) {
     if (e.action != input::Action::Back) return false;

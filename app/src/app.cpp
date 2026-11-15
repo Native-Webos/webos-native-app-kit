@@ -44,6 +44,7 @@ void Delegate::on_relaunch(Context &, const std::string &) {}
 bool Delegate::on_gamepad(Context &, const input::GamepadEvent &) { return false; }
 void Delegate::on_network(Context &, const platform::NetworkStatus &) {}
 bool Delegate::on_key(Context &, const input::KeyEvent &) { return false; }
+bool Delegate::on_pointer(Context &, const input::PointerEvent &) { return false; }
 void Delegate::on_frame(Context &, float) {}
 void Delegate::on_stop(Context &) {}
 
@@ -1227,7 +1228,7 @@ class Shell final : public Context {
     void on_pointer(const input::PointerEvent &p) {
         using T = input::PointerEvent::Type;
         if (!lifecycle_.renders()) return;
-        const bool hit = ui_->handle_pointer(p);
+        const bool hit = delegate_->on_pointer(*this, p) || ui_->handle_pointer(p);
         if (p.type == T::Move || p.type == T::Press || p.type == T::Wheel) {
             note_capability("input.pointer", diagnostics::Support::Supported,
                             std::string("first event: ") + input::pointer_type_name(p.type));

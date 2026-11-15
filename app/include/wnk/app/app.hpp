@@ -168,6 +168,9 @@ class Delegate {
     // Every raw key event (USB/Bluetooth keyboard, remote) before text input and the keymap. Return true
     // to consume it: a game that wants WASD or key-up timing reads keys here.
     virtual bool on_key(Context &ctx, const input::KeyEvent &e);
+    // Every pointer event (Magic Remote, mouse) in drawable pixels, before the Ui sees it. Return true to
+    // consume it: an app that draws its own content under the pointer (a browser, a game) reads it here.
+    virtual bool on_pointer(Context &ctx, const input::PointerEvent &e);
     // The network status changed (Context::network() already holds the new one): say "offline" instead
     // of waiting for requests to time out, and refresh when it comes back.
     virtual void on_network(Context &ctx, const platform::NetworkStatus &status);

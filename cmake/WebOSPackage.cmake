@@ -8,6 +8,8 @@
 #     VENDOR <"Vendor">
 #     ICON <80x80 png>  LARGE_ICON <130x130 png>
 #     [ICON_COLOR <#rrggbb>]
+#     [SUPPORT_GIP]                      appinfo.json "supportGIP": true; webOS 3.x's launcher shows a dark tile
+#                                        instead of the icon without it (reported on an OLED B7, webOS 3.9)
 #     [EXPECTED_NEEDED <file>]           reviewed DT_NEEDED list for the executable
 #     [MIN_RELEASE <x.y.z>]              lowest webOS release fw-check grades (default 5.3.1)
 #     [EXTRA_FILES <file>...]            copied next to the executable
@@ -45,7 +47,7 @@ set(WNK_PACKAGE_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(WNK_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}/../tools")
 
 function(wnk_add_webos_package)
-    cmake_parse_arguments(P "" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE;SOURCE_URL"
+    cmake_parse_arguments(P "SUPPORT_GIP" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE;SOURCE_URL"
             "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS;BUNDLED_LIBS;PRIVATE_RUNTIMES;GLIBC_RUNTIMES;SYSTEM_LIBS" ${ARGN})
     foreach (req TARGET APPID TITLE VERSION VENDOR ICON LARGE_ICON)
         if (NOT P_${req})
@@ -79,11 +81,14 @@ function(wnk_add_webos_package)
     set(APPINFO_TITLE "${P_TITLE}")
     set(APPINFO_ICON_COLOR "${P_ICON_COLOR}")
     set(APPINFO_EXTRA "")
+    if (P_SUPPORT_GIP)
+        string(APPEND APPINFO_EXTRA ",\n    \"supportGIP\": true")
+    endif ()
     if (P_REQUIRED_PERMISSIONS)
         list(TRANSFORM P_REQUIRED_PERMISSIONS PREPEND "\"" OUTPUT_VARIABLE _perms)
         list(TRANSFORM _perms APPEND "\"")
         list(JOIN _perms ", " _perms)
-        set(APPINFO_EXTRA ",\n    \"requiredPermissions\": [${_perms}]")
+        string(APPEND APPINFO_EXTRA ",\n    \"requiredPermissions\": [${_perms}]")
     endif ()
     configure_file("${WNK_PACKAGE_MODULE_DIR}/appinfo.json.in" "${_appinfo}.in" @ONLY)
     file(GENERATE OUTPUT "${_appinfo}" INPUT "${_appinfo}.in"

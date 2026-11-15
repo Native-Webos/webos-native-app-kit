@@ -45,6 +45,15 @@ DENY_IN_PRIVATE_RUNTIME = [
     r"libGLES.*", r"libwayland-.*", r"libluna-service2.*", r"libhelpers\.so.*", r"libpbnjson.*", r"libPmLog.*",
     r"libumedia.*", r"libresource_mgr.*", r"libums_.*",
 ]
+# A glibc runtime (--glibc-runtime DIR) is a tree like a private runtime, run as separate processes, that
+# uses the TV's own glibc instead of carrying a loader and C library: its DT_NEEDED may also name the glibc
+# libraries below. Its processes never load LG libraries, so a bundled Mesa libEGL/libGLESv2 (software GL)
+# is allowed there; every other LG library stays denied. Example: the WPE WebKit engine of a browser.
+FIRMWARE_GLIBC = frozenset({
+    "ld-linux.so.3", "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "librt.so.1", "libresolv.so.2",
+    "libutil.so.1", "libanl.so.1", "libnsl.so.1", "libcrypt.so.1",
+})
+DENY_IN_GLIBC_RUNTIME = [p for p in DENY_IN_PRIVATE_RUNTIME if p != r"libGLES.*"]
 EM_AARCH64 = 183
 PRIVATE_RUNTIME_MACHINES = {"arm": {wnk_elf.EM_ARM, EM_AARCH64}, "x86_64": {wnk_elf.EM_X86_64}}
 STATE_DIR = ".wnk-state"  # tools/mkipk.py
@@ -73,7 +82,8 @@ def parse_control(text: str) -> dict[str, str]:
 
 
 def check_private_runtimes(r: Report, elfs: dict[str, wnk_elf.ElfInfo], app_root: str, runtimes: list[str],
-                           arch: str) -> None:
+                           arch: str, system_libs: frozenset[str] = frozenset(),
+                           deny: list[str] | None = None) -> None:
     """Self-contained trees: every DT_NEEDED resolves inside the tree, no LG library, nothing outside
     the tree loads from it (no RPATH/RUNPATH of another ELF names it)."""
     for rt in runtimes:
@@ -91,10 +101,11 @@ def check_private_runtimes(r: Report, elfs: dict[str, wnk_elf.ElfInfo], app_root
             short = name[len(app_root):]
             r.check(info.machine in PRIVATE_RUNTIME_MACHINES.get(arch, {info.machine}),
                     f"{short}: machine {info.machine} allowed in a private runtime for {arch}")
-            missing = [n for n in info.needed if n not in provided]
+            missing = [n for n in info.needed if n not in provided and n not in system_libs]
             r.check(not missing, f"{short}: every DT_NEEDED is inside {rt}/" + (f" (missing {missing})" if missing else ""))
             base = {posixpath.basename(name), info.soname or ""}
-            r.check(not any(re.fullmatch(p, b) for p in DENY_IN_PRIVATE_RUNTIME for b in base if b),
+            r.check(not any(re.fullmatch(p, b) for p in (deny if deny is not None else DENY_IN_PRIVATE_RUNTIME)
+                            for b in base if b),
                     f"{short}: not an LG firmware library")
         for name, info in sorted(elfs.items()):
             if name.startswith(prefix):
@@ -105,7 +116,8 @@ def check_private_runtimes(r: Report, elfs: dict[str, wnk_elf.ElfInfo], app_root
 
 
 def check_ipk(path: Path, expected_needed: list[str] | None, arch: str,
-              private_runtimes: list[str] | None = None) -> list[str]:
+              private_runtimes: list[str] | None = None, glibc_runtimes: list[str] | None = None,
+              system_libs: list[str] | None = None) -> list[str]:
     r = Report()
     print(f"check-package: {path}")
     members = read_ar(path.read_bytes())
@@ -198,7 +210,8 @@ def check_ipk(path: Path, expected_needed: list[str] | None, arch: str,
     bundled = {p[len(bundled_dir):]: b for p, b in files.items()
                if p.startswith(bundled_dir) and "/" not in p[len(bundled_dir):]}
     private_runtimes = private_runtimes or []
-    private_prefixes = tuple(f"{app_root}{rt.strip('/')}/" for rt in private_runtimes)
+    glibc_runtimes = glibc_runtimes or []
+    private_prefixes = tuple(f"{app_root}{rt.strip('/')}/" for rt in private_runtimes + glibc_runtimes)
     elfs: dict[str, wnk_elf.ElfInfo] = {}
     for name, blob in sorted(files.items()):
         if not wnk_elf.is_elf(blob):
@@ -221,6 +234,8 @@ def check_ipk(path: Path, expected_needed: list[str] | None, arch: str,
         r.check(not any(lib.startswith("libstdc++") for lib in info.needed),
                 f"{short}: does not need libstdc++.so (link it statically)")
     check_private_runtimes(r, elfs, app_root, private_runtimes, arch)
+    check_private_runtimes(r, elfs, app_root, glibc_runtimes, arch, FIRMWARE_GLIBC | frozenset(system_libs or ()),
+                           DENY_IN_GLIBC_RUNTIME)
 
     # Licences (cmake/WebOSPackage.cmake stages them): a package must say what it is under and where
     # its source is, and carry the licence of everything it bundles.
@@ -258,13 +273,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--private-runtime", action="append", default=[], metavar="DIR",
                     help="app-relative directory holding a self-contained runtime run as a separate process "
                          "(see DENY_IN_PRIVATE_RUNTIME); repeatable")
+    ap.add_argument("--glibc-runtime", action="append", default=[], metavar="DIR",
+                    help="app-relative directory run as separate processes that use the TV's glibc "
+                         "(see FIRMWARE_GLIBC); repeatable")
+    ap.add_argument("--system-lib", action="append", default=[], metavar="SONAME",
+                    help="a further TV library a --glibc-runtime tree may need from the firmware (e.g. "
+                         "libwayland-client.so.0 for code that must share the TV's Wayland/EGL stack); repeatable")
     args = ap.parse_args(argv)
     expected = None
     if args.expected_needed:
         expected = [ln.split("#", 1)[0].strip() for ln in args.expected_needed.read_text().splitlines()
                     if ln.split("#", 1)[0].strip()]
     try:
-        failures = check_ipk(args.ipk, expected, args.arch, args.private_runtime)
+        failures = check_ipk(args.ipk, expected, args.arch, args.private_runtime, args.glibc_runtime,
+                             args.system_lib)
     except (OSError, ValueError, tarfile.TarError, wnk_elf.ElfError) as exc:
         print(f"check-package: cannot read {args.ipk}: {exc}", file=sys.stderr)
         return 3

@@ -319,6 +319,34 @@ class PrivateRuntimeRuleTests(unittest.TestCase):
                 "demo": self.elf(rpath=["$ORIGIN/runtime-other/lib"])}  # a component named differently
         self.assertEqual(self.run_rules(elfs), [])
 
+    def run_glibc_rules(self, elfs):
+        r = check_package.Report()
+        with redirect_stdout(io.StringIO()):
+            check_package.check_private_runtimes(r, {self.ROOT + k: v for k, v in elfs.items()}, self.ROOT, ["rt"],
+                                                 "arm", check_package.FIRMWARE_GLIBC,
+                                                 check_package.DENY_IN_GLIBC_RUNTIME)
+        return r.failures
+
+    def test_glibc_runtime_may_use_the_tvs_glibc_and_a_bundled_mesa(self):
+        elfs = {"rt/engine": self.elf(needed=["libc.so.6", "libpthread.so.0", "libstdc++.so.6", "libEGL.so.1"],
+                                      runpath=["$ORIGIN/lib"]),
+                "rt/lib/libstdc++.so.6": self.elf(needed=["libc.so.6", "libm.so.6"], soname="libstdc++.so.6"),
+                "rt/lib/libEGL.so.1": self.elf(needed=["libGLESv2.so.2", "libc.so.6"], soname="libEGL.so.1"),
+                "rt/lib/libGLESv2.so.2": self.elf(needed=["libc.so.6"], soname="libGLESv2.so.2"),
+                "demo": self.elf()}
+        self.assertEqual(self.run_glibc_rules(elfs), [])
+        # A private runtime (own C library) may not lean on the TV's glibc or bundle libGLES.
+        failures = self.run_rules(elfs)
+        self.assertTrue(any("every DT_NEEDED is inside rt/" in f for f in failures))
+        self.assertTrue(any("libGLESv2.so.2: not an LG firmware library" in f for f in failures))
+
+    def test_glibc_runtime_still_denies_lg_libraries_and_unresolved_names(self):
+        elfs = {"rt/engine": self.elf(needed=["libc.so.6", "libhelpers.so.2"]),
+                "rt/lib/libhelpers.so.2": self.elf(soname="libhelpers.so.2")}
+        self.assertTrue(any("not an LG firmware library" in f for f in self.run_glibc_rules(elfs)))
+        elfs = {"rt/engine": self.elf(needed=["libc.so.6", "libsoup-3.0.so.0"])}
+        self.assertTrue(any("every DT_NEEDED is inside rt/" in f for f in self.run_glibc_rules(elfs)))
+
 
 class FwCheckTests(unittest.TestCase):
     """fw-check against a synthetic inventory in the real format: symbols are "name@VERSION" and a

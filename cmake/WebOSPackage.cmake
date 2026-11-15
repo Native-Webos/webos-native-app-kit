@@ -18,6 +18,9 @@
 #                                        <basename>/ and started as separate processes; checked with
 #                                        check-package.py --private-runtime instead of the executable's
 #                                        ARM/libstdc++ rules
+#     [GLIBC_RUNTIMES <dir>...]          like PRIVATE_RUNTIMES, but the tree uses the TV's glibc instead of its
+#                                        own loader and C library (check-package.py --glibc-runtime)
+#     [SYSTEM_LIBS <soname>...]          further TV libraries GLIBC_RUNTIMES may need (check-package.py --system-lib)
 #     [SOURCE_URL <url>]                 where the app's corresponding source is published (named in
 #                                        licenses/SOURCE.txt; default WNK_SOURCE_URL, else the kit's notice)
 # )
@@ -43,7 +46,7 @@ set(WNK_TOOLS_DIR "${CMAKE_CURRENT_LIST_DIR}/../tools")
 
 function(wnk_add_webos_package)
     cmake_parse_arguments(P "" "TARGET;APPID;TITLE;VERSION;VENDOR;ICON;LARGE_ICON;ICON_COLOR;EXPECTED_NEEDED;MIN_RELEASE;SOURCE_URL"
-            "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS;BUNDLED_LIBS;PRIVATE_RUNTIMES" ${ARGN})
+            "EXTRA_FILES;EXTRA_DIRS;REQUIRED_PERMISSIONS;BUNDLED_LIBS;PRIVATE_RUNTIMES;GLIBC_RUNTIMES;SYSTEM_LIBS" ${ARGN})
     foreach (req TARGET APPID TITLE VERSION VENDOR ICON LARGE_ICON)
         if (NOT P_${req})
             message(FATAL_ERROR "wnk_add_webos_package: ${req} is required")
@@ -199,6 +202,16 @@ of the same version and options.
         file(GLOB_RECURSE _dfiles CONFIGURE_DEPENDS "${_d}/*")
         list(APPEND _dir_deps ${_dfiles})
         list(APPEND _check_args --private-runtime "${_dname}")
+    endforeach ()
+    foreach (_d IN LISTS P_GLIBC_RUNTIMES)
+        get_filename_component(_dname "${_d}" NAME)
+        list(APPEND _cmds COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_d}" "${_stage}/${_dname}")
+        file(GLOB_RECURSE _dfiles CONFIGURE_DEPENDS "${_d}/*")
+        list(APPEND _dir_deps ${_dfiles})
+        list(APPEND _check_args --glibc-runtime "${_dname}")
+    endforeach ()
+    foreach (_l IN LISTS P_SYSTEM_LIBS)
+        list(APPEND _check_args --system-lib "${_l}")
     endforeach ()
 
     add_custom_target(${P_TARGET}-ipk

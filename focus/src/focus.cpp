@@ -36,9 +36,54 @@ float major_distance(const Rect &src, const Rect &dst, Direction dir) {
     return 0;
 }
 
+// How far the candidate's far edge lies in the direction (Android: majorAxisDistanceToFarEdge).
+float major_distance_to_far_edge(const Rect &src, const Rect &dst, Direction dir) {
+    switch (dir) {
+        case Direction::Right: return std::max(1.0f, dst.right() - src.right());
+        case Direction::Left: return std::max(1.0f, src.x - dst.x);
+        case Direction::Down: return std::max(1.0f, dst.bottom() - src.bottom());
+        case Direction::Up: return std::max(1.0f, src.y - dst.y);
+    }
+    return 1;
+}
+
+// The candidate lies wholly in the direction, not just partly (Android: isToDirectionOf).
+bool wholly_in_direction(const Rect &src, const Rect &dst, Direction dir) {
+    switch (dir) {
+        case Direction::Right: return src.right() <= dst.x;
+        case Direction::Left: return src.x >= dst.right();
+        case Direction::Down: return src.bottom() <= dst.y;
+        case Direction::Up: return src.y >= dst.bottom();
+    }
+    return false;
+}
+
 float minor_distance(const Rect &src, const Rect &dst, Direction dir) {
     if (dir == Direction::Left || dir == Direction::Right) return std::fabs(dst.cy() - src.cy());
     return std::fabs(dst.cx() - src.cx());
+}
+
+// Android's FocusFinder.beamBeats: a candidate in the source's beam beats one outside it, except, for
+// Up and Down, when the outside one is reached first. Without that exception a button beside a row of
+// tiles loses to anything straight above the tile, however far (Up from a card jumped to the nav bar).
+bool beam_beats(const Rect &src, const Rect &a, const Rect &b, Direction dir) {
+    if (in_beam(src, b, dir) || !in_beam(src, a, dir)) return false;
+    if (!wholly_in_direction(src, b, dir)) return true;
+    if (dir == Direction::Left || dir == Direction::Right) return true;
+    return major_distance(src, a, dir) < major_distance_to_far_edge(src, b, dir);
+}
+
+float weighted_distance(const Rect &src, const Rect &dst, Direction dir) {
+    const float major = major_distance(src, dst, dir);
+    const float minor = minor_distance(src, dst, dir);
+    return 13.0f * major * major + minor * minor;  // Android's weighting favours the major axis
+}
+
+// Android's FocusFinder.isBetterCandidate for two candidates in the direction.
+bool better(const Rect &src, const Rect &a, const Rect &b, Direction dir) {
+    if (beam_beats(src, a, b, dir)) return true;
+    if (beam_beats(src, b, a, dir)) return false;
+    return weighted_distance(src, a, dir) < weighted_distance(src, b, dir);
 }
 
 NodeId explicit_neighbour(const NodeSpec &n, Direction dir) {
@@ -185,17 +230,17 @@ bool FocusManager::enter_scope(ScopeId id) {
 NodeId FocusManager::best_in_direction(const NodeSpec &from, Direction dir) const {
     const ScopeId fence = containing_scope(from.scope);
     NodeId best = kNoNode;
-    std::tuple<int, float, NodeId> best_key{};
+    const Rect *best_rect = nullptr;
     for (const auto &[id, n] : nodes_) {
         if (id == from.id || !allowed(n) || !is_descendant(n.scope, fence)) continue;
         if (!in_direction(from.rect, n.rect, dir)) continue;
-        const float major = major_distance(from.rect, n.rect, dir);
-        const float minor = minor_distance(from.rect, n.rect, dir);
-        // Beam candidates always win; then Android's weighting favours the major axis.
-        auto key = std::make_tuple(in_beam(from.rect, n.rect, dir) ? 0 : 1, 13.0f * major * major + minor * minor, id);
-        if (best == kNoNode || key < best_key) {
+        // As Android's FocusFinder; equally good candidates go to the lower id, so the result does not
+        // depend on the order nodes are visited.
+        const bool take = best == kNoNode || better(from.rect, n.rect, *best_rect, dir) ||
+                          (!better(from.rect, *best_rect, n.rect, dir) && id < best);
+        if (take) {
             best = id;
-            best_key = key;
+            best_rect = &n.rect;
         }
     }
     return best;

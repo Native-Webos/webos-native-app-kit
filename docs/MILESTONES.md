@@ -76,7 +76,7 @@ core (directional, explicit neighbours, scopes). Host golden-image tests on Mesa
 
 Implemented: `core/` geometry; `input/` (keymaps with provenance, `ActionMapper` with press/repeat/release,
 unpaired-key and unknown-key suppression, `release_all` on focus loss, SDL adapter with static checks of
-every hard-coded scancode); `focus/` (Android-style directional search with in-beam preference, explicit
+every hard-coded scancode); `focus/` (Android-style directional search with FocusFinder's in-beam preference, explicit
 neighbours and `kBlocked`, containing scopes, per-scope memory, modal stack with restore, recovery when the
 focused node disappears); `render/` (stb_truetype fonts, UTF-8, shelf-packed glyph atlas with reset,
 `Gles2Renderer`: batched SDF rounded rects and borders, RGBA images, glyphs, nested scissor clips,

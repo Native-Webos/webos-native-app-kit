@@ -69,6 +69,34 @@ TEST("in-beam candidates beat closer out-of-beam ones") {
     CHECK_EQ(fm.focused(), 2u);
 }
 
+TEST("up and down: a nearer button outside the beam beats a far one inside it") {
+    // A Home screen as on a TV (issue reported as "scrolling jumps to the top nav bar"): nav tabs at
+    // the top, a button row on the left, then a row of cards. As Android's FocusFinder.beamBeats, an
+    // in-beam candidate wins vertically only if it is nearer than the other candidate's far edge.
+    FocusManager fm;
+    fm.upsert(mk(1, kRootScope, {628, 50, 120, 64}));    // nav tab, straight above the second card
+    fm.upsert(mk(2, kRootScope, {96, 604, 184, 72}));    // Details button
+    fm.upsert(mk(3, kRootScope, {340, 700, 196, 48}));   // Clear history, up and to the left
+    fm.upsert(mk(4, kRootScope, {112, 784, 400, 224}));  // first card
+    fm.upsert(mk(5, kRootScope, {540, 784, 400, 224}));  // second card
+    REQUIRE(fm.focus(5));
+    CHECK(fm.move(Direction::Up));
+    CHECK_EQ(fm.focused(), 3u);  // not the nav tab
+    REQUIRE(fm.focus(1));
+    CHECK(fm.move(Direction::Down));
+    CHECK_EQ(fm.focused(), 2u);  // the button row, not the card straight below
+}
+
+TEST("up and down: an in-beam candidate still wins when it is reached first") {
+    FocusManager fm;
+    fm.upsert(mk(1, kRootScope, {0, 0, 100, 100}));
+    fm.upsert(mk(2, kRootScope, {0, 150, 100, 100}));    // straight below, near
+    fm.upsert(mk(3, kRootScope, {150, 120, 100, 300}));  // beside, starts higher but ends far below
+    REQUIRE(fm.focus(1));
+    CHECK(fm.move(Direction::Down));
+    CHECK_EQ(fm.focused(), 2u);
+}
+
 TEST("ties break deterministically by id") {
     FocusManager fm;
     fm.upsert(mk(1, kRootScope, {100, 0, 100, 100}));

@@ -45,7 +45,7 @@ constexpr int64_t kSpliceClockLeadUs = 600000;
 
 // PF_EVENT_T as webOS 5+ numbers it (the NDK's StarfishMediaAPIs.h).
 constexpr int kEvVideoInfo = 0x4, kEvAudioInfo = 0x7, kEvUnloadCompleted = 0x17, kEvPlaying = 0x1a,
-              kEvPaused = 0x1b, kEvEndOfStream = 0x1c, kEvDropped = 0x30, kEvDisplayed = 0x31;
+              kEvPaused = 0x1b, kEvEndOfStream = 0x1c, kEvLoadCompleted = 0x25, kEvDropped = 0x30, kEvDisplayed = 0x31;
 // AcbAPI.h: PLAYER_TYPE_MSE, SINK_TYPE_MAIN, APPSTATE_FOREGROUND, PLAYSTATE_*.
 constexpr int kAcbPlayerMse = 10, kAcbSinkMain = 0, kAcbForeground = 1;
 constexpr int kAcbUnloaded = 0, kAcbLoaded = 1, kAcbPlaying = 2, kAcbPaused = 3;
@@ -718,7 +718,10 @@ void StarfishBackend::on_event(int raw_type, long long num, const char *str) {
         std::lock_guard<std::mutex> lock(events_mutex_);
         fn = events_;
     }
-    if (!load_completed_ && (s.find("loadCompleted") != std::string::npos || s.find("\"loaded\"") != std::string::npos)) {
+    // LOADCOMPLETED comes with no text on webOS 4.5 (an LG B9: the ACB placement never ran and setState answered
+    // -2), so its number counts too.
+    if (!load_completed_ && (type == kEvLoadCompleted || s.find("loadCompleted") != std::string::npos ||
+                             s.find("\"loaded\"") != std::string::npos)) {
         load_completed_ = true;
         if (acb_id_ != 0) {
             void *object = loading_object_.load();

@@ -225,6 +225,7 @@ TEST("starfish: webOS major from os_info.json") {
 }
 
 TEST("starfish: event types above ENDOFSTREAM are two lower before webOS 5") {
+    CHECK_EQ(StarfishBackend::normalise_event_type(35, 4), 0x25);  // LOADCOMPLETED as webOS 4.10 sends it (LG B9)
     // webOS 4.10's libpf sends dropped/displayed frames as 46/47 (PlxNative's decompile).
     CHECK_EQ(StarfishBackend::normalise_event_type(46, 4), 48);
     CHECK_EQ(StarfishBackend::normalise_event_type(47, 3), 49);

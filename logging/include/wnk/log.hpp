@@ -39,6 +39,7 @@ struct Record {
 std::string format_record(const Record &record);
 
 // Mask secrets: every query parameter value of a URL ("scheme://…?k=<redacted>&…"), fragment values,
+// path segments that are tokens (a run of 24+ letters/digits/'_' mixing both: "https://cdn/<redacted>/v.mp4"),
 // and key/value pairs whose key looks like a credential
 // (token, access_token, api_key, apikey, password, passwd, secret, session, auth, x-plex-token,
 // x-emby-token, authorization), "Authorization: <scheme> <value>" and "Bearer <value>".

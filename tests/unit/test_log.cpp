@@ -66,6 +66,24 @@ TEST("redact: URL query values in JSON, lists and several URLs; text after a URL
     CHECK_EQ(redact("https://h/p?token=abc"), std::string("https://h/p?token=<redacted>"));  // masked once
 }
 
+TEST("redact masks path segments that are tokens, not names") {
+    // A CDN that signs the path (seen on the LG C1 with a provider's video links): the token goes, the
+    // host and the file name stay.
+    CHECK_EQ(redact("opened https://sys.vkcdn5.com/k44sjimfuxzgds2ywobcv2z5r2mi3eslrg7g75lade4gscnftk2uja3lp6fa/v.mp4: mp4"),
+             std::string("opened https://sys.vkcdn5.com/<redacted>/v.mp4: mp4"));
+    CHECK_EQ(redact("https://h/a/0123456789abcdef0123456789abcdef/b?x=1"),
+             std::string("https://h/a/<redacted>/b?x=<redacted>"));
+    // Names: words joined by '-', a long word without digits, short ids, file names.
+    const std::string names = "https://h/shows/the-great-indian-kapil-show-season-5/e07/v.mp4 "
+                              "https://h/internationalisationlocalisation/x https://h/v/12345/a1b2.ts";
+    CHECK_EQ(redact(names), names);
+    // The host is never a path segment; paths outside URLs are left alone.
+    CHECK_EQ(redact("https://abcdefghijklmnopqrstuvwxyz0123456789.example/x"),
+             std::string("https://abcdefghijklmnopqrstuvwxyz0123456789.example/x"));
+    CHECK_EQ(redact("/tmp/plugins/k44sjimfuxzgds2ywobcv2z5r2mi3eslrg7g75lade4.cs3"),
+             std::string("/tmp/plugins/k44sjimfuxzgds2ywobcv2z5r2mi3eslrg7g75lade4.cs3"));
+}
+
 TEST("redact masks headers and bearer tokens") {
     CHECK_EQ(redact("Authorization: Bearer eyJabc.def"), std::string("Authorization: <redacted>"));
     CHECK_EQ(redact("sent bearer eyJabc.def ok"), std::string("sent bearer <redacted> ok"));

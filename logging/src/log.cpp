@@ -82,6 +82,28 @@ bool ends_url(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '"' || c == '\'' || c == '<' || c == '>';
 }
 
+// A URL path segment that is a token rather than a name: a run of 24 or more letters, digits or '_'
+// with both letters and digits (CDNs that sign the path, e.g. https://cdn/<token>/v.mp4). Words joined
+// by '-' or '.' ("the-great-show", "v.mp4") and long words without digits are names.
+bool opaque_segment(std::string_view seg) {
+    size_t run = 0;
+    bool letter = false, digit = false;
+    for (size_t i = 0; i <= seg.size(); ++i) {
+        const char c = i < seg.size() ? seg[i] : '\0';
+        const bool word = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        if (word) {
+            ++run;
+            letter = letter || ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
+            digit = digit || (c >= '0' && c <= '9');
+            continue;
+        }
+        if (run >= 24 && letter && digit) return true;
+        run = 0;
+        letter = digit = false;
+    }
+    return false;
+}
+
 std::atomic<Logger *> g_default{nullptr};
 
 }  // namespace
@@ -135,6 +157,16 @@ std::string redact(std::string_view text) {
         if (in_url) {
             if (ends_url(text[i])) {
                 in_url = false;
+            } else if (text[i] == '/') {
+                // A path segment that is a token (signed paths) is masked whole; the host and names stay.
+                out.push_back(text[i++]);
+                size_t k = i;
+                while (k < text.size() && text[k] != '/' && text[k] != '?' && text[k] != '#' && !ends_url(text[k])) ++k;
+                if (opaque_segment(text.substr(i, k - i))) {
+                    out.append("<redacted>");
+                    i = k;
+                }
+                continue;
             } else if (text[i] == '?' || text[i] == '&' || text[i] == '#') {
                 out.push_back(text[i++]);
                 size_t k = i;

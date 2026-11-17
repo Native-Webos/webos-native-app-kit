@@ -758,6 +758,21 @@ bool parse_mpd(const std::string &doc, const std::string &url, Presentation *out
     out->update_period_us = duration_attr("minimumUpdatePeriod");
     out->time_shift_us = duration_attr("timeShiftBufferDepth");
     out->live_delay_us = duration_attr("suggestedPresentationDelay");
+    out->min_buffer_us = duration_attr("minBufferTime");
+    if (const XmlNode *sd = mpd.child("ServiceDescription")) {
+        if (const XmlNode *lat = sd->child("Latency")) {
+            auto ms_attr = [&](const char *name, int64_t *v) {
+                const std::string *s = lat->attribute(name);
+                if (s == nullptr) return;
+                char *end = nullptr;
+                const long long ms = std::strtoll(s->c_str(), &end, 10);
+                if (end != s->c_str() && *end == '\0' && ms >= 0) *v = static_cast<int64_t>(ms) * 1000;
+            };
+            ms_attr("target", &out->latency_target_us);
+            ms_attr("min", &out->latency_min_us);
+            ms_attr("max", &out->latency_max_us);
+        }
+    }
     if (const XmlNode *utc = mpd.child("UTCTiming")) {
         out->utc_timing_scheme = utc->attribute_or("schemeIdUri", "");
         out->utc_timing_value = utc->attribute_or("value", "");

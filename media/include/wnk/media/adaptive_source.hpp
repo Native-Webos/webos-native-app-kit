@@ -37,8 +37,9 @@
 //
 //   live      DASH type="dynamic" (read against the server's clock when the MPD names a UTCTiming
 //             source) and HLS without EXT-X-ENDLIST. Playback joins a few segments behind the newest
-//             (HLS: three target durations; DASH: suggestedPresentationDelay, else three segments) on
-//             a timeline that starts at the window's first segment; duration is unknown and seeks are
+//             (HLS: three target durations; DASH: as ExoPlayer's DashMediaSource, the ServiceDescription
+//             latency target, else suggestedPresentationDelay, else 30 s, but at least minBufferTime and
+//             two segments) on a timeline that starts at the window's first segment; duration is unknown and seeks are
 //             clamped to what the server still lists. A refresher thread reloads the playlists in use
 //             (HLS: every target duration) or the MPD and appends new segments, by sequence number, to
 //             the open-ended readers of every rendition in use, including a bitrate switch in progress.

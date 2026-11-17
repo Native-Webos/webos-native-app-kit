@@ -1925,7 +1925,23 @@ bool AdaptiveSource::open(const std::string &uri, std::string *error) {
                 if (r.type == TrackType::Audio && r.period == v.period) consider(r);
             }
         }
-        const int64_t delay = !hls && m.pres.live_delay_us != kNoTime ? std::max(m.pres.live_delay_us, 2 * seg) : 3 * seg;
+        int64_t delay = 3 * seg;
+        if (!hls) {
+            // DASH, as ExoPlayer's DashMediaSource.updateLiveConfiguration (CloudStream's player): the
+            // ServiceDescription target, else suggestedPresentationDelay, else 30 s; never closer than
+            // minBufferTime (or the ServiceDescription minimum) and, beyond that, the latency maximum
+            // only lowers it. A stream that suggests 2 s but needs a 30 s buffer otherwise joins at
+            // the edge, fetches each segment as it is still being written and stalls.
+            const Presentation &p = m.pres;
+            int64_t min_offset = p.min_buffer_us != kNoTime ? p.min_buffer_us : 0;
+            if (p.latency_min_us != kNoTime) min_offset = std::max(min_offset, p.latency_min_us);
+            int64_t target = p.latency_target_us != kNoTime ? p.latency_target_us
+                             : p.live_delay_us != kNoTime  ? p.live_delay_us
+                                                           : 30000000;
+            target = std::max(target, min_offset);
+            if (p.latency_max_us != kNoTime) target = std::min(target, std::max(p.latency_max_us, min_offset));
+            delay = std::max(target, 2 * seg);
+        }
         m.position_us = std::max(v.segments.front().start_us, edge - delay);
         m.pres.duration_us = kNoTime;
         WNK_LOGI(kCat, "live: %zu segments listed, joining at %.1f s of %.1f s (segments up to %.1f s)", v.segments.size(),

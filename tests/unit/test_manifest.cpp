@@ -584,6 +584,22 @@ TEST("ISO 8601 date-times: UTC, fractions, zones") {
     CHECK(!parse_iso_datetime("yesterday", &us));
 }
 
+TEST("dash live: minBufferTime and the ServiceDescription latency are read") {
+    const char *mpd = R"(<MPD type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minBufferTime="PT30S"
+        suggestedPresentationDelay="PT2.000S"><ServiceDescription id="0"><Latency target="6000" min="3000" max="9000"/>
+      </ServiceDescription><Period id="P0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+        <SegmentTemplate media="$Number$.m4s" initialization="init.mp4" duration="2" startNumber="0"/>
+        <Representation id="V" bandwidth="300000" codecs="avc1.64001e"/></AdaptationSet></Period></MPD>)";
+    Presentation p;
+    std::string err;
+    REQUIRE(parse_mpd(mpd, "https://h/l/Manifest.mpd", &p, &err, int64_t{100} * 1000000));
+    CHECK_EQ(p.live_delay_us, int64_t{2000000});
+    CHECK_EQ(p.min_buffer_us, int64_t{30000000});
+    CHECK_EQ(p.latency_target_us, int64_t{6000000});
+    CHECK_EQ(p.latency_min_us, int64_t{3000000});
+    CHECK_EQ(p.latency_max_us, int64_t{9000000});
+}
+
 TEST("dash live: an endless SegmentTemplate lists what has arrived, back to the time-shift window") {
     // Shaped like DASH-IF livesim2's testpic_2s.
     const char *mpd = R"(<MPD type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S"
@@ -603,6 +619,8 @@ TEST("dash live: an endless SegmentTemplate lists what has arrived, back to the 
     CHECK_EQ(p.update_period_us, int64_t{2000000});
     CHECK_EQ(p.time_shift_us, int64_t{60000000});
     CHECK_EQ(p.live_delay_us, int64_t{6000000});
+    CHECK_EQ(p.min_buffer_us, kNoTime);
+    CHECK_EQ(p.latency_target_us, kNoTime);
     CHECK_EQ(p.availability_start_us, int64_t{0});
     CHECK_EQ(p.utc_timing_scheme, std::string("urn:mpeg:dash:utc:http-xsdate:2014"));
     const auto &segs = p.renditions[0].segments;

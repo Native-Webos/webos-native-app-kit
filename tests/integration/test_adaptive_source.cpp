@@ -1243,6 +1243,44 @@ TEST("adaptive source live: the join point leaves room for the longest segments 
     CHECK(first != kNoTime && first < 1000000);
 }
 
+TEST("adaptive source live: DASH joins as ExoPlayer does (minBufferTime over a short suggested delay; ServiceDescription target)") {
+    SKIP_UNLESS_READY();
+    // 20.5 s into the event, 2 s video segments listed to 20 s. A CDN MPD seen in the field says
+    // suggestedPresentationDelay="PT2S" but minBufferTime="PT30S": joining 4 s from the edge, each
+    // segment was fetched while still being written and playback stalled. ExoPlayer joins at
+    // minBufferTime at least; a ServiceDescription latency target comes first.
+    const std::string d = env("WNK_TEST_FILES_DIR");
+    const auto ast = std::chrono::system_clock::now() - std::chrono::milliseconds(20500);
+    auto first_video = [&](const std::string &name, const std::string &attrs, const std::string &service) {
+        const std::string m = "<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"dynamic\" availabilityStartTime=\"" +
+                              iso_utc(ast) + "\" minimumUpdatePeriod=\"PT30S\" timeShiftBufferDepth=\"PT60S\" " + attrs + ">" + service +
+                              "<Period id=\"0\" start=\"PT0S\"><AdaptationSet id=\"0\" contentType=\"video\">"
+                              "<SegmentTemplate timescale=\"1000000\" duration=\"2000000\" initialization=\"l-init-$RepresentationID$.m4s\" "
+                              "media=\"l-$RepresentationID$-$Number%05d$.m4s\" startNumber=\"1\"/>"
+                              "<Representation id=\"1\" mimeType=\"video/mp4\" codecs=\"avc1.64000d\" bandwidth=\"400000\" width=\"320\" height=\"240\"/>"
+                              "</AdaptationSet></Period></MPD>";
+        write_file(d + "/" + name, m);
+        AdaptiveSource s(options());
+        std::string err;
+        int64_t first = kNoTime;
+        if (!s.open(url(name), &err)) return first;
+        StreamFormat f;
+        if (!s.select(0, -1, starfish_like(), &f, &err)) return first;
+        Packet p;
+        while (first == kNoTime && s.read(&p, &err) == MediaSource::Read::Packet) {
+            if (p.type == TrackType::Video) first = p.pts_us;
+        }
+        return first;
+    };
+    const int64_t buffered = first_video("lb.mpd", "suggestedPresentationDelay=\"PT2S\" minBufferTime=\"PT10S\"", "");
+    std::printf("  minBufferTime 10 s: first video packet at %.2f s\n", buffered / 1e6);
+    CHECK(buffered != kNoTime && buffered >= 9900000 && buffered < 10500000);  // the old rule: 16 s
+    const int64_t service = first_video("ls.mpd", "suggestedPresentationDelay=\"PT2S\" minBufferTime=\"PT2S\"",
+                                        "<ServiceDescription id=\"0\"><Latency target=\"6000\" min=\"3000\" max=\"9000\"/></ServiceDescription>");
+    std::printf("  ServiceDescription target 6 s: first video packet at %.2f s\n", service / 1e6);
+    CHECK(service != kNoTime && service >= 13900000 && service < 14500000);
+}
+
 TEST("adaptive source: a backend without adaptive resolution keeps the picture size") {
     SKIP_UNLESS_READY();
     AdaptiveSourceOptions o = options();

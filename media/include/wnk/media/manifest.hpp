@@ -128,6 +128,9 @@ struct Presentation {
     int64_t update_period_us = kNoTime;       // minimumUpdatePeriod
     int64_t time_shift_us = kNoTime;          // timeShiftBufferDepth
     int64_t live_delay_us = kNoTime;          // suggestedPresentationDelay
+    int64_t min_buffer_us = kNoTime;          // minBufferTime
+    // ServiceDescription/Latency @target, @min, @max (DASH-IF low-latency), as live offsets.
+    int64_t latency_target_us = kNoTime, latency_min_us = kNoTime, latency_max_us = kNoTime;
     std::string utc_timing_scheme, utc_timing_value;  // the first UTCTiming element
     // Seek previews (thumbnails.hpp). DASH: every thumbnail_tile Representation, sheets ready (one
     // track per Representation, across Periods). HLS: the image playlists, to load and parse with

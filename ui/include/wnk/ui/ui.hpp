@@ -242,6 +242,7 @@ class Ui {
     std::deque<Toast> toasts_;
     // Pointer.
     bool pointer_active_ = false;
+    std::vector<ViewId> rehovered_;  // views a frame's re-hover focused since the pointer last moved or scrolled
     Point pointer_;
     ViewId pressed_ = 0;
     FocusSource focus_source_ = FocusSource::Program;

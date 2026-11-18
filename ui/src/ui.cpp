@@ -410,11 +410,13 @@ bool Ui::handle_pointer_logical(const input::PointerEvent &e, Point p) {
         case T::Move:
             pointer_active_ = true;
             pointer_ = p;
+            rehovered_.clear();
             hover();
             return hit_focusable(p) != nullptr;
         case T::Press: {
             pointer_active_ = true;
             pointer_ = p;
+            rehovered_.clear();
             hover();
             if (e.button != 1) return false;
             View *v = hit_focusable(p);
@@ -450,6 +452,7 @@ bool Ui::handle_pointer_logical(const input::PointerEvent &e, Point p) {
             for (View *v = target; v != nullptr; v = v->parent_) {
                 if (v->on_wheel(*this, e.wheel)) {
                     refresh();
+                    rehovered_.clear();
                     return true;  // what is under the pointer changes as it scrolls: update() re-hovers
                 }
             }
@@ -494,8 +497,20 @@ void Ui::update(float dt) {
     update_tree(*this, *root_, dt);
     update_tree(*this, *overlay_, dt);
     refresh();
-    // Content may have moved under a stationary pointer (wheel scrolling, screen changes).
-    if (pointer_active_) hover();
+    // Content may have moved under a stationary pointer (wheel scrolling, screen changes): focus follows, but to each
+    // view once until the pointer moves or scrolls again. A view that moves away when it takes focus (a toolbar whose
+    // layout changes) would otherwise trade focus with what is under it every frame (a webOS 3.9 TV: 60 focus
+    // changes a second, a flashing toolbar).
+    if (pointer_active_ && text_view_ == 0) {
+        View *v = hit_focusable(pointer_);
+        if (v != nullptr && v != focused() &&
+            std::find(rehovered_.begin(), rehovered_.end(), v->id_) == rehovered_.end()) {
+            rehovered_.push_back(v->id_);
+            hover();
+        }
+    } else if (pointer_active_) {
+        hover();
+    }
 
     if (!toasts_.empty()) {
         Toast &t = toasts_.front();

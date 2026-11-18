@@ -911,6 +911,47 @@ TEST("pointer: an arrow key hands control back to the D-pad") {
     CHECK(!env.ui.pointer_active());
 }
 
+namespace {
+// Shows a view only while another has focus: focusing `watch` pushes it down and puts `shown` under the pointer.
+struct ShowWhileFocused : View {
+    View *watch = nullptr, *shown = nullptr;
+    void update(Ui &ui, float dt) override {
+        View::update(ui, dt);
+        if (watch != nullptr && shown != nullptr && shown->visible() != ui.is_focused(watch))
+            shown->set_visible(ui.is_focused(watch));
+    }
+};
+}  // namespace
+
+TEST("pointer: a still pointer moves focus at most once per move, however the views under it shift") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(0);
+    col.set_align(Align::Start, Align::Start);
+    auto &c = static_cast<Button &>(col.add_child(button("C")));
+    auto &a = static_cast<Button &>(col.add_child(button("A")));
+    auto &watcher = env.ui.root().add<ShowWhileFocused>();
+    watcher.watch = &a;
+    watcher.shown = &c;
+    c.set_visible(false);
+    env.frame();
+    const Point p = centre(a);  // A's place while C is hidden; C takes it when shown
+    env.ui.focus(nullptr);
+    env.frame();
+    move(env, p);
+    CHECK(env.ui.is_focused(&a));
+    env.frames(5);  // it may settle on either
+    int changes = 0;
+    const View *last = env.ui.focused();
+    for (int i = 0; i < 30; ++i) {
+        env.frame();
+        if (env.ui.focused() != last) ++changes, last = env.ui.focused();
+    }
+    CHECK_EQ(changes, 0);  // was a focus change every frame
+    // The next move hovers again.
+    move(env, p);
+    CHECK(env.ui.focused() != nullptr);
+}
+
 TEST("pointer: cells clipped out of a collection cannot be hovered; hover does not scroll") {
     Grid1000 t;
     // The overscan line below the viewport exists but is clipped away.

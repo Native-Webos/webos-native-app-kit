@@ -1452,7 +1452,10 @@ int run(int argc, char **argv, const AppConfig &config, const DelegateFactory &f
     log::Logger logger(log::Level::Debug);
     logger.add_sink(std::make_unique<log::StderrSink>());
     if (!runtime.empty()) {
-        const int fd = log::open_log_file(runtime + "/events.log", log::OpenMode::Truncate);
+        // Keep the previous run's log: an app reopened after a crash would otherwise overwrite what happened.
+        const std::string path = runtime + "/events.log";
+        ::rename(path.c_str(), (runtime + "/events.prev.log").c_str());
+        const int fd = log::open_log_file(path, log::OpenMode::Truncate);
         if (fd >= 0) logger.add_sink(std::make_unique<log::FileSink>(fd));
     }
     log::set_default_logger(&logger);

@@ -853,7 +853,8 @@ WNK_LOGW(kCat, "store: %s", storage::status_name(st));
 
 One category string per app (`"tvui"`, `"player"`). The shell writes a 0640 log in the runtime
 directory. On a Developer Mode TV, `tools/logs.sh <app id>` or Dev Manager can read
-`/tmp/<app id>/events.log`.
+`/tmp/<app id>/events.log`. The previous run's log moves to `events.prev.log` at start, so an app
+reopened after a crash keeps what happened.
 
 Every message passes through `wnk::log::redact()` before any sink. It masks the value of every query
 and fragment parameter of a URL (`https://h/m.m3u8?sig=<redacted>&t=<redacted>`; names, hosts and

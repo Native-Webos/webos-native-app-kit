@@ -673,16 +673,23 @@ void StarfishBackend::on_event(int raw_type, long long num, const char *str) {
                                 std::chrono::steady_clock::now().time_since_epoch()).count();
         presented_at_ns_ = now;
         ++frameready_;
+        ++frames_total_;
         if (const int64_t at = seek_issued_ns_.exchange(0); at != 0) {
             WNK_LOGI(kCat, "seek landed: first frame pts %.3f s, %.0f ms after Seek", num / 1e9, (now - at) / 1e6);
         }
-        // Every 5 s: the sink's own counters and how many FRAMEREADY callbacks came.
-        if (now - summary_at_ns_.load() >= 5000000000LL) {
-            summary_at_ns_ = now;
-            WNK_LOGI(kCat, "sink: %lld displayed, %lld dropped, %lld FRAMEREADY in 5 s (presented pts %.3f s)",
-                     displayed_.exchange(0), dropped_.exchange(0), frameready_.exchange(0), num / 1e9);
+        if (!seen_frame_.exchange(true)) {
+            first_frame_ns_ = now;
+            WNK_LOGI(kCat, "first frame presented (pts %lld ns)", num);
         }
-        if (!seen_frame_.exchange(true)) WNK_LOGI(kCat, "first frame presented (pts %lld ns)", num);
+        // The sink's own counters and how many FRAMEREADY callbacks came: every second for the first 10 s of a
+        // Load (whether playback gets going), every 5 s after that.
+        const int64_t every = now - first_frame_ns_.load() < 10000000000LL ? 1000000000LL : 5000000000LL;
+        if (const int64_t since = now - summary_at_ns_.load(); since >= every) {
+            summary_at_ns_ = now;
+            WNK_LOGI(kCat, "sink: %lld displayed, %lld dropped, %lld FRAMEREADY in %.1f s (presented pts %.3f s)",
+                     displayed_.exchange(0), dropped_.exchange(0), frameready_.exchange(0),
+                     since > 60000000000LL ? 0.0 : since / 1e9, num / 1e9);
+        }
         return;
     }
     const std::string s = str != nullptr ? str : "";
@@ -819,6 +826,7 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
     load_completed_ = false;
     seen_frame_ = false;
     presented_out_us_ = kNoTime;
+    frames_total_ = 0;
     {
         // Before Load: its events (the ACB placement at loadCompleted, the video info) read them.
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1001,6 +1009,16 @@ void StarfishBackend::unload() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!loaded_) return;
         loaded_ = false;
+        // Where playback got to: a stream that stalls after its first frames shows here.
+        const int64_t at = presented_at_ns_.load(), out = presented_out_us_.load();
+        const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (out == kNoTime) {
+            WNK_LOGI(kCat, "at Unload: no frame presented");
+        } else {
+            WNK_LOGI(kCat, "at Unload: %lld FRAMEREADY since Load, last presented pts %.3f s, %.0f ms ago",
+                     frames_total_.load(), out / 1e6, (now - at) / 1e6);
+        }
         object = object_;
         epoch = epoch_;
         object_ = nullptr;

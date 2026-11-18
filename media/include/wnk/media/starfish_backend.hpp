@@ -209,6 +209,8 @@ class StarfishBackend : public MediaBackend {
     int64_t clock_out_us(bool paused) const;
     std::atomic<long long> dropped_{0}, displayed_{0}, frameready_{0};  // since the last summary
     std::atomic<int64_t> summary_at_ns_{0};
+    std::atomic<int64_t> first_frame_ns_{0};  // steady clock of this Load's first FRAMEREADY
+    std::atomic<long long> frames_total_{0};   // FRAMEREADY since Load
     bool log_next_video_ = false;  // guarded by mutex_
     std::mutex events_mutex_;
     EventFn events_;

@@ -389,7 +389,7 @@ std::string StarfishBackend::build_load_payload(const StarfishLoad &l) {
     }
     p += ",\"externalStreamingInfo\":{\"contents\":{\"codec\":" + codec + ",\"esInfo\":" + es +
          ",\"format\":\"RAW\",\"provider\":\"wnk\"" + extra + "},\"streamQualityInfo\":true,\"streamQualityInfoNonFlushable\":true,"
-         "\"audioSync\":true,\"restartStreaming\":false,\"bufferingCtrInfo\":{\"bufferMaxLevel\":0,\"bufferMinLevel\":0,"
+         "\"audioSync\":" + std::string(has_audio ? "true" : "false") + ",\"restartStreaming\":false,\"bufferingCtrInfo\":{\"bufferMaxLevel\":0,\"bufferMinLevel\":0,"
          "\"preBufferByte\":0,\"qBufferLevelAudio\":0,\"qBufferLevelVideo\":0,"
          "\"srcBufferLevelAudio\":{\"minimum\":1,\"maximum\":" + audio_buffer +
          "},\"srcBufferLevelVideo\":{\"minimum\":1,\"maximum\":8388608}}}";

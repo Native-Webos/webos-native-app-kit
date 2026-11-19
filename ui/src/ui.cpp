@@ -45,7 +45,7 @@ Ui::~Ui() {
     // Destroy the trees while the Ui (and the image source widgets may call) is still valid.
     overlay_.reset();
     root_.reset();
-    graveyard_.clear();
+    empty_graveyard();
 }
 
 // ---- sync -----------------------------------------------------------------------------------------
@@ -54,7 +54,7 @@ void Ui::sync() {
     Entry e(depth_);
     if (e.outermost()) {
         views_.clear();  // may point into the graveyard
-        graveyard_.clear();
+        empty_graveyard();
     }
     refresh();
 }
@@ -255,7 +255,7 @@ bool Ui::handle(const input::ActionEvent &ev) {
     Entry e(depth_);
     if (e.outermost()) {
         views_.clear();
-        graveyard_.clear();
+        empty_graveyard();
     }
     refresh();
     SourceScope source(focus_source_, FocusSource::Key);
@@ -320,7 +320,7 @@ View *Ui::text_input_view() {
     Entry e(depth_);
     if (e.outermost()) {
         views_.clear();
-        graveyard_.clear();
+        empty_graveyard();
     }
     refresh();
     View *v = find(text_view_);
@@ -402,7 +402,7 @@ bool Ui::handle_pointer_logical(const input::PointerEvent &e, Point p) {
     Entry entry(depth_);
     if (entry.outermost()) {
         views_.clear();
-        graveyard_.clear();
+        empty_graveyard();
     }
     refresh();
     using T = input::PointerEvent::Type;
@@ -490,7 +490,7 @@ void Ui::update(float dt) {
     Entry e(depth_);
     if (e.outermost()) {
         views_.clear();
-        graveyard_.clear();
+        empty_graveyard();
     }
     refresh();
     now_ms_ += static_cast<double>(dt) * 1000.0;
@@ -572,7 +572,7 @@ void Ui::draw() {
     Entry e(depth_);
     if (e.outermost()) {
         views_.clear();
-        graveyard_.clear();
+        empty_graveyard();
     }
     refresh();
     alpha_ = 1;
@@ -631,6 +631,17 @@ Dialog *Ui::top_dialog() const {
 }
 
 void Ui::toast(std::string text, double duration_ms) { toasts_.push_back({std::move(text), duration_ms}); }
+
+void Ui::empty_graveyard() {
+    // A destructor may retire more views (a screen saving state on the way out, a list elsewhere
+    // rebuilding on that change); take the vector first so those land in a fresh one, not in the
+    // vector being cleared, and repeat until nothing more arrives.
+    while (!graveyard_.empty()) {
+        std::vector<std::unique_ptr<View>> dead;
+        dead.swap(graveyard_);
+        dead.clear();
+    }
+}
 
 void Ui::retire(std::unique_ptr<View> v) {
     if (!v) return;

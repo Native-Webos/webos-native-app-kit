@@ -456,6 +456,40 @@ TEST("navigator: a click handler may pop the screen its button lives on") {
     CHECK_EQ(env.ui.stats().retired, size_t{0});
 }
 
+namespace {
+// A view whose destructor changes another, live part of the tree (a screen that saves state on the
+// way out and a list elsewhere rebuilding on the change) and so retires views while the graveyard
+// is being emptied.
+struct ClearsOnDestroy : View {
+    View *other;
+    int *destroyed;
+    ClearsOnDestroy(View *o, int *d) : other(o), destroyed(d) {}
+    ~ClearsOnDestroy() override {
+        other->clear_children();
+        ++*destroyed;
+    }
+};
+struct Counted : View {
+    int *destroyed;
+    explicit Counted(int *d) : destroyed(d) {}
+    ~Counted() override { ++*destroyed; }
+};
+}  // namespace
+
+TEST("ui: views retired while the graveyard empties are destroyed too (issue #42, ASan)") {
+    Env env;
+    int destroyed = 0;
+    auto &list = env.ui.root().add<Column>(0);
+    for (int i = 0; i < 9; ++i) list.add<Counted>(&destroyed);
+    auto &dying = env.ui.root().add<ClearsOnDestroy>(&list, &destroyed);
+    env.frame();
+    env.ui.root().remove_child(&dying);  // the only view in the graveyard: retiring more reallocates it
+    env.frame();
+    CHECK_EQ(destroyed, 10);
+    CHECK_EQ(list.children().size(), size_t{0});
+    CHECK_EQ(env.ui.stats().retired, size_t{0});
+}
+
 TEST("navigator: nested scope memory survives a push and pop") {
     Env env;
     auto &nav = env.ui.root().add<Navigator>();

@@ -190,6 +190,7 @@ class Ui {
  private:
     friend class View;
     void refresh();  // layout if dirty + focus sync, without destroying retired views
+    void empty_graveyard();  // destroys retired views, including any retired while doing so
     bool route(const input::ActionEvent &e);  // focused view → ancestors
     void walk(View &v, focus::ScopeId scope, Point offset, bool shown, std::vector<focus::NodeSpec> &on,
               std::vector<focus::NodeSpec> &off);

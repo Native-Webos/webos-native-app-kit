@@ -863,6 +863,30 @@ TEST("scroll view: focusing a view below the fold scrolls it into view") {
     CHECK(r.y >= 0);
 }
 
+TEST("scroll view: a horizontal one keeps the focused chip of a long row on screen") {
+    Env env;
+    auto &sv = env.ui.root().add<ScrollView>(Axis::Horizontal);
+    sv.set_size(600, 120).set_align(Align::Start, Align::Start);
+    auto &row = sv.add<Row>(20);
+    std::vector<Button *> bs;
+    for (int i = 0; i < 12; ++i) bs.push_back(&static_cast<Button &>(row.add_child(button("Season " + std::to_string(i + 1)))));
+    env.ui.focus(bs[0]);
+    env.frame();
+    CHECK(sv.max_scroll() > 0);
+    CHECK_EQ(sv.scroll_offset().y, 0.0f);
+    for (int i = 0; i < 11; ++i) env.press(Action::Right);
+    CHECK(env.ui.is_focused(bs[11]));
+    env.frames(90);
+    Rect r = bs[11]->screen_rect();
+    CHECK(r.right() <= 600);
+    CHECK(r.x >= 0);
+    for (int i = 0; i < 11; ++i) env.press(Action::Left);
+    env.frames(90);
+    r = bs[0]->screen_rect();
+    CHECK(r.x >= 0);
+    CHECK(r.right() <= 600);
+}
+
 TEST("progress bar and animation helpers move towards their targets") {
     Env env;
     auto &p = env.ui.root().add<ProgressBar>();

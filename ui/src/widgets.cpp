@@ -181,33 +181,36 @@ void Grid::layout_content(Ui &ui, const Rect &content) {
 
 // ---- ScrollView -----------------------------------------------------------------------------------
 
-ScrollView::ScrollView() { scroll_.rate = 16; }
+ScrollView::ScrollView(Axis axis) : axis_(axis) { scroll_.rate = 16; }
 
-void ScrollView::scroll_to(float y, bool animate) {
-    scroll_.target = std::clamp(y, 0.0f, max_scroll_);
+void ScrollView::scroll_to(float offset, bool animate) {
+    scroll_.target = std::clamp(offset, 0.0f, max_scroll_);
     if (!animate) scroll_.snap(scroll_.target);
 }
 
 Size ScrollView::measure_content(Ui &ui, Size available) {
+    const bool v = axis_ == Axis::Vertical;
     Size out;
     for (const auto &c : children()) {
-        const Size m = c->measure(ui, {available.w, kHuge});
+        const Size m = c->measure(ui, v ? Size{available.w, kHuge} : Size{kHuge, available.h});
         out.w = std::max(out.w, m.w);
         out.h = std::max(out.h, m.h);
     }
-    out.h = std::min(out.h, available.h);
+    if (v) out.h = std::min(out.h, available.h);
+    else out.w = std::min(out.w, available.w);
     return out;
 }
 
 void ScrollView::layout_content(Ui &ui, const Rect &content) {
-    float content_h = 0;
+    const bool v = axis_ == Axis::Vertical;
+    float extent = 0;
     for (const auto &c : children()) {
-        const Size m = c->measure(ui, {content.w, kHuge});
-        const float h = std::max(m.h, content.h);
-        c->layout(ui, {content.x, content.y, content.w, h});
-        content_h = std::max(content_h, m.h);
+        const Size m = c->measure(ui, v ? Size{content.w, kHuge} : Size{kHuge, content.h});
+        if (v) c->layout(ui, {content.x, content.y, content.w, std::max(m.h, content.h)});
+        else c->layout(ui, {content.x, content.y, std::max(m.w, content.w), content.h});
+        extent = std::max(extent, v ? m.h : m.w);
     }
-    max_scroll_ = std::max(0.0f, content_h - content.h);
+    max_scroll_ = std::max(0.0f, extent - (v ? content.h : content.w));
     scroll_.target = std::clamp(scroll_.target, 0.0f, max_scroll_);
     scroll_.value = std::clamp(scroll_.value, 0.0f, max_scroll_);
 }
@@ -217,17 +220,20 @@ void ScrollView::on_descendant_focused(Ui &ui, View *, View *focused) {
     const Rect c = content_rect();
     // Position of the focused view inside the scrolled content (nested scrolling is not combined).
     const Rect f = focused->frame();
-    const float top = f.y - c.y, bottom = f.bottom() - c.y;
+    const bool v = axis_ == Axis::Vertical;
+    const float start = v ? f.y - c.y : f.x - c.x, end = v ? f.bottom() - c.y : f.right() - c.x;
+    const float size = v ? c.h : c.w;
     float s = scroll_.target;
-    if (bottom + margin > s + c.h) s = bottom + margin - c.h;
-    if (top - margin < s) s = top - margin;
+    if (end + margin > s + size) s = end + margin - size;
+    if (start - margin < s) s = start - margin;
     scroll_to(s);
 }
 
 void ScrollView::update(Ui &, float dt) { scroll_.step(dt); }
 
 bool ScrollView::on_wheel(Ui &, float notches) {
-    if (max_scroll_ <= 0) return false;  // nothing to scroll: let an outer scroller have it
+    // Nothing to scroll, or a row: the wheel scrolls vertically, so let an outer scroller have it.
+    if (max_scroll_ <= 0 || axis_ != Axis::Vertical) return false;
     scroll_to(scroll_.target - notches * 160);
     return true;
 }

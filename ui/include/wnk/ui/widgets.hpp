@@ -64,15 +64,18 @@ class Grid : public View {
     float gap_x_, gap_y_;
 };
 
-// Vertical scrolling for content that is not a list (a details page). The single child is measured
-// with unbounded height; the view scrolls so the focused descendant stays visible.
+// Scrolling for content that is not a list (a details page, a row of season chips). The single child
+// is measured unbounded along the axis; the view scrolls so the focused descendant stays visible.
 class ScrollView : public View {
  public:
-    ScrollView();
-    Point scroll_offset() const override { return {0, scroll_.value}; }
+    explicit ScrollView(Axis axis = Axis::Vertical);
+    Point scroll_offset() const override {
+        return axis_ == Axis::Vertical ? Point{0, scroll_.value} : Point{scroll_.value, 0};
+    }
     bool clips_children() const override { return true; }
+    Axis axis() const { return axis_; }
     float max_scroll() const { return max_scroll_; }
-    void scroll_to(float y, bool animate = true);
+    void scroll_to(float offset, bool animate = true);  // along the axis
     float margin = 60;  // keep the focused view this far from the edges where possible
 
  protected:
@@ -83,6 +86,7 @@ class ScrollView : public View {
     bool on_wheel(Ui &ui, float notches) override;
 
  private:
+    Axis axis_;
     Smoothed scroll_;
     float max_scroll_ = 0;
 };

@@ -680,6 +680,14 @@ void StarfishBackend::on_event(int raw_type, long long num, const char *str) {
         if (!seen_frame_.exchange(true)) {
             first_frame_ns_ = now;
             WNK_LOGI(kCat, "first frame presented (pts %lld ns)", num);
+            // The placement again now the picture is up: on a webOS 3.9 B7 the first video after start-up (Load
+            // took 0.8 s instead of 0.05 s) came out oversized and cropped although it was placed at
+            // loadCompleted like the rest; LG seems to drop a placement made while its video path is still
+            // being set up.
+            if (acb_id_ != 0) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                place_acb_locked();
+            }
         }
         // The sink's own counters and how many FRAMEREADY callbacks came: every second for the first 10 s of a
         // Load (whether playback gets going), every 5 s after that.
@@ -825,6 +833,7 @@ bool StarfishBackend::load(const StreamFormat &format, std::string *error) {
     }
     load_completed_ = false;
     seen_frame_ = false;
+    summary_at_ns_ = 0;  // else the first summary spans back to the previous stream's frames
     presented_out_us_ = kNoTime;
     frames_total_ = 0;
     {

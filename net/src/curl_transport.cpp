@@ -199,6 +199,8 @@ class CurlTransport final : public HttpTransport {
             c.easy_setopt(h, CURLOPT_LOW_SPEED_TIME, static_cast<long>(std::max(1, (req.timeout_ms + 999) / 1000)));
         }
         c.easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(req.connect_timeout_ms));
+        // Empty disables proxies, including any from the environment (http_proxy, ...).
+        c.easy_setopt(h, CURLOPT_PROXY, req.proxy.c_str());
         c.easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
         c.easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
         if (!options_.ca_bundle.empty()) c.easy_setopt(h, CURLOPT_CAINFO, options_.ca_bundle.c_str());

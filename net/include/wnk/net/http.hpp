@@ -40,6 +40,9 @@ struct HttpRequest {
     // Retry only when the request is safe to repeat. Defaults to true for GET/HEAD/OPTIONS/PUT/DELETE
     // (see is_idempotent_method); set explicitly to override.
     std::optional<bool> idempotent;
+    // Send through this proxy ("http://host:port", "socks5h://user:pass@host:port", ...); empty: direct.
+    // It may carry credentials: transports never log it.
+    std::string proxy;
 };
 
 enum class NetError {

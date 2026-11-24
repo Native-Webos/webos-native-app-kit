@@ -1362,6 +1362,35 @@ TEST("forms: choice steps with Left/Right and OK opens the list on the current o
     CHECK(env.ui.is_focused(&c));  // focus returns to the row
 }
 
+TEST("forms: a long choice list scrolls, its options all reachable on screen") {
+    Env env;
+    auto &col = env.ui.root().add<Column>(10);
+    std::vector<std::string> options;
+    for (int i = 0; i < 30; ++i) options.push_back("Option " + std::to_string(i));
+    auto &c = col.add<Choice>("Language", options, 0);
+    c.name = "lang";
+    env.ui.focus(&c);
+    env.frame();
+    REQUIRE(env.press(Action::Confirm));
+    REQUIRE(env.ui.top_dialog() != nullptr);
+    for (int i = 0; i < 25; ++i) env.press(Action::Down);
+    env.frames(60);
+    CHECK_EQ(env.ui.focused()->name, std::string("lang.option25"));
+    const Rect r = env.ui.focused()->screen_rect();
+    CHECK(r.y >= 0);
+    CHECK(r.y + r.h <= 1080);  // scrolled into view, not left below the screen
+    env.press(Action::Confirm);
+    env.frames(30);
+    CHECK_EQ(c.selected(), 25);
+    // Opened again on that option: it shows at once.
+    REQUIRE(env.press(Action::Confirm));
+    env.frames(60);
+    CHECK_EQ(env.ui.focused()->name, std::string("lang.option25"));
+    const Rect again = env.ui.focused()->screen_rect();
+    CHECK(again.y >= 0);
+    CHECK(again.y + again.h <= 1080);
+}
+
 TEST("forms: value row runs its handler; tabs follow key focus but not pointer hover") {
     Env env;
     auto &col = env.ui.root().add<Column>(10);

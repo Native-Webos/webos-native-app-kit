@@ -270,10 +270,21 @@ void Choice::open_list(Ui &ui) {
     auto d = std::make_unique<Dialog>(label());
     Dialog *dialog = d.get();
     Button *current = nullptr;
+    // A long list would run off the screen, its last options out of reach: past kListRows it
+    // scrolls, keeping the focused option in view.
+    constexpr size_t kListRows = 9;
+    View *list = &d->body();
+    if (options_.size() > kListRows) {
+        auto &scroll = d->body().add<ScrollView>();
+        scroll.set_width(Dim::fill());
+        scroll.set_height(Dim::fixed(640));
+        list = &scroll.add<Column>(16);
+        list->set_width(Dim::fill());
+    }
     for (size_t i = 0; i < options_.size(); ++i) {
         const int index = static_cast<int>(i);
         const bool on = index == selected_;
-        auto &b = d->body().add<Button>(options_[i], [this, dialog, index](Ui &u) {
+        auto &b = list->add<Button>(options_[i], [this, dialog, index](Ui &u) {
             change(u, index);
             dialog->dismiss(u);
         });

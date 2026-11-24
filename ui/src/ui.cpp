@@ -421,6 +421,7 @@ bool Ui::handle_pointer_logical(const input::PointerEvent &e, Point p) {
             if (e.button != 1) return false;
             View *v = hit_focusable(p);
             pressed_ = v != nullptr ? v->id_ : 0;
+            pressed_ms_ = e.time_ms;
             return v != nullptr;
         }
         case T::Release: {
@@ -435,12 +436,14 @@ bool Ui::handle_pointer_logical(const input::PointerEvent &e, Point p) {
                 fm_.focus(v->id_);
                 dispatch_focus_events();
             }
-            // A click is OK on the clicked view: the same path as the remote's OK key.
+            // A click is OK on the clicked view: the same path as the remote's OK key. The press
+            // carries the time the button went down, so a view can tell a long click (a hold).
             input::ActionEvent ok;
             ok.action = input::Action::Confirm;
-            ok.source.time_ms = e.time_ms;
+            ok.source.time_ms = pressed_ms_ != 0 ? pressed_ms_ : e.time_ms;
             const bool handled = route(ok);
             ok.phase = input::Phase::Release;
+            ok.source.time_ms = e.time_ms;
             route(ok);
             return handled;
         }

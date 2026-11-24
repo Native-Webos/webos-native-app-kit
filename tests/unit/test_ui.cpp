@@ -949,6 +949,42 @@ TEST("pointer: hovering focuses, a click is OK, empty space changes nothing") {
     CHECK_EQ(clicks, 1);
 }
 
+TEST("pointer: a click's OK press carries the time the button went down") {
+    // A view can then tell a long click (a hold) from a short one, as it can a held OK key.
+    struct Recorder : View {
+        std::vector<std::pair<input::Phase, uint32_t>> oks;
+        Recorder() {
+            set_focusable(true);
+            set_width(Dim::fixed(200));
+            set_height(Dim::fixed(100));
+        }
+        bool on_action(Ui &, const input::ActionEvent &e) override {
+            if (e.action != input::Action::Confirm) return false;
+            oks.emplace_back(e.phase, e.source.time_ms);
+            return true;
+        }
+    };
+    Env env;
+    auto &row = env.ui.root().add<Row>(100);
+    row.set_align(Align::Start, Align::Start);
+    auto &rec = row.add<Recorder>();
+    env.frame();
+    auto at = [](input::PointerEvent::Type t, uint32_t ms) {
+        input::PointerEvent e = pev(t);
+        e.button = 1;
+        e.time_ms = ms;
+        return e;
+    };
+    env.ui.handle_pointer_logical(at(input::PointerEvent::Type::Press, 100), centre(rec));
+    CHECK(rec.oks.empty());  // nothing until the release: the click is decided there
+    CHECK(env.ui.handle_pointer_logical(at(input::PointerEvent::Type::Release, 900), centre(rec)));
+    REQUIRE(rec.oks.size() == 2);
+    CHECK(rec.oks[0].first == input::Phase::Press);
+    CHECK_EQ(rec.oks[0].second, 100u);
+    CHECK(rec.oks[1].first == input::Phase::Release);
+    CHECK_EQ(rec.oks[1].second, 900u);
+}
+
 TEST("pointer: an arrow key hands control back to the D-pad") {
     Env env;
     auto &row = env.ui.root().add<Row>(100);

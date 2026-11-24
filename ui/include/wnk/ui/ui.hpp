@@ -246,6 +246,7 @@ class Ui {
     std::vector<ViewId> rehovered_;  // views a frame's re-hover focused since the pointer last moved or scrolled
     Point pointer_;
     ViewId pressed_ = 0;
+    uint32_t pressed_ms_ = 0;  // when the pointer's button went down on pressed_
     FocusSource focus_source_ = FocusSource::Program;
 };
 

@@ -76,6 +76,8 @@ struct Api {
     // SDL-webOS exported window (already loaded with the app's SDL); optional, webOS 5+ only works.
     const char *(*create_window)(int type) = nullptr;
     int (*set_window)(const char *id, void *src, void *dst) = nullptr;  // SDL_bool, SDL_Rect*
+    // Optional (webOS's foreign-surface crop: original input, source region, destination region).
+    int (*set_crop)(const char *id, void *original, void *src, void *dst) = nullptr;
     void (*destroy_window)(const char *id) = nullptr;
     std::string why;
     bool tried = false;
@@ -138,6 +140,7 @@ const Api &api() {
     g_api.create_window = reinterpret_cast<decltype(g_api.create_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSCreateExportedWindow"));
     g_api.set_window = reinterpret_cast<decltype(g_api.set_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSSetExportedWindow"));
     g_api.destroy_window = reinterpret_cast<decltype(g_api.destroy_window)>(dlsym(RTLD_DEFAULT, "SDL_webOSDestroyExportedWindow"));
+    g_api.set_crop = reinterpret_cast<decltype(g_api.set_crop)>(dlsym(RTLD_DEFAULT, "SDL_webOSExportedSetCropRegion"));
     if (g_api.create_window == nullptr || g_api.set_window == nullptr || g_api.destroy_window == nullptr) {
         g_api.create_window = nullptr;
         g_api.set_window = nullptr;
@@ -1109,6 +1112,23 @@ int64_t StarfishBackend::position_us() const {
     return from_sink(splice_.unmap(out));
 }
 
+bool display_window(int src_w, int src_h, const Rect &area, int screen_w, int screen_h, DisplayWindow *out) {
+    if (src_w <= 0 || src_h <= 0 || area.empty()) return false;
+    const Rect clip = area.intersect(Rect{0, 0, static_cast<float>(screen_w), static_cast<float>(screen_h)});
+    if (clip.empty()) return false;
+    const float kx = static_cast<float>(src_w) / area.w, ky = static_cast<float>(src_h) / area.h;
+    auto px = [](float v) { return static_cast<int>(std::lround(v)); };
+    out->dst_x = px(clip.x);
+    out->dst_y = px(clip.y);
+    out->dst_w = px(clip.w);
+    out->dst_h = px(clip.h);
+    out->src_x = std::clamp(px((clip.x - area.x) * kx), 0, src_w - 1);
+    out->src_y = std::clamp(px((clip.y - area.y) * ky), 0, src_h - 1);
+    out->src_w = std::clamp(px(clip.w * kx), 1, src_w - out->src_x);
+    out->src_h = std::clamp(px(clip.h * ky), 1, src_h - out->src_y);
+    return true;
+}
+
 void StarfishBackend::set_area(const Rect &pixels) {
     std::lock_guard<std::mutex> lock(mutex_);
     area_ = pixels;
@@ -1121,22 +1141,32 @@ void StarfishBackend::place_locked() {
         return;
     }
     if (window_id_.empty() || !usable()) return;
-    // Source: the coded picture (or the area until the stream is known); destination: the area.
-    SdlRect src{0, 0, format_.video ? format_.video->width : static_cast<int>(area_.w),
-                format_.video ? format_.video->height : static_cast<int>(area_.h)};
-    SdlRect dst{static_cast<int>(area_.x), static_cast<int>(area_.y), static_cast<int>(area_.w), static_cast<int>(area_.h)};
-    const int rc = api().set_window(window_id_.c_str(), &src, &dst);
-    WNK_LOGI(kCat, "place %dx%d -> %d,%d %dx%d rv=%d", src.w, src.h, dst.x, dst.y, dst.w, dst.h, rc);
+    // Source: the coded picture (or the area until the stream is known), the part of it on the screen
+    // when the area goes past the screen's edges; destination: the area, clipped to the screen.
+    const int pic_w = format_.video ? format_.video->width : static_cast<int>(area_.w);
+    const int pic_h = format_.video ? format_.video->height : static_cast<int>(area_.h);
+    DisplayWindow w;
+    if (!display_window(pic_w, pic_h, area_, 1920, 1080, &w)) return;
+    SdlRect src{w.src_x, w.src_y, w.src_w, w.src_h};
+    SdlRect dst{w.dst_x, w.dst_y, w.dst_w, w.dst_h};
+    SdlRect whole{0, 0, pic_w, pic_h};
+    const bool crop = api().set_crop != nullptr;
+    const int rc = crop ? api().set_crop(window_id_.c_str(), &whole, &src, &dst) : api().set_window(window_id_.c_str(), &src, &dst);
+    WNK_LOGI(kCat, "place%s %d,%d %dx%d of %dx%d -> %d,%d %dx%d rv=%d", crop ? " (crop region)" : "", src.x, src.y, src.w, src.h,
+             pic_w, pic_h, dst.x, dst.y, dst.w, dst.h, rc);
 }
 
 void StarfishBackend::place_acb_locked() {
     if (acb_id_ == 0 || area_.w <= 0 || area_.h <= 0) return;
-    // Source: the coded picture; destination: the area, in the 1920x1080 app space ACB uses (Kodi).
-    const long src_w = format_.video ? format_.video->width : 1920, src_h = format_.video ? format_.video->height : 1080;
-    const int rc = acb_api().set_custom_display_window(acb_id_, 0, 0, src_w, src_h, static_cast<long>(area_.x),
-                                                       static_cast<long>(area_.y), static_cast<long>(area_.w),
-                                                       static_cast<long>(area_.h), false, &acb_task_);
-    WNK_LOGI(kCat, "ACB place %ldx%ld -> %.0f,%.0f %.0fx%.0f rv=%d", src_w, src_h, area_.x, area_.y, area_.w, area_.h, rc);
+    // Source: the coded picture (its part on the screen); destination: the area clipped to the screen,
+    // in the 1920x1080 app space ACB uses (Kodi).
+    const int pic_w = format_.video ? format_.video->width : 1920, pic_h = format_.video ? format_.video->height : 1080;
+    DisplayWindow w;
+    if (!display_window(pic_w, pic_h, area_, 1920, 1080, &w)) return;
+    const int rc = acb_api().set_custom_display_window(acb_id_, w.src_x, w.src_y, w.src_w, w.src_h, w.dst_x, w.dst_y, w.dst_w,
+                                                       w.dst_h, false, &acb_task_);
+    WNK_LOGI(kCat, "ACB place %d,%d %dx%d of %dx%d -> %d,%d %dx%d rv=%d", w.src_x, w.src_y, w.src_w, w.src_h, pic_w, pic_h,
+             w.dst_x, w.dst_y, w.dst_w, w.dst_h, rc);
 }
 
 }  // namespace wnk::media

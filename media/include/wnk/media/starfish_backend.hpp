@@ -92,6 +92,17 @@ enum class AudioStack : uint8_t { Liblxa, LgAudioSink, AudioSinkNew, AdecSink, O
 // What shows the decoded picture.
 enum class VideoPlane : uint8_t { None, ExportedWindow, Acb };
 
+// What a video area shows of a src_w x src_h picture on a screen_w x screen_h screen: the area
+// clipped to the screen, and the part of the picture that lands there. LG's display window will not
+// place a picture past the screen's edges (it shrinks the area instead), so a zoomed, filled or
+// cropped picture is placed as this source rectangle on this destination. False when nothing of the
+// area is on the screen.
+struct DisplayWindow {
+    int src_x = 0, src_y = 0, src_w = 0, src_h = 0;
+    int dst_x = 0, dst_y = 0, dst_w = 0, dst_h = 0;
+};
+bool display_window(int src_w, int src_h, const Rect &area, int screen_w, int screen_h, DisplayWindow *out);
+
 // Load payload inputs, for build_load_payload.
 struct StarfishLoad {
     std::string app_id;

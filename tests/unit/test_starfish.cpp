@@ -297,3 +297,41 @@ TEST("starfish: the PCM lead follows the audio stack and the sound output") {
     CHECK_EQ(StarfishBackend::sound_output_from_reply(R"({"returnValue":false})"), std::string());
     CHECK_EQ(StarfishBackend::sound_output_from_reply("junk"), std::string());
 }
+
+TEST("starfish: display window inside the screen is the whole picture") {
+    wnk::media::DisplayWindow w;
+    CHECK(wnk::media::display_window(1440, 1080, wnk::Rect{240, 0, 1440, 1080}, 1920, 1080, &w));
+    CHECK_EQ(w.src_x, 0);
+    CHECK_EQ(w.src_w, 1440);
+    CHECK_EQ(w.src_h, 1080);
+    CHECK_EQ(w.dst_x, 240);
+    CHECK_EQ(w.dst_w, 1440);
+}
+
+TEST("starfish: display window past the screen shows the part of the picture on it") {
+    wnk::media::DisplayWindow w;
+    // A 4:3 picture cropped to its 16:9 middle: 1920x1440 at y -180 shows rows 135..945.
+    CHECK(wnk::media::display_window(1440, 1080, wnk::Rect{0, -180, 1920, 1440}, 1920, 1080, &w));
+    CHECK_EQ(w.dst_x, 0);
+    CHECK_EQ(w.dst_y, 0);
+    CHECK_EQ(w.dst_w, 1920);
+    CHECK_EQ(w.dst_h, 1080);
+    CHECK_EQ(w.src_x, 0);
+    CHECK_EQ(w.src_y, 135);
+    CHECK_EQ(w.src_w, 1440);
+    CHECK_EQ(w.src_h, 810);
+    // Zoom 200 % of a 1080p picture: its middle quarter.
+    CHECK(wnk::media::display_window(1920, 1080, wnk::Rect{-960, -540, 3840, 2160}, 1920, 1080, &w));
+    CHECK_EQ(w.src_x, 480);
+    CHECK_EQ(w.src_y, 270);
+    CHECK_EQ(w.src_w, 960);
+    CHECK_EQ(w.src_h, 540);
+    CHECK_EQ(w.dst_w, 1920);
+}
+
+TEST("starfish: display window off the screen or empty is refused") {
+    wnk::media::DisplayWindow w;
+    CHECK(!wnk::media::display_window(1920, 1080, wnk::Rect{2000, 0, 100, 100}, 1920, 1080, &w));
+    CHECK(!wnk::media::display_window(0, 1080, wnk::Rect{0, 0, 1920, 1080}, 1920, 1080, &w));
+    CHECK(!wnk::media::display_window(1920, 1080, wnk::Rect{0, 0, 0, 1080}, 1920, 1080, &w));
+}

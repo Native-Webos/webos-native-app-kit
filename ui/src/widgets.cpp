@@ -382,7 +382,9 @@ Size Label::measure_content(Ui &ui, Size available) {
 void Label::layout_content(Ui &ui, const Rect &content) {
     const render::Renderer &r = ui.renderer();
     const render::TextStyle s = style(ui);
-    if (max_lines_ == 1 && text_.find('\n') == std::string::npos && r.measure_text(s, text_) <= content.w) {
+    // A frame at the measured width can come back a hair narrower through the parents' padding and
+    // gaps (float rounding): half a unit of slack, or the line would wrap and be ellipsised.
+    if (max_lines_ == 1 && text_.find('\n') == std::string::npos && r.measure_text(s, text_) <= content.w + 0.5f) {
         lines_.assign(1, text_);
     } else {
         lines_ = wrap(r, s, text_, content.w, max_lines_);

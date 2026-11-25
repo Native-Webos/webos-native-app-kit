@@ -314,6 +314,34 @@ TEST("label: single line measures at natural width and draws at its baseline") {
     CHECK_EQ(env.r.texts[0].baseline.y, 32.0f);
 }
 
+TEST("label: a single line laid out at its own measured width is drawn whole") {
+    // Its frame comes back through the parents' padding and gaps: float rounding can make it a hair
+    // narrower than the text measured, which must not wrap or ellipsise the line ("tone-3…").
+    int cut = 0, tried = 0;
+    for (float size = 17; size <= 33; size += 1) {
+        for (float pad : {10.0f, 13.3f, 24.0f, 37.7f}) {
+            for (const char *text : {"tone-3min", "Mountain-Trip 2160p", "a-b-c-d-e-f", "x"}) {
+                Env env;
+                auto &row = env.ui.root().add<Row>(20);
+                row.set_align(Align::Stretch, Align::Start);
+                row.add<View>().set_size(64, 64);
+                auto &col = row.add<Column>(2);
+                col.set_padding(Insets::xy(pad, 10));
+                col.set_align(Align::Start, Align::Center);
+                auto &l = col.add<Label>(text);
+                l.set_font_size(size);
+                l.set_bold(true);
+                row.add<View>().set_width(Dim::fill());
+                env.frame();
+                ++tried;
+                if (!env.r.drew_text(text)) ++cut;
+            }
+        }
+    }
+    CHECK(tried > 200);
+    CHECK_EQ(cut, 0);
+}
+
 // ---- focus and input ------------------------------------------------------------------------------
 
 TEST("focus: buttons register as nodes, arrows move by geometry, OK clicks") {
